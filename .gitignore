@@ -1,0 +1,15 @@
+# 本地运行状态、凭据与原始验证记录不得进入 Git。
+.DS_Store
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite*
+*.log
+.local/
+.cache/
+node_modules/
+dist/
+coverage.out
+turncourier.toml
