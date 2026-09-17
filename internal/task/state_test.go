@@ -77,27 +77,21 @@ func TestClosedIsTerminal(t *testing.T) {
 	}
 }
 
-// TestResumeAfterUnsent 确认只有派发中或投递不确定的任务能恢复，且只能回到 Completed 或 WaitingInput。
+// TestResumeAfterUnsent 对 8 个已知状态加一个未知状态穷举 from × resume：只有派发中或投递不确定的任务
+// 能恢复，且只能回到 Completed 或 WaitingInput；其余组合必须返回 ErrInvalidTransition 并写明两个状态名。
 func TestResumeAfterUnsent(t *testing.T) {
-	valid := []struct{ from, resume State }{
-		{Running, Completed},
-		{DeliveryUncertain, WaitingInput},
-		{Running, WaitingInput},
-		{DeliveryUncertain, Completed},
-	}
-	for _, tc := range valid {
-		if got, err := ResumeAfterUnsent(tc.from, tc.resume); err != nil || got != tc.resume {
-			t.Errorf("ResumeAfterUnsent(%s, %s) = %q, %v", tc.from, tc.resume, got, err)
+	states := append(allStates, "BOGUS")
+	for _, from := range states {
+		for _, resume := range states {
+			got, err := ResumeAfterUnsent(from, resume)
+			if (from == Running || from == DeliveryUncertain) && (resume == Completed || resume == WaitingInput) {
+				if err != nil || got != resume {
+					t.Errorf("ResumeAfterUnsent(%s, %s) = %q, %v; want %s", from, resume, got, err, resume)
+				}
+				continue
+			}
+			assertInvalid(t, err, string(from), string(resume))
 		}
-	}
-	invalid := []struct{ from, resume State }{
-		{Completed, Completed},
-		{Running, Running},
-		{Running, Closed},
-	}
-	for _, tc := range invalid {
-		_, err := ResumeAfterUnsent(tc.from, tc.resume)
-		assertInvalid(t, err, string(tc.from), string(tc.resume))
 	}
 }
 
