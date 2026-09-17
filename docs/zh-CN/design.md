@@ -1,6 +1,6 @@
 # TurnCourier v0.1.0-alpha 设计
 
-状态：用户已批准设计及 Phase 0–1。本文将批准内容落盘；接口验证中的细化记录在 `research/phase-01.md`，不得把候选能力写成已实现功能。
+状态：设计和 Phase 0–1 已批准并完成核心验证；Phase 2 工程骨架（help、version、doctor 与质量门槛）已在本地实现并验证，GitHub 公开与远端 CI 结果见 `plans/phase-02.md`。接口验证中的细化记录在 `research/phase-01.md`，不得把候选能力写成已实现功能。
 
 ## 产品与阶段
 
@@ -8,7 +8,7 @@ TurnCourier — Email bridge for Codex and Claude Code。
 
 本机程序启动 Agent 任务，按配置将完成、等待输入、错误及审批状态发送到独立的 QQ 机器人邮箱所服务的个人收件邮箱。合法邮件回复成为原会话的下一条用户消息。首版单用户，数据模型预留 owner；支持自建 CLI 会话，桌面兼容只作为实验项目。首发 macOS，核心保持跨平台。Go 单模块、后台程序加 CLI；稳定后增加 launchd 安装和 macOS 菜单栏。
 
-当前授权：Phase 0 保存设计和评估竞品；Phase 1 验证原生接口。公开工程骨架、完整实现与发布属于后续阶段。先在个人 GitHub 账户建立公开仓库，成熟后可迁移组织。首次公开前扫描密钥；Apache-2.0；中英双语 README，英文标识符，必要的中文代码注释。
+当前授权：Phase 0 保存设计和评估竞品；Phase 1 验证原生接口；Phase 2 建立并公开工程骨架。完整邮件实现和正式发布属于后续阶段。先在个人 GitHub 账户建立公开仓库，成熟后可迁移组织。首次公开前扫描密钥；Apache-2.0；中英双语 README，英文标识符，必要的中文代码注释。
 
 ## 已确定的产品边界
 
@@ -80,7 +80,7 @@ turncourier/
 ├── cmd/turncourier/main.go           # 产品入口
 ├── internal/
 │   ├── app/                         # 依赖装配和生命周期
-│   ├── cli/                         # init、doctor、run、tasks、logs
+│   ├── cli/                         # init、doctor、run、tasks、logs、service
 │   ├── agent/
 │   │   ├── adapter.go               # 会话与事件契约
 │   │   ├── codex/                   # app-server 适配
@@ -104,11 +104,14 @@ turncourier/
 │   ├── telemetry/                   # 主动开启的匿名指标
 │   └── platform/darwin/             # macOS 集成
 ├── tools/commentcheck/              # 中文函数注释检查
+├── tools/covercheck/                # 全部手写代码的覆盖率门槛
 ├── configs/turncourier.example.toml
 ├── docs/
 │   ├── zh-CN/
 │   │   ├── design.md                # 本设计
-│   │   └── research/phase-01.md      # 当前验证报告
+│   │   ├── development.md           # 开发指南
+│   │   ├── plans/                   # 各阶段实施清单与验证记录
+│   │   └── research/phase-01.md      # Phase 0–1 验证报告
 │   └── en/                          # 英文架构文档
 ├── experiments/phase01/              # 可复现的接口研究脚本，非产品实现
 ├── tests/
@@ -137,4 +140,4 @@ CI 要求 gofmt、go vet、静态检查、单元/集成测试、race、依赖漏
 
 发布前，Codex 和 Claude 各连续十轮邮件交互，覆盖断网恢复、重复/伪造/过期邮件、忙时 FIFO、隐私过滤。发布 v0.1.0-alpha macOS 二进制与 SHA-256；跨平台包和 Homebrew 随后推进。代码编译成功不能替代真实验收。
 
-开发顺序：竞品与接口研究 → 公开工程骨架 → 配置/存储/状态机 → 邮件闭环 → Codex → Claude → 安全与恢复 → 真实验收 → 发布。当前仅执行前两项研究工作；产品实现从下一阶段开始。
+开发顺序：竞品与接口研究 → 公开工程骨架 → 配置/存储/状态机 → 邮件闭环 → Codex → Claude → 安全与恢复 → 真实验收 → 发布。当前执行工程骨架，先提供环境诊断与可执行的质量门槛。

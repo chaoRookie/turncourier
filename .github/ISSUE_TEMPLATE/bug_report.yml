@@ -1,0 +1,75 @@
+name: Bug report / 缺陷报告
+description: Report incorrect behavior in the current CLI, build or scripts. / 报告当前 CLI、构建或脚本的错误行为。
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste QQ Mail authorization codes, tokens, passwords, real email content, Agent session transcripts or local absolute paths.** Replace them with synthetic values such as `user@example.invalid` or `/path/to/repo`.
+
+        Do not report security vulnerabilities here. Use [private vulnerability reporting](https://github.com/chaoRookie/turncourier/security/advisories/new).
+
+        TurnCourier is pre-alpha. Only `help`, `version` and `doctor` are implemented; `init`, `run`, `tasks`, `logs` and `service` exiting with code 2 is expected.
+
+        **请勿粘贴 QQ 邮箱授权码、令牌、密码、真实邮件内容、Agent 会话内容或本机绝对路径。** 请改用 `user@example.invalid`、`/path/to/repo` 等合成值。
+
+        安全漏洞不要在这里提交，请使用[私密漏洞报告](https://github.com/chaoRookie/turncourier/security/advisories/new)。
+
+        TurnCourier 处于 pre-alpha 阶段，只实现了 `help`、`version`、`doctor`；`init`、`run`、`tasks`、`logs`、`service` 返回退出码 2 属于预期行为。
+  - type: textarea
+    id: version
+    attributes:
+      label: turncourier version output / 版本输出
+      description: Output of `turncourier version`. If you built from source, also add the commit from `git rev-parse --short HEAD`. / `turncourier version` 的输出；从源码构建时，另附 `git rev-parse --short HEAD` 的提交号。
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture / 操作系统与架构
+      description: For example the OS version plus the output of `uname -m`. / 例如系统版本加上 `uname -m` 的输出。
+      placeholder: macOS 15, arm64
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce with synthetic data / 使用合成数据的复现步骤
+      description: Exact commands, starting from a clean checkout. Use only synthetic data. / 从干净的检出开始列出确切命令，只使用合成数据。
+      placeholder: |
+        1. make build
+        2. ./dist/turncourier doctor --json
+        3. echo $?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result / 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result / 实际结果
+      description: Include the exit code and the redacted output. / 包含退出码和脱敏后的输出。
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor --json output (optional) / doctor --json 输出（可选）
+      description: The report lists the platform, tool statuses and versions without executable paths; still review it before pasting. Exit code 1 on platforms other than macOS or with a missing tool is expected. / 报告只列出平台、工具状态和版本，不含可执行文件路径，粘贴前仍请检查。非 macOS 平台或缺少工具时退出码为 1 属于预期。
+      render: json
+    validations:
+      required: false
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction / 脱敏确认
+      options:
+        - label: This report contains no authorization codes, tokens, passwords, real email content, Agent session transcripts or local absolute paths. / 本报告不含授权码、令牌、密码、真实邮件内容、Agent 会话内容或本机绝对路径。
+          required: true

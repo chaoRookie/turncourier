@@ -1,0 +1,52 @@
+name: Feature request / 功能建议
+description: Propose a new capability or a change in scope. / 提议新能力或范围调整。
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read the [approved design](https://github.com/chaoRookie/turncourier/blob/main/docs/zh-CN/design.md) first. It defines the first-release scope (macOS, Codex CLI, Claude Code CLI and QQ Mail), product boundaries (for example, email replies cannot approve tool permissions) and the development order. Most of it is planned and not implemented yet.
+
+        Do not include credentials, real email content, Agent session transcripts or local absolute paths.
+
+        请先阅读[已批准设计](https://github.com/chaoRookie/turncourier/blob/main/docs/zh-CN/design.md)。它规定了首版范围（macOS、Codex CLI、Claude Code CLI、QQ 邮箱）、产品边界（例如邮件回复不能批准工具权限）和开发顺序，其中大部分仍是规划，尚未实现。
+
+        请勿包含凭据、真实邮件内容、Agent 会话内容或本机绝对路径。
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case / 使用场景
+      description: What are you trying to do, and what stops you today? / 你想完成什么？目前卡在哪里？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior / 建议的行为
+      description: The commands, output or workflow you expect. / 你期望的命令、输出或流程。
+    validations:
+      required: true
+  - type: textarea
+    id: design-scope
+    attributes:
+      label: Relation to the design / 与设计范围的关系
+      description: Which part of design.md this fits, or why the scope should change. / 对应 design.md 的哪一部分，或为什么需要调整范围。
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / 考虑过的替代方案
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation / 确认
+      options:
+        - label: I have read design.md and checked the current scope. / 我已阅读 design.md 并了解当前范围。
+          required: true
+        - label: This request contains no credentials, real email content, Agent session transcripts or local absolute paths. / 本建议不含凭据、真实邮件内容、Agent 会话内容或本机绝对路径。
+          required: true

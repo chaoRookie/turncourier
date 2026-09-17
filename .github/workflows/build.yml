@@ -1,0 +1,49 @@
+name: Candidate build
+
+# 仅手动构建候选产物，真实邮箱验收前不自动发布正式版本。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Run quality and vulnerability gates
+        run: |
+          make check
+          make security
+      - name: Build both macOS architectures and checksums
+        env:
+          CGO_ENABLED: '0'
+          GOOS: darwin
+        run: |
+          mkdir -p dist
+          version="0.1.0-dev.${GITHUB_SHA:0:7}"
+          for arch in arm64 amd64; do
+            GOARCH="$arch" go build -trimpath \
+              -ldflags "-X github.com/chaoRookie/turncourier/internal/cli.Version=$version" \
+              -o "dist/turncourier-darwin-$arch" ./cmd/turncourier
+          done
+          cd dist
+          shasum -a 256 turncourier-darwin-arm64 turncourier-darwin-amd64 > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: turncourier-macos-candidate
+          path: |
+            dist/turncourier-darwin-arm64
+            dist/turncourier-darwin-amd64
+            dist/SHA256SUMS
+          retention-days: 14
+          if-no-files-found: error
