@@ -409,11 +409,11 @@ func Load(paths Paths, getenv func(string) string) (Config, error)
 
 默认值：`imap_host = imap.qq.com`、`imap_port = 993`、`smtp_host = smtp.qq.com`、`smtp_port = 465`、`events = [waiting_input, failed, turn_completed]`、`token_ttl = 168h`。
 
-- [ ] **Step 1：写失败的测试（`paths_test.go`）。**
+- [x] **Step 1：写失败的测试（`paths_test.go`）。**
   - 未设置环境变量、`userConfigDir` 返回 `/home/u/.config` → `ConfigFile=/home/u/.config/TurnCourier/turncourier.toml`，`DataDir=/home/u/.config/TurnCourier`，`Database=.../turncourier.db`；
   - `TURNCOURIER_CONFIG=/abs/c.toml`、`TURNCOURIER_DATA_DIR=/abs/data` 分别覆盖；
   - 两个变量为相对路径时报错；`userConfigDir` 报错且未设置变量时报错。
-- [ ] **Step 2：写失败的测试（`config_test.go`）。** 用 `t.TempDir()` 写入 0600 文件后调用 `Load`：
+- [x] **Step 2：写失败的测试（`config_test.go`）。** 用 `t.TempDir()` 写入 0600 文件后调用 `Load`：
   - 加载 `configs/turncourier.example.toml` 的副本成功，字段与示例一致；
   - 只写必填字段时得到上述默认值；
   - 缺少 `mailbox.address`、`recipient.address`，或 `allowed_senders` 为空时报错，而且三个错误在同一个返回值中都能找到；
@@ -426,10 +426,12 @@ func Load(paths Paths, getenv func(string) string) (Config, error)
   - 文件不存在时 `errors.Is(err, ErrNotFound)`；文件超过 1 MiB 报错；不是常规文件（目录）报错；
   - 仅 Unix：权限 0622、0602 报错，0600、0644 通过；
   - 所有错误文本都不包含 `t.TempDir()` 路径。
-- [ ] **Step 3：** `go test ./internal/config/` 失败。
-- [ ] **Step 4：实现。** `go get github.com/BurntSushi/toml@v1.6.0`。读取时先用 `os.Stat` 检查常规文件与大小，再调用 `checkFileOwner(info)`（unix 版本比较 `Stat_t.Uid == os.Getuid()` 并检查 `mode&0o022 == 0`；other 版本直接返回 nil），然后 `toml.NewDecoder(io.LimitReader(f, 1<<20+1)).Decode(&raw)`，读取 `md.Undecoded()`。`raw` 结构使用 `toml` 标签，端口用 `*int` 区分未设置与 0。
-- [ ] **Step 5：** `go test -race ./internal/config/` 通过，覆盖率 ≥ 90%；`GOOS=windows go vet ./internal/config/` 通过；`make comments` 通过。
-- [ ] **Step 6：** `git add configs internal/config go.mod go.sum && git commit -m "feat(config): load and validate TOML configuration"`
+- [x] **Step 3：** `go test ./internal/config/` 失败。
+- [x] **Step 4：实现。** `go get github.com/BurntSushi/toml@v1.6.0`。读取时先用 `os.Stat` 检查常规文件与大小，再调用 `checkFileOwner(info)`（unix 版本比较 `Stat_t.Uid == os.Getuid()` 并检查 `mode&0o022 == 0`；other 版本直接返回 nil），然后 `toml.NewDecoder(io.LimitReader(f, 1<<20+1)).Decode(&raw)`，读取 `md.Undecoded()`。`raw` 结构使用 `toml` 标签，端口用 `*int` 区分未设置与 0。
+- [x] **Step 5：** `go test -race ./internal/config/` 通过，覆盖率 ≥ 90%；`GOOS=windows go vet ./internal/config/` 通过；`make comments` 通过。
+- [x] **Step 6：** `git add configs internal/config go.mod go.sum && git commit -m "feat(config): load and validate TOML configuration"`
+
+**实施说明：** 权限用例 0622 与 0602 都带「其他用户可写」位，把掩码收窄成 `mode&0o002` 仍能通过（变异测试验证），因此在 Step 2 的权限用例中增加只让组可写的 0620，使掩码的两个位都被钉住。
 
 ### Task 6：SQLite 打开与迁移
 
