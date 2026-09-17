@@ -252,6 +252,8 @@ make build
 shasum -a 256 -c SHA256SUMS
 ```
 
+`gh run download`、`unzip` 和 Finder 解压会保留可执行权限；其他工具（例如 Python `zipfile`）可能丢失，需要 `chmod +x`。二进制只有链接器生成的临时签名，没有经过 Apple 公证，经浏览器下载时可能被 Gatekeeper 拦截。
+
 候选构建不是正式发布：
 
 - 它不创建 tag，也不创建 GitHub Release，artifact 到期后会被删除。
