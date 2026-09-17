@@ -241,11 +241,11 @@ func (s State) Valid() bool
 func Next(from State, event Event) (State, error)
 ```
 
-- [ ] **Step 1：写失败的测试。** 与 Task 1 相同的方法：测试文件中写独立期望矩阵，穷举 5 个状态 × 5 个事件；覆盖未知状态、两个终态对所有事件非法、`Valid` 的已知与未知输入。
-- [ ] **Step 2：** `go test ./internal/queue/` 编译失败。
-- [ ] **Step 3：** 按契约实现。
-- [ ] **Step 4：** `go test -race -cover ./internal/queue/` 通过且覆盖率 100%。
-- [ ] **Step 5：** `git commit -m "feat(queue): add reply queue state machine"`
+- [x] **Step 1：写失败的测试。** 与 Task 1 相同的方法：测试文件中写独立期望矩阵，穷举 5 个状态 × 5 个事件；覆盖未知状态、两个终态对所有事件非法、`Valid` 的已知与未知输入。
+- [x] **Step 2：** `go test ./internal/queue/` 编译失败。
+- [x] **Step 3：** 按契约实现。
+- [x] **Step 4：** `go test -race -cover ./internal/queue/` 通过且覆盖率 100%。
+- [x] **Step 5：** `git commit -m "feat(queue): add reply queue state machine"`
 
 ### Task 3：质量门槛调整
 
