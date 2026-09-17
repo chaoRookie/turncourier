@@ -266,6 +266,8 @@ check: fmt-check vet modverify comments test lint
 - [x] **Step 2：** `make modverify` 输出 `all modules verified`；`make check` 通过。
 - [x] **Step 3：** `git commit -m "build: verify module checksums in make check"`
 
+**实施说明：** `check` 链变化使 6 处枚举子目标的文档过时（`README.md`、`README.zh-CN.md`、`CONTRIBUTING.md` 两处、`docs/zh-CN/development.md`、`docs/en/architecture.md`），另有 3 处 make 目标表格缺 `modverify` 行（两个 README 与 `development.md`）。本任务范围只允许改 `Makefile`，故不在此同步文档；上述位置已逐一写入 Task 11 Step 2/3/4/5，并由 Step 6 的 grep 断言兜底。
+
 ### Task 4：邮箱地址规范化
 
 **Files:**
@@ -761,11 +763,17 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
 - Modify: `internal/cli/cli.go`、`internal/cli/cli_test.go`、`cmd/turncourier/main_test.go`、`README.md`、`README.zh-CN.md`、`docs/en/architecture.md`、`docs/zh-CN/development.md`、`docs/zh-CN/design.md`、`CONTRIBUTING.md`、`CHANGELOG.md`、`AGENTS.md`
 
 - [ ] **Step 1：** 帮助描述由「Phase 2 工程骨架：…」改为「pre-alpha：当前没有邮件收发、任务执行或后台服务能力。」，规划命令的提示去掉阶段号；相应测试断言改为检查 `pre-alpha`。`go test ./cmd/... ./internal/cli/` 通过。
-- [ ] **Step 2：** README 中英文同步：状态说明（配置、存储、状态机已实现但尚未接入命令）、代码规则中的依赖说明、实际文件树（新增 `configs/`、`internal/task`、`internal/queue`、`internal/config`、`internal/store/sqlite`、`tests/integration`、`docs/zh-CN/plans/phase-03.md`），并用 `git ls-files --cached --others --exclude-standard | sort` 核对。
-- [ ] **Step 3：** `docs/en/architecture.md`：当前范围、包与依赖方向（`store/sqlite → task, queue`；`config`、`task`、`queue` 互不依赖，也不依赖存储）、持久化与恢复语义、依赖列表。
-- [ ] **Step 4：** `docs/zh-CN/development.md`：依赖政策与许可证记录、`modverify`、配置文件与数据目录位置、SQLite 测试约定（临时目录、真实数据库、触发器注入故障）、集成测试目录、模糊测试的本地运行方式。
-- [ ] **Step 5：** `CONTRIBUTING.md` 依赖规则改为「新增依赖须在实施清单或 issue 中说明理由与许可证」；`CHANGELOG.md` 在 `[Unreleased]` 增加 Phase 3 条目；`AGENTS.md` 当前范围改为「已实现配置、存储与状态机，尚未接入邮件与 Agent」；`design.md` 状态行更新。
-- [ ] **Step 6：** `git diff --check` 通过；在全部文档中检索本机路径与个人信息无结果。
+- [ ] **Step 2：** README 中英文同步：状态说明（配置、存储、状态机已实现但尚未接入命令）、代码规则中的依赖说明、实际文件树（新增 `configs/`、`internal/task`、`internal/queue`、`internal/config`、`internal/store/sqlite`、`tests/integration`、`docs/zh-CN/plans/phase-03.md`），并用 `git ls-files --cached --others --exclude-standard | sort` 核对；两个 README 的 make 目标表格增加 `make modverify` 行，`make check` 行（`README.md`、`README.zh-CN.md` 各一处）改为 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint`。
+- [ ] **Step 3：** `docs/en/architecture.md`：当前范围、包与依赖方向（`store/sqlite → task, queue`；`config`、`task`、`queue` 互不依赖，也不依赖存储）、持久化与恢复语义、依赖列表；「Quality gates and CI」一节开头列举 `make check` 子目标的句子补上 `modverify`，并加一条说明 `go mod verify` 校验 `go.sum` 哈希。
+- [ ] **Step 4：** `docs/zh-CN/development.md`：依赖政策与许可证记录、`modverify`（「常用 make 目标」表格新增 `make modverify` 行，并把 `make check` 行的子目标链补上 `modverify`）、配置文件与数据目录位置、SQLite 测试约定（临时目录、真实数据库、触发器注入故障）、集成测试目录、模糊测试的本地运行方式。
+- [ ] **Step 5：** `CONTRIBUTING.md` 依赖规则改为「新增依赖须在实施清单或 issue 中说明理由与许可证」，并把英文与中文两处「提交前检查」表格的 `make check` 行补上 `modverify`；`CHANGELOG.md` 在 `[Unreleased]` 增加 Phase 3 条目；`AGENTS.md` 当前范围改为「已实现配置、存储与状态机，尚未接入邮件与 Agent」；`design.md` 状态行更新。
+- [ ] **Step 6：** `git diff --check` 通过；在全部文档中检索本机路径与个人信息无结果；下面的断言无输出，确认没有文档漏掉 `check` 链的新子目标：
+
+```sh
+# 同时出现 fmt-check 与 lint 的行就是在枚举 check 链，这些行都必须含 modverify。
+grep -rn fmt-check README.md README.zh-CN.md CONTRIBUTING.md \
+  docs/en/architecture.md docs/zh-CN/development.md | grep lint | grep -v modverify
+```
 - [ ] **Step 7：** `git commit -m "docs: document phase 3 configuration, storage and state machines"`
 
 ### Task 12：全量验证、审查与合并
