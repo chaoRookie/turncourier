@@ -103,9 +103,15 @@ go 1.27.1
 - 私密漏洞报告已启用（API 返回 `enabled: true`）。
 - 首次推送的远端结果：CI 工作流 `quality (ubuntu-24.04)`、`quality (macos-15)` 成功；Security 工作流 `security` 成功。
 - `main` 分支保护：必需检查为上述三项（GitHub Actions），要求分支与 main 保持最新，禁止强制推送与删除；未强制管理员，便于维护者直接提交文档。
-- Candidate build 为手动工作流，本阶段未触发。
+- Candidate build 为手动工作流，公开时未触发；首次运行见下方「公开后维护」。
+
+### 公开后维护：Actions 升级
+
+- Dependabot PR #1–#3 将 actions/checkout 5.1.0→7.0.1、actions/setup-go 6.5.0→7.0.0、actions/upload-artifact 4.6.2→7.0.1。评审逐一核对：新 SHA 属于官方仓库并与版本标签一致；中间各版本发布说明与新旧 `action.yml` 的输入、默认值和运行时变化对本仓库用法无影响（checkout 与 setup-go 的 `action.yml` 未变；upload-artifact 运行时由 node20 改为 node24）。
+- 依次更新分支、三项必需检查通过后 squash 合并。合并后 main 上 CI 与 Security 成功。
+- Candidate build 首次运行：先在 #3 分支单独验证 upload-artifact，再在合并后的 main（`9cc5bd7`）运行，均成功。产物含两个二进制与 `SHA256SUMS`，校验通过；zip 记录 755 权限，`gh run download`、`unzip`、`ditto` 解压后保留可执行位（Python `zipfile` 不保留）；arm64 二进制输出 `turncourier 0.1.0-dev.9cc5bd7`，`go version -m` 显示 go1.27.1、`-trimpath`、`CGO_ENABLED=0`。
+- 备注：setup-go 7.0.0 打包的 undici 与 brace-expansion 有已公开安全公告，旧版 6.5.0 同样受影响，本仓库输入不触及相关代码；上游 main 已修复但尚未发版，等待 Dependabot 提出补丁版本。
 
 ### 尚未运行或尚未实现
 
-- Dependabot 在公开后提出 actions/checkout 7.0.1、actions/setup-go 7.0.0、actions/upload-artifact 7.0.1 三个大版本升级 PR，尚未评审或合并。
 - 完整邮件收发、配置、Keychain、SQLite、Agent 适配器与真实邮箱验收：属于后续阶段，未实现。
