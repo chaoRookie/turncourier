@@ -289,7 +289,7 @@ func NormalizeAddress(raw string) (string, error)
 
 规则：去除首尾空白；总长 ≤ 254；恰好一个 `@`；本地部分 1–64 个字符，仅 dot-atom 字符 ``A-Za-z0-9.!#$%&'*+/=?^_`{|}~-``，不以 `.` 开头或结尾，不含 `..`；域名至少两个标签，每个标签 1–63 个 `[A-Za-z0-9-]` 且不以 `-` 开头或结尾，总长 ≤ 253；最后整体转小写。
 
-- [ ] **Step 1：写失败的测试。** 表格用例：
+- [x] **Step 1：写失败的测试。** 表格用例：
 
 | 输入 | 期望 |
 | --- | --- |
@@ -311,10 +311,12 @@ func NormalizeAddress(raw string) (string, error)
 | 总长 255 | 错误 |
 
   所有错误断言 `errors.Is(err, ErrInvalidAddress)`。再加 `FuzzNormalizeAddress`，种子为上表输入；性质：不 panic；成功时输出等于 `strings.ToLower(输出)`、只含一个 `@`、再次规范化结果不变。
-- [ ] **Step 2：** `go test ./internal/config/` 编译失败。
-- [ ] **Step 3：** 按规则实现，只用标准库。
-- [ ] **Step 4：** `go test -race ./internal/config/` 通过；`go test -run=^$ -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/` 无失败（本地执行一次，CI 只运行种子）。
-- [ ] **Step 5：** `git commit -m "feat(config): add strict email address normalization"`
+- [x] **Step 2：** `go test ./internal/config/` 编译失败。
+- [x] **Step 3：** 按规则实现，只用标准库。
+- [x] **Step 4：** `go test -race ./internal/config/` 通过；`go test -run=^$ -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/` 无失败（本地执行一次，CI 只运行种子）。
+- [x] **Step 5：** `git commit -m "feat(config): add strict email address normalization"`
+
+**实施说明：** 域名总长 ≤ 253 的规则在总长 ≤ 254 且本地部分至少 1 个字符时不可能触发，按规格保留为防御性上界，其 `return` 因此未被覆盖（`internal/config` 语句覆盖率 97.4%）。
 
 ### Task 5：配置加载与校验
 
