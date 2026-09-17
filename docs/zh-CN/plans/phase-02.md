@@ -54,7 +54,7 @@ go 1.27.1
 
 - [x] 更新双语 README，展示实际文件树、可运行命令和尚未实现范围。
 - [x] 加入 Apache-2.0 原文、贡献指南、SECURITY、行为准则、变更日志、Issue/PR 模板。
-- [ ] SECURITY 使用 GitHub 私密漏洞报告入口，公开前启用对应设置；不虚构邮箱、响应时限或保证。
+- [x] SECURITY 使用 GitHub 私密漏洞报告入口，公开前启用对应设置；不虚构邮箱、响应时限或保证。
 - [x] 更新设计状态与英文架构概要；详细目标树保留，不创建空目录。
 
 ## 5. CI 与候选构建
@@ -66,9 +66,9 @@ go 1.27.1
 
 ## 6. 公开与收尾
 
-- [ ] 本地完成密钥扫描、检查 staged diff、提交。
-- [ ] 已确认目标 `chaoRookie/turncourier` 不存在；使用已授权个人账户创建 public 仓库并推送，启用私密漏洞报告及 main 分支检查门槛。
-- [ ] 检查 GitHub CI 结果；失败则修复并复验。保存阶段报告，区分本地通过、远端通过、尚未实现功能。
+- [x] 本地完成密钥扫描、检查 staged diff、提交。
+- [x] 已确认目标 `chaoRookie/turncourier` 不存在；使用已授权个人账户创建 public 仓库并推送，启用私密漏洞报告及 main 分支检查门槛。
+- [x] 检查 GitHub CI 结果；失败则修复并复验。保存阶段报告，区分本地通过、远端通过、尚未实现功能。
 
 ## 验证记录
 
@@ -96,7 +96,16 @@ go 1.27.1
 
 未修改：生成文件豁免与候选产物权限两条经复现推翻；`fmt-check` 目录范围待 `tests/` 实际出现时再扩展。
 
+### 公开与远端验证
+
+- 公开前确认仓库不存在；未推送的历史已改写，公开历史中不含本机路径与订阅档位，`make secrets` 与个人信息检索均无发现。
+- 2026-09-17 创建公开仓库 [chaoRookie/turncourier](https://github.com/chaoRookie/turncourier) 并推送 `main`；GitHub 识别许可证为 Apache-2.0。
+- 私密漏洞报告已启用（API 返回 `enabled: true`）。
+- 首次推送的远端结果：CI 工作流 `quality (ubuntu-24.04)`、`quality (macos-15)` 成功；Security 工作流 `security` 成功。
+- `main` 分支保护：必需检查为上述三项（GitHub Actions），要求分支与 main 保持最新，禁止强制推送与删除；未强制管理员，便于维护者直接提交文档。
+- Candidate build 为手动工作流，本阶段未触发。
+
 ### 尚未运行或尚未实现
 
-- 远端 GitHub Actions、私密漏洞报告与分支保护：尚未公开，未运行。
+- Dependabot 在公开后提出 actions/checkout 7.0.1、actions/setup-go 7.0.0、actions/upload-artifact 7.0.1 三个大版本升级 PR，尚未评审或合并。
 - 完整邮件收发、配置、Keychain、SQLite、Agent 适配器与真实邮箱验收：属于后续阶段，未实现。

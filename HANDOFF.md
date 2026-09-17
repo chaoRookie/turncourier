@@ -1,10 +1,10 @@
 # HANDOFF
 
-**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；当前阶段完成 Phase 2 工程骨架并公开到 GitHub。
+**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 2 工程骨架已完成并公开，下一阶段为配置/存储/状态机。
 **更新于**：2026-09-17 · claude-code
 **项目目录**：本仓库根目录（含 `go.mod` 的目录）
-**基线 commit**：`44ad326`（Phase 0–1）。Phase 2 本地工作已全部完成，尚未整理提交与公开；以 `git log --oneline -3` 与 `git status --short` 核对。
-**暂停原因**：本地质量门槛、审查修复与文档均已完成；创建公开仓库并推送属于对外发布，需要用户在对话中确认后再执行。
+**基线 commit**：`54d4594`（Phase 2 骨架，远端 CI 通过）；其后为记录公开结果的文档提交。以 `git log --oneline -3` 与 `git status --short` 核对。
+**暂停原因**：Phase 2 全部完成（本地与远端验证通过、仓库已公开）；进入下一阶段前等待用户安排。
 
 ## 已完成
 
@@ -13,20 +13,20 @@
 - [x] CLI（help/version/doctor 及 `--json`）、doctor（Unix 进程组清理、SIGINT/SIGTERM 取消）、commentcheck、covercheck、Makefile、三个工作流、Dependabot、密钥扫描脚本、`staticcheck.conf`。
 - [x] 多维审查 28 条发现经反方复现后修复（2 条推翻、1 条经确认改为 staticcheck 检查），每个区域由独立验证员复现并做变异测试；详见 `docs/zh-CN/plans/phase-02.md` 的「验证记录」。
 - [x] 治理与文档：LICENSE（Apache-2.0 官方原文，SHA-256 `cfc7749b…3d30`）、CODE_OF_CONDUCT（Contributor Covenant 2.1）、CONTRIBUTING、SECURITY、CHANGELOG、Issue/PR 模板、双语 README（实际文件树）、`docs/en/architecture.md`、`docs/zh-CN/development.md`；设计状态已更新。文档经逐组事实核查与跨文档一致性审查。
+- [x] 用户确认后改写未推送历史（去除本机路径与订阅档位），创建公开仓库 https://github.com/chaoRookie/turncourier 并推送 `main`。
+- [x] 私密漏洞报告已启用；首次远端 CI（quality ubuntu/macos）与 Security 通过；main 已设必需检查（不强制管理员）。
 
 ## 未完成
 
-- [ ] 整理本地提交：Phase 2 改动尚未提交；未推送的 WIP 提交需压入 Phase 2 提交，避免公开历史含本机路径。提交前运行 `make secrets` 并检查 staged diff。
-- [ ] 用户确认后公开：`gh repo view chaoRookie/turncourier` 确认不存在，再 `gh repo create chaoRookie/turncourier --public --source . --remote origin --push`。
-- [ ] 启用私密漏洞报告；等待并修复远端 CI；CI 绿灯后设置 main 分支必需检查。
-- [ ] 公开后勾选 `docs/zh-CN/plans/phase-02.md` 第 4 节 SECURITY 项与第 6 节，并补充远端验证记录。
+- [ ] 评审 Dependabot PR #1–#3（checkout 7.0.1、setup-go 7.0.0、upload-artifact 7.0.1 大版本升级）；需核对变更说明与 CI 后再合并，未经评审不要合并。
+- [ ] 下一阶段（配置/存储/状态机）尚未开始，需用户安排；先写该阶段计划再实施。
 - [ ] 完整邮件收发、TOML/Keychain/SQLite、Agent 适配器属于后续阶段。真实邮箱各十轮验收之前不打 `v0.1.0-alpha`。
 
 ## 下一步
 
-1. 读 `AGENTS.md`，核对 `git status --short` 与 `git log --oneline -3`。
+1. 读 `AGENTS.md`，核对 `git status --short`、`git log --oneline -3` 与 `gh run list --repo chaoRookie/turncourier --limit 5`。
 2. `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`，运行下方验证命令，确认仍全部通过。
-3. 按用户确认的方式整理提交并公开；随后执行「未完成」中的远端步骤。
+3. 按用户安排处理 Dependabot PR 或开始下一阶段；新阶段先在 `docs/zh-CN/plans/` 写实施清单。
 4. 远端 CI 失败时在本地复现修复，不跳过门槛；更新计划的验证记录与本文件。
 
 ## 验证方式
@@ -49,7 +49,7 @@ git diff --check
 
 - 2026-09-17 本地：`make check` 通过（覆盖率 97.35%，294/302）；`make security`、`make workflows`、`make build` 通过；`GOOS=linux/windows go vet ./...` 通过；冒烟退出码符合契约。
 - Actions 固定 SHA 经 GitHub API 核对为 checkout v5.1.0、setup-go v6.5.0、upload-artifact v4.6.2。
-- 远端 CI、私密漏洞报告、分支保护：尚未运行或设置。
+- 2026-09-17 远端：首次推送的 CI（`quality (ubuntu-24.04)`、`quality (macos-15)`）与 Security（`security`）成功；私密漏洞报告 `enabled: true`；GitHub 识别许可证 Apache-2.0。Candidate build 未触发。
 
 ## 关键文件
 
@@ -70,5 +70,5 @@ git diff --check
 - 审查中推翻的两条不要重复处理：生成文件豁免是计划要求；upload-artifact v4.6.2 保留可执行权限。`fmt-check` 目录范围待 `tests/` 实际出现时再扩展。
 - Git 全局未配置提交身份。提交使用单次配置：`git -c user.name=chaoRookie -c user.email=179816769+chaoRookie@users.noreply.github.com commit ...`；不要改全局身份。
 - 文档、提交与续点中不要写本机绝对路径、用户名或订阅档位；gitleaks 默认规则不会拦截这类信息。
-- 分支保护 required checks 预计为 `quality (ubuntu-24.04)`、`quality (macos-15)`、`security`，以真实 Actions 返回名称为准。
+- main 分支保护的必需检查为 `quality (ubuntu-24.04)`、`quality (macos-15)`、`security`（GitHub Actions app）；修改工作流 job 名称时须同步更新分支保护，否则 PR 会一直等待不存在的检查。
 - 所有 QQ 凭据将来通过本地 init 输入，不发送到聊天、不进入测试或 Git。worktree 不是 OS 沙箱，邮件文字不能绕过 Agent 权限。
