@@ -252,7 +252,7 @@ func Next(from State, event Event) (State, error)
 **Files:**
 - Modify: `Makefile`
 
-- [ ] **Step 1：** 新增目标并加入 `check`（`fmt` 目录列表加入 `tests` 的延后项在 Task 10 创建该目录时完成，因为 gofmt 遇到不存在的目录会报错）：
+- [x] **Step 1：** 新增目标并加入 `check`（`fmt` 目录列表加入 `tests` 的延后项在 Task 10 创建该目录时完成，因为 gofmt 遇到不存在的目录会报错）：
 
 ```make
 # go.sum 记录的依赖哈希须与模块缓存一致，防止被篡改的依赖进入构建。
@@ -263,8 +263,8 @@ check: fmt-check vet modverify comments test lint
 ```
 
 并把 `.PHONY` 补上 `modverify`，第一行注释改为「工程命令在本地与 CI 共用；依赖固定在 go.mod/go.sum 并由 modverify 校验。」
-- [ ] **Step 2：** `make modverify` 输出 `all modules verified`；`make check` 通过。
-- [ ] **Step 3：** `git commit -m "build: verify module checksums in make check"`
+- [x] **Step 2：** `make modverify` 输出 `all modules verified`；`make check` 通过。
+- [x] **Step 3：** `git commit -m "build: verify module checksums in make check"`
 
 ### Task 4：邮箱地址规范化
 

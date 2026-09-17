@@ -1,4 +1,4 @@
-# 工程命令在本地与 CI 共用，产品构建不依赖第三方 Go 包。
+# 工程命令在本地与 CI 共用；依赖固定在 go.mod/go.sum 并由 modverify 校验。
 GO ?= go
 VERSION ?= 0.1.0-dev
 TOOL_BIN := $(CURDIR)/.local/bin
@@ -12,7 +12,7 @@ GOVULNCHECK := $(TOOL_BIN)/govulncheck-$(GOVULNCHECK_VERSION)/govulncheck
 GITLEAKS := $(TOOL_BIN)/gitleaks-$(GITLEAKS_VERSION)/gitleaks
 ACTIONLINT := $(TOOL_BIN)/actionlint-$(ACTIONLINT_VERSION)/actionlint
 
-.PHONY: build check test fmt fmt-check vet comments lint security secrets workflows tools
+.PHONY: build check test fmt fmt-check vet modverify comments lint security secrets workflows tools
 
 build:
 	@mkdir -p dist
@@ -39,7 +39,11 @@ test:
 lint: $(STATICCHECK)
 	goroot="$$($(GO) env GOROOT)" && PATH="$$goroot/bin:$$PATH" $(STATICCHECK) ./...
 
-check: fmt-check vet comments test lint
+# go.sum 记录的依赖哈希须与模块缓存一致，防止被篡改的依赖进入构建。
+modverify:
+	$(GO) mod verify
+
+check: fmt-check vet modverify comments test lint
 
 security: $(GOVULNCHECK) secrets
 	goroot="$$($(GO) env GOROOT)" && PATH="$$goroot/bin:$$PATH" $(GOVULNCHECK) ./...
