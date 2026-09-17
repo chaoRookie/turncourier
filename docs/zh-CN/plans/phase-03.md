@@ -178,17 +178,17 @@ func AcceptsReplies(s State) bool
 func CanDispatchReply(s State) bool
 ```
 
-- [ ] **Step 1：写失败的测试。** `state_test.go` 中独立写一份期望矩阵 `want := map[State]map[Event]State{...}`（内容与上面的表逐项相同，作为规格副本），对 8 个状态 × 10 个事件全部调用 `Next`：矩阵中有的组合断言返回目标状态且 `err == nil`；没有的组合断言 `errors.Is(err, ErrInvalidTransition)`，且错误文本同时包含状态名和事件名。另外覆盖：
+- [x] **Step 1：写失败的测试。** `state_test.go` 中独立写一份期望矩阵 `want := map[State]map[Event]State{...}`（内容与上面的表逐项相同，作为规格副本），对 8 个状态 × 10 个事件全部调用 `Next`：矩阵中有的组合断言返回目标状态且 `err == nil`；没有的组合断言 `errors.Is(err, ErrInvalidTransition)`，且错误文本同时包含状态名和事件名。另外覆盖：
   - `Next("BOGUS", Start)` 返回 `ErrInvalidTransition`；
   - `Closed` 对任何事件都非法；
   - `ResumeAfterUnsent`：`(Running, Completed)`→`Completed`，`(DeliveryUncertain, WaitingInput)`→`WaitingInput`，`(Completed, Completed)`、`(Running, Running)`、`(Running, Closed)` 均为非法；
   - `AcceptsReplies`：Running、WaitingInput、WaitingApproval、Completed、DeliveryUncertain 为 true，Created、Failed、Closed 为 false；
   - `CanDispatchReply`：只有 Completed、WaitingInput 为 true；
   - `Valid`：8 个已知状态为 true，`""` 与 `"running"` 为 false。
-- [ ] **Step 2：确认测试失败。** 运行 `go test ./internal/task/`，期望编译失败（`undefined: Next` 等）。
-- [ ] **Step 3：最小实现。** 按契约实现；`Next` 查表，未命中时 `fmt.Errorf("%w: %s --%s-->", ErrInvalidTransition, from, event)`。
-- [ ] **Step 4：确认通过。** `go test -race ./internal/task/` 通过，`go test -cover ./internal/task/` 覆盖率 100%。
-- [ ] **Step 5：提交。** `git add internal/task && git commit -m "feat(task): add task state machine"`
+- [x] **Step 2：确认测试失败。** 运行 `go test ./internal/task/`，期望编译失败（`undefined: Next` 等）。
+- [x] **Step 3：最小实现。** 按契约实现；`Next` 查表，未命中时 `fmt.Errorf("%w: %s --%s-->", ErrInvalidTransition, from, event)`。
+- [x] **Step 4：确认通过。** `go test -race ./internal/task/` 通过，`go test -cover ./internal/task/` 覆盖率 100%。
+- [x] **Step 5：提交。** `git add internal/task && git commit -m "feat(task): add task state machine"`
 
 ### Task 2：回复队列状态机
 
