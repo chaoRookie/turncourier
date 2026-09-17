@@ -37,6 +37,11 @@ var addressCases = []addressCase{
 	{`"quoted"@example.invalid`, ""},
 	{"用户@example.invalid", ""},
 	{"me@例子.invalid", ""},
+	// K 开尔文符号与 İ 带点大写 I 小写后都变成 ASCII，用来钉住「先校验后转小写」的顺序。
+	{"K@example.invalid", ""},
+	{"İ@example.invalid", ""},
+	{"me(x@example.invalid", ""},
+	{"me@my_host.invalid", ""},
 	{"me@example", ""},
 	{"me@@example.invalid", ""},
 	{".me@example.invalid", ""},
