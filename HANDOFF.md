@@ -1,10 +1,10 @@
 # HANDOFF
 
-**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 2 工程骨架已完成并公开，下一阶段为配置/存储/状态机。
+**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；当前进行 Phase 3（配置、存储与状态机）。
 **更新于**：2026-09-18 · claude-code
 **项目目录**：本仓库根目录（含 `go.mod` 的目录）
 **基线 commit**：`9cc5bd7`（合并三个 Actions 升级后的 main，CI、Security、Candidate build 均通过）；其后为记录本次维护的文档提交。以 `git log --oneline -3` 与 `git status --short` 核对。
-**暂停原因**：Phase 2 与公开后的 Actions 升级均已完成并验证；进入下一阶段前等待用户安排。
+**暂停原因**：Phase 3 实施中。实施清单已合入，实现在 `feat/phase-03-storage` 分支逐任务提交；以清单勾选状态与该分支 `git log` 判断进度。
 
 ## 已完成
 
@@ -20,14 +20,14 @@
 ## 未完成
 
 - [ ] 关注 actions/setup-go 补丁版本：7.0.0 打包的 undici、brace-expansion 有已公开安全公告（旧版同样受影响，本仓库输入不触及），上游已修复未发版；Dependabot 提出后按同样流程评审。
-- [ ] 下一阶段（配置/存储/状态机）尚未开始，需用户安排；先写该阶段计划再实施。
+- [ ] Phase 3：按 `docs/zh-CN/plans/phase-03.md` 实施。维护者已确认 D1（引入 modernc.org/sqlite v1.59.0 与 BurntSushi/toml v1.6.0）与 D2（本阶段不保存正文、不接入 Keychain），并选择子代理逐任务实施、任务之间复核。
 - [ ] 完整邮件收发、TOML/Keychain/SQLite、Agent 适配器属于后续阶段。真实邮箱各十轮验收之前不打 `v0.1.0-alpha`。
 
 ## 下一步
 
 1. 读 `AGENTS.md`，核对 `git status --short`、`git log --oneline -3` 与 `gh run list --repo chaoRookie/turncourier --limit 5`。
 2. `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`，运行下方验证命令，确认仍全部通过。
-3. 按用户安排开始下一阶段或处理新的 Dependabot PR；新阶段先在 `docs/zh-CN/plans/` 写实施清单。
+3. 在 `feat/phase-03-storage` 分支上从清单中第一个未勾选的任务继续；每个任务先写失败测试、实现、审查、提交。
 4. 远端 CI 失败时在本地复现修复，不跳过门槛；更新计划的验证记录与本文件。
 
 ## 验证方式
@@ -57,6 +57,7 @@ git diff --check
 
 - `docs/zh-CN/design.md` — 产品范围、目录职责、安全和持久化边界。
 - `docs/zh-CN/plans/phase-02.md` — Phase 2 清单与验证记录。
+- `docs/zh-CN/plans/phase-03.md` — Phase 3 实施清单、已确认决策与任务契约。
 - `docs/zh-CN/development.md` — 工具链、make 目标、注释与覆盖率规则、密钥扫描。
 - `internal/cli/cli.go` — 命令路由与退出码契约（0/1/2，管道断开按 SIGPIPE 惯例）。
 - `internal/doctor/doctor.go`、`process_unix.go` — 只读诊断与进程组清理；禁止改成检查真实账号或发模型请求。
