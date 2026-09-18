@@ -3,6 +3,7 @@
 package sqlite
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -185,7 +186,8 @@ func TestRecordReplyByTaskState(t *testing.T) {
 }
 
 // TestRecordReplyValidation 验证字段校验在事务开始前拒绝非法输入：错误文本含 "invalid inbound reply"，
-// 以区别于数据库 CHECK 约束与任务查询的报错，且不写入任何记录。边界上的合法值可以写入。
+// 以区别于数据库 CHECK 约束与任务查询的报错，且不写入任何记录。长度按字符而不是字节计，边界上的合法值可以写入。
+// 上下文已取消时仍返回校验错误，证明校验先于开始事务。
 func TestRecordReplyValidation(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	running := startTask(t, store)
@@ -199,10 +201,16 @@ func TestRecordReplyValidation(t *testing.T) {
 		{"Account 含空格", func(in *InboundReply) { in.Account = "bot @example.invalid" }},
 		{"Account 含制表符", func(in *InboundReply) { in.Account = "bot\t@example.invalid" }},
 		{"Account 末尾换行", func(in *InboundReply) { in.Account = botAccount + "\n" }},
+		{"Account 含回车", func(in *InboundReply) { in.Account = "bot\r@example.invalid" }},
+		{"Account 含全角空格", func(in *InboundReply) { in.Account = "bot\u3000@example.invalid" }},
+		{"Account 少于 3 个非 ASCII 字符", func(in *InboundReply) { in.Account = "中@" }},
+		{"Account 含 NUL", func(in *InboundReply) { in.Account = "bot\x00@example.invalid" }},
 		{"UIDValidity 为 0", func(in *InboundReply) { in.UIDValidity = 0 }},
 		{"UID 为 0", func(in *InboundReply) { in.UID = 0 }},
 		{"MessageID 为空", func(in *InboundReply) { in.MessageID = "" }},
 		{"MessageID 少于 3 字符", func(in *InboundReply) { in.MessageID = "<a" }},
+		{"MessageID 少于 3 个非 ASCII 字符", func(in *InboundReply) { in.MessageID = "<é" }},
+		{"MessageID 含 NUL", func(in *InboundReply) { in.MessageID = "<\x00>" }},
 		{"MessageID 超过 998 字符", func(in *InboundReply) { in.MessageID = "<" + strings.Repeat("a", 997) + ">" }},
 		{"任务不存在时仍先校验字段", func(in *InboundReply) { in.TaskID, in.UID = "missing", 0 }},
 	}
@@ -214,9 +222,16 @@ func TestRecordReplyValidation(t *testing.T) {
 			t.Errorf("%s: RecordReply = %+v, %v; want 含 \"invalid inbound reply\" 的错误", tt.name, got, err)
 		}
 	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	in := inbound(running.ID)
+	in.UID = 0
+	if got, err := store.RecordReply(ctx, in); err == nil || !strings.Contains(err.Error(), "invalid inbound reply") || errors.Is(err, context.Canceled) {
+		t.Errorf("上下文已取消: RecordReply = %+v, %v; want 含 \"invalid inbound reply\" 的错误而不是 context.Canceled", got, err)
+	}
 	requireRows(t, store, 0, 0)
 
-	in := inbound(running.ID)
+	in = inbound(running.ID)
 	in.Account = strings.Repeat("a", 242) + "@example.com"
 	in.MessageID = "<a>"
 	if got := recordReply(t, store, in); got.Duplicate || got.Reply.State != queue.Queued {
@@ -228,7 +243,19 @@ func TestRecordReplyValidation(t *testing.T) {
 	if got := recordReply(t, store, in); got.Duplicate || got.Reply.State != queue.Queued {
 		t.Errorf("最大 UID 与 998 字符 Message-ID: RecordReply = %+v; want 新入队", got)
 	}
-	requireRows(t, store, 2, 2)
+	in = inbound(running.ID)
+	in.Account = "a@b"
+	if got := recordReply(t, store, in); got.Duplicate || got.Reply.State != queue.Queued {
+		t.Errorf("3 字符 Account: RecordReply = %+v; want 新入队", got)
+	}
+	// 非 ASCII 字符占多个字节：254 与 998 个字符超过同样数目的字节，仍在表约束允许的范围内。
+	in = inbound(running.ID)
+	in.Account = strings.Repeat("é", 242) + "@example.com"
+	in.MessageID = "<" + strings.Repeat("é", 996) + ">"
+	if got := recordReply(t, store, in); got.Duplicate || got.Reply.State != queue.Queued {
+		t.Errorf("254 与 998 个非 ASCII 字符: RecordReply = %+v; want 新入队", got)
+	}
+	requireRows(t, store, 4, 4)
 }
 
 // TestRecordReplyAtomic 用测试内创建的触发器让回复队列项写入失败，验证入站记录随事务一起回滚；
@@ -254,23 +281,27 @@ func TestRecordReplyAtomic(t *testing.T) {
 	requireRows(t, store, 1, 1)
 }
 
-// TestRecordReplyRejectsUnknownReplyState 验证读取到不在已知集合的回复状态时返回错误，而不是静默接受。
+// TestRecordReplyRejectsUnknownReplyState 验证读取到不在已知集合的回复状态或派发前任务状态时返回错误，而不是静默接受。
 // 表上的 CHECK 约束本会拒绝未知状态，测试临时关闭它，模拟被外部工具改坏的数据库。
 func TestRecordReplyRejectsUnknownReplyState(t *testing.T) {
-	store, _ := openTaskStore(t, nil)
-	running := startTask(t, store)
-	recordReply(t, store, inbound(running.ID))
-	for _, query := range []string{
-		"PRAGMA ignore_check_constraints = ON",
-		"UPDATE replies SET state = 'queued'",
-		"PRAGMA ignore_check_constraints = OFF",
+	for _, tt := range []struct {
+		update string
+		want   string
+	}{
+		{"UPDATE replies SET state = 'queued'", "queued"},
+		{"UPDATE replies SET resume_state = 'completed'", "completed"},
 	} {
-		if _, err := store.db.ExecContext(t.Context(), query); err != nil {
-			t.Fatalf("执行 %q 失败: %v", query, err)
+		store, _ := openTaskStore(t, nil)
+		running := startTask(t, store)
+		recordReply(t, store, inbound(running.ID))
+		for _, query := range []string{"PRAGMA ignore_check_constraints = ON", tt.update, "PRAGMA ignore_check_constraints = OFF"} {
+			if _, err := store.db.ExecContext(t.Context(), query); err != nil {
+				t.Fatalf("执行 %q 失败: %v", query, err)
+			}
 		}
-	}
-	if got, err := store.RecordReply(t.Context(), inbound(running.ID)); err == nil || !strings.Contains(err.Error(), "queued") {
-		t.Errorf("RecordReply = %+v, %v; want 未知状态错误", got, err)
+		if got, err := store.RecordReply(t.Context(), inbound(running.ID)); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: RecordReply = %+v, %v; want 含 %q 的未知状态错误", tt.update, got, err, tt.want)
+		}
 	}
 }
 

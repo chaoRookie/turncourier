@@ -696,7 +696,7 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 - [x] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
 - [x] **Step 5：** `git commit -m "feat(store): deduplicate and enqueue inbound replies atomically"`
 
-**实施说明：** 表格只比较 Message-ID 与摘要，入站记录却同时绑定任务；同一邮件标识指向另一任务时按「同一邮件标识对应了不同内容」处理，返回 `ErrMessageConflict`，而不是返回别的任务的回复并标为重复，测试「同一邮件指向另一任务」钉住这一点。字段校验与表约束对齐：Account 为 3–254 字节且不含空白（空字符串包含在内），MessageID 为 3–998 字节，UIDValidity 与 UID 为正；长度按字节计，ASCII 地址与 Message-ID 与表约束的字符数一致，其余情况仍由 CHECK 约束兜底。清单未定义字段错误的哨兵值，错误文本统一以 `invalid inbound reply` 开头，测试据此区分 Go 端校验与 CHECK 约束、任务查询的报错，并用「任务不存在且 UID 为 0」证明校验先于事务。按 Step 3 的顺序先读任务再查重，因此任务不存在时总是返回 `ErrNotFound`；重复邮件返回原回复，不按任务的当前状态重新判定。fail 与 close 拒绝 QUEUED 回复的行为 Task 7 已实现，本任务只补测试。
+**实施说明：** 表格只比较 Message-ID 与摘要，入站记录却同时绑定任务；同一邮件标识指向另一任务时按「同一邮件标识对应了不同内容」处理，返回 `ErrMessageConflict`，而不是返回别的任务的回复并标为重复，测试「同一邮件指向另一任务」钉住这一点。字段校验与表约束对齐：Account 为 3–254 个字符且不含空白（空字符串包含在内），MessageID 为 3–998 个字符，UIDValidity 与 UID 为正；长度按 Unicode 字符计，与表约束中 SQLite 的 `length()` 一致。`length()` 遇到 NUL 即停止计数，而地址与邮件头本不应含 NUL，因此 Account 或 MessageID 含 NUL 时同样在事务前拒绝，这是清单之外的补充；含非法 UTF-8 时两者计数可能不同，仍由 CHECK 约束兜底。清单未定义字段错误的哨兵值，错误文本统一以 `invalid inbound reply` 开头，测试据此区分 Go 端校验与 CHECK 约束、任务查询的报错；用已取消的上下文调用仍得到校验错误，证明校验先于开始事务，用「任务不存在且 UID 为 0」证明校验先于读取任务。按 Step 3 的顺序先读任务再查重，因此任务不存在时总是返回 `ErrNotFound`；重复邮件返回原回复，不按任务的当前状态重新判定。fail 与 close 拒绝 QUEUED 回复的行为 Task 7 已实现，本任务只补测试。
 
 ### Task 9：派发、确认与崩溃恢复
 

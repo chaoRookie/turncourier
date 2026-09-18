@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/chaoRookie/turncourier/internal/queue"
 	"github.com/chaoRookie/turncourier/internal/task"
@@ -128,15 +129,18 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 }
 
 // validate 在事务开始前检查与表约束对应的长度、空白与取值范围；存储层不导入 config，地址规范化由调用方负责。
-// 长度按字节计算，只含 ASCII 的地址与 Message-ID 与表约束的字符数一致。
+// 长度按 Unicode 字符计，与表约束中 SQLite 的 length() 一致；length() 遇到 NUL 即停止计数，因此含 NUL 的值一律拒绝。
 func (in InboundReply) validate() error {
+	accountLen, messageIDLen := utf8.RuneCountInString(in.Account), utf8.RuneCountInString(in.MessageID)
 	switch {
-	case len(in.Account) < 3 || len(in.Account) > 254 || strings.ContainsFunc(in.Account, unicode.IsSpace):
+	case accountLen < 3 || accountLen > 254 || strings.ContainsFunc(in.Account, unicode.IsSpace):
 		return errors.New("invalid inbound reply: account must be 3-254 characters without whitespace")
 	case in.UIDValidity == 0 || in.UID == 0:
 		return errors.New("invalid inbound reply: uid validity and uid must be positive")
-	case len(in.MessageID) < 3 || len(in.MessageID) > 998:
+	case messageIDLen < 3 || messageIDLen > 998:
 		return errors.New("invalid inbound reply: message id must be 3-998 characters")
+	case strings.ContainsRune(in.Account, 0) || strings.ContainsRune(in.MessageID, 0):
+		return errors.New("invalid inbound reply: account and message id must not contain NUL")
 	}
 	return nil
 }
@@ -156,7 +160,7 @@ func findInbound(ctx context.Context, tx *sql.Tx, where string, args ...any) (*k
 	return &known, nil
 }
 
-// getReply 通过 q 按序号读取回复快照，时间换算为 UTC；状态名不在已知集合时返回错误而不是静默接受。
+// getReply 通过 q 按序号读取回复快照，时间换算为 UTC；回复状态或派发前任务状态不在已知集合时返回错误而不是静默接受。
 func getReply(ctx context.Context, q rowQuerier, seq int64) (Reply, error) {
 	var r Reply
 	var resumeState, rejectReason sql.NullString
@@ -171,6 +175,9 @@ func getReply(ctx context.Context, q rowQuerier, seq int64) (Reply, error) {
 		return Reply{}, fmt.Errorf("reply %d has unknown state %q", seq, r.State)
 	}
 	r.ResumeState = task.State(resumeState.String)
+	if resumeState.Valid && !r.ResumeState.Valid() {
+		return Reply{}, fmt.Errorf("reply %d has unknown resume state %q", seq, r.ResumeState)
+	}
 	r.RejectReason = rejectReason.String
 	r.CreatedAt = time.UnixMilli(createdAt).UTC()
 	r.UpdatedAt = time.UnixMilli(updatedAt).UTC()
