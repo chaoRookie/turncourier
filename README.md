@@ -164,6 +164,7 @@ turncourier/
 │   │   ├── paths.go                 # Config file and data directory paths
 │   │   ├── paths_test.go            # Default and environment variable paths
 │   │   ├── fileperm_unix.go         # Unix: config file owner and write bits
+│   │   ├── fileperm_unix_test.go    # Unix: owner check, FIFO, unreadable parent
 │   │   └── fileperm_other.go        # Other platforms: regular file and size
 │   ├── doctor/                      # Environment diagnostics
 │   │   ├── doctor.go                # Read-only platform and --version checks

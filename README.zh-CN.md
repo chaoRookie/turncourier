@@ -164,6 +164,7 @@ turncourier/
 │   │   ├── paths.go                 # 配置文件与数据目录位置
 │   │   ├── paths_test.go            # 默认目录与环境变量路径
 │   │   ├── fileperm_unix.go         # Unix：配置文件属主与写权限检查
+│   │   ├── fileperm_unix_test.go    # Unix：属主检查、FIFO 与不可访问的父目录
 │   │   └── fileperm_other.go        # 其他平台：只检查常规文件与大小
 │   ├── doctor/                      # 环境诊断
 │   │   ├── doctor.go                # 只读的平台和 --version 检查

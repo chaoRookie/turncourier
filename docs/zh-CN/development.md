@@ -66,7 +66,7 @@ git check-ignore .local/toolchains/go/bin/go
 | 模块 | 版本 | 许可证 | 使用方 |
 | --- | --- | --- | --- |
 | `modernc.org/sqlite` | v1.59.0 | BSD 风格 | `internal/store/sqlite`；纯 Go 实现，构建保持 `CGO_ENABLED=0` |
-| `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`；用 `MetaData.Undecoded()` 精确拒绝未知键 |
+| `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`；用 `MetaData.Keys()` 列出全部键路径，与白名单逐段区分大小写比对来拒绝未知键（该库会把大小写变体匹配到字段，`MetaData.Undecoded()` 看不到它们） |
 
 `modernc.org/sqlite` 另外带入 `dustin/go-humanize`、`google/uuid`、`mattn/go-isatty`、`ncruces/go-strftime`、`remyoudompheng/bigfft`、`golang.org/x/sys`、`modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory`，许可证均为 MIT 或 BSD 风格。选型理由与实测记录见 [Phase 3 实施清单](plans/phase-03.md) 的决策 D1。
 
@@ -211,7 +211,7 @@ go test -run='^$' -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/
 | 数据目录 | `$TURNCOURIER_DATA_DIR`（须为绝对路径）；未设置时为配置文件所在目录 |
 | 数据库 | 数据目录下的 `turncourier.db` |
 
-- 配置示例是 `configs/turncourier.example.toml`，测试会加载它，修改校验规则时同步修改示例。配置只保存账户与选项，出现 `password`、`token` 等凭据类键或未知键都会报错；授权码与签名密钥将由 `init` 写入 Keychain（尚未实现）。
+- 配置示例是 `configs/turncourier.example.toml`，测试会加载它，修改校验规则时同步修改示例。配置只保存账户与选项，出现 `password`、`token` 等凭据类键（不区分大小写）或未知键都会报错，键名区分大小写，`ADDRESS` 这类大小写变体按未知键处理；授权码与签名密钥将由 `init` 写入 Keychain（尚未实现）。
 - 配置文件须是不超过 1 MiB 的常规文件；在 Unix 上须归当前用户所有，且组和其他用户不可写。
 - 环境变量只能覆盖 `TURNCOURIER_NOTIFY_EVENTS`（逗号分隔，空字符串视为未设置）。白名单、邮箱地址、令牌有效期等安全相关项不接受环境变量覆盖。
 - 在 Unix 上，数据目录权限须为 0700、数据库文件须为 0600；缺失时按此权限创建，已有目录或文件权限更宽时拒绝打开。数据库只保存元数据与正文 SHA-256 摘要，不保存正文和凭据。

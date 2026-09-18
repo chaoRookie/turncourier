@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -115,6 +116,15 @@ func TestLoadDefaults(t *testing.T) {
 	if !slices.Equal(cfg.Notify.Events, wantEvents) {
 		t.Errorf("Notify.Events = %v; want %v", cfg.Notify.Events, wantEvents)
 	}
+	// 返回的是默认事件的副本：调用方修改它之后再次加载，默认值不变。
+	cfg.Notify.Events[0] = "mutated"
+	cfg, _, err = loadConfig(t, minimalConfig)
+	if err != nil {
+		t.Fatalf("再次 Load 返回错误: %v", err)
+	}
+	if !slices.Equal(cfg.Notify.Events, wantEvents) {
+		t.Errorf("修改返回值后默认事件被改变: %v; want %v", cfg.Notify.Events, wantEvents)
+	}
 }
 
 // TestLoadNormalizesAddresses 验证地址与白名单都经过规范化后保存。
@@ -162,11 +172,61 @@ func TestLoadRejectsUnknownKey(t *testing.T) {
 	if !strings.Contains(err.Error(), "passwrod") {
 		t.Errorf("错误未提到未知键: %v", err)
 	}
+	// 表数组的每个元素都会列出同一键路径，同一个未知键只报一次。
+	_, paths, err = loadConfig(t, "[[extra]]\nkey = 1\n[[extra]]\nkey = 2\n"+minimalConfig)
+	requireErrorWithoutPath(t, err, paths)
+	if count := strings.Count(err.Error(), "unknown key extra.key"); count != 1 {
+		t.Errorf("unknown key extra.key 出现 %d 次; want 1: %v", count, err)
+	}
 }
 
-// TestLoadRejectsCredentialKeys 验证凭据类键被拒绝，并提示凭据由 init 写入 Keychain。
+// TestLoadRejectsCaseVariantKeys 验证键名逐段区分大小写：TOML 库会把大小写变体匹配到字段，
+// 这些键必须按未知键拒绝，而不是被静默采用。
+func TestLoadRejectsCaseVariantKeys(t *testing.T) {
+	cases := []struct {
+		old, new string
+		keys     []string
+	}{
+		{`address = "bot@`, `ADDRESS = "bot@`, []string{"mailbox.ADDRESS"}},
+		{"allowed_senders", "Allowed_Senders", []string{"recipient.Allowed_Senders"}},
+		{"[mailbox]", "[MAILBOX]", []string{"MAILBOX", "MAILBOX.address"}},
+	}
+	for _, testCase := range cases {
+		_, paths, err := loadConfig(t, strings.Replace(minimalConfig, testCase.old, testCase.new, 1))
+		requireErrorWithoutPath(t, err, paths)
+		for _, key := range testCase.keys {
+			if !strings.Contains(err.Error(), "unknown key "+key) {
+				t.Errorf("%s: 错误未把 %s 报为未知键: %v", testCase.new, key, err)
+			}
+		}
+	}
+}
+
+// TestLoadRejectsDuplicateCaseVariants 验证同一字段写成两个大小写变体时必须报错，且多次加载的结果完全一致；
+// 采用哪个取值由 map 遍历顺序决定，若继续校验取值，错误文本会随遍历顺序变化。
+func TestLoadRejectsDuplicateCaseVariants(t *testing.T) {
+	paths := writeConfig(t, configWithMailboxKey("ADDRESS"), 0o600)
+	var first string
+	for i := range 20 {
+		_, err := Load(paths, envOf(nil))
+		requireErrorWithoutPath(t, err, paths)
+		if i == 0 {
+			first = err.Error()
+			if !strings.Contains(first, "unknown key mailbox.ADDRESS") {
+				t.Fatalf("错误未把 mailbox.ADDRESS 报为未知键: %v", err)
+			}
+			continue
+		}
+		if err.Error() != first {
+			t.Fatalf("第 %d 次加载的错误与第 1 次不同:\n%v\n---\n%s", i+1, err, first)
+		}
+	}
+}
+
+// TestLoadRejectsCredentialKeys 验证凭据类键被拒绝，并提示凭据由 init 写入 Keychain；
+// 键名按小写比较，大写或混合大小写的凭据类键同样给出 Keychain 提示。
 func TestLoadRejectsCredentialKeys(t *testing.T) {
-	for _, key := range []string{"password", "authorization_code", "auth_code", "token", "secret"} {
+	for _, key := range []string{"password", "authorization_code", "auth_code", "token", "secret", "PASSWORD", "Secret"} {
 		_, paths, err := loadConfig(t, configWithMailboxKey(key))
 		requireErrorWithoutPath(t, err, paths)
 		if !strings.Contains(err.Error(), key) {
@@ -377,6 +437,38 @@ events = ["waiting_approval"]
 	requireErrorWithoutPath(t, err, paths)
 }
 
+// TestLoadReadsOnlyNotifyEventsEnv 验证 Load 只读取 TURNCOURIER_NOTIFY_EVENTS：
+// 其他看似可覆盖安全相关项的环境变量即使给出攻击值也不会被读取，结果与文件内容一致。
+func TestLoadReadsOnlyNotifyEventsEnv(t *testing.T) {
+	paths := writeConfig(t, minimalConfig, 0o600)
+	want, err := Load(paths, envOf(nil))
+	if err != nil {
+		t.Fatalf("Load 返回错误: %v", err)
+	}
+	attack := map[string]string{
+		"TURNCOURIER_ALLOWED_SENDERS":   "attacker@example.invalid",
+		"TURNCOURIER_TOKEN_TTL":         "720h",
+		"TURNCOURIER_MAILBOX_ADDRESS":   "attacker@example.invalid",
+		"TURNCOURIER_RECIPIENT_ADDRESS": "attacker@example.invalid",
+		"TURNCOURIER_IMAP_HOST":         "imap.attacker.invalid",
+		"TURNCOURIER_SMTP_HOST":         "smtp.attacker.invalid",
+	}
+	var read []string
+	got, err := Load(paths, func(key string) string {
+		read = append(read, key)
+		return attack[key]
+	})
+	if err != nil {
+		t.Fatalf("Load 返回错误: %v", err)
+	}
+	if !slices.Equal(read, []string{"TURNCOURIER_NOTIFY_EVENTS"}) {
+		t.Errorf("读取的环境变量 = %v; want 只有 TURNCOURIER_NOTIFY_EVENTS", read)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Load = %+v; want %+v", got, want)
+	}
+}
+
 // TestLoadFileProblems 验证文件缺失、过大与不是常规文件时的错误。
 func TestLoadFileProblems(t *testing.T) {
 	dir := t.TempDir()
@@ -402,12 +494,75 @@ func TestLoadFileProblems(t *testing.T) {
 	if !strings.Contains(err.Error(), "not a regular file") {
 		t.Errorf("错误 = %v; want 常规文件检查失败", err)
 	}
+
+	// 父级是普通文件时打开失败，文件系统错误须剥离路径，且不能当作文件不存在。
+	parentDir := t.TempDir()
+	parent := filepath.Join(parentDir, "not-a-directory")
+	if err := os.WriteFile(parent, nil, 0o600); err != nil {
+		t.Fatalf("写入普通文件失败: %v", err)
+	}
+	underFile := Paths{ConfigFile: filepath.Join(parent, "turncourier.toml"), DataDir: parentDir}
+	_, err = Load(underFile, envOf(nil))
+	requireErrorWithoutPath(t, err, underFile)
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("错误 = %v; 父级是普通文件不应视为文件不存在", err)
+	}
+}
+
+// TestReadConfigDataRejectsOversize 验证读取阶段自身也限制大小：文件在检查大小之后被写大时，
+// 读到超过上界的内容即拒绝，而不是把截断后的内容交给解析器。
+func TestReadConfigDataRejectsOversize(t *testing.T) {
+	paths := writeConfig(t, minimalConfig+"\n# "+strings.Repeat("a", maxConfigBytes)+"\n", 0o600)
+	file, err := os.Open(paths.ConfigFile)
+	if err != nil {
+		t.Fatalf("打开配置文件失败: %v", err)
+	}
+	defer file.Close()
+	data, err := readConfigData(file)
+	if err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("readConfigData 读到 %d 字节, 错误 = %v; want 超过上界的错误", len(data), err)
+	}
+
+	exact := writeConfig(t, strings.Repeat("#", maxConfigBytes), 0o600)
+	file, err = os.Open(exact.ConfigFile)
+	if err != nil {
+		t.Fatalf("打开配置文件失败: %v", err)
+	}
+	defer file.Close()
+	if data, err := readConfigData(file); err != nil || len(data) != maxConfigBytes {
+		t.Errorf("恰好等于上界: 读到 %d 字节, 错误 = %v; want %d 字节且无错误", len(data), err, maxConfigBytes)
+	}
 }
 
 // TestLoadRejectsBrokenTOML 验证语法错误的配置被拒绝，且错误文本不含本机路径。
 func TestLoadRejectsBrokenTOML(t *testing.T) {
 	_, paths, err := loadConfig(t, "[mailbox\naddress = \"bot@example.invalid\"\n")
 	requireErrorWithoutPath(t, err, paths)
+}
+
+// TestLoadParseErrorsHideValues 验证 TOML 语法与类型错误不回显出错位置的原始文本：
+// 未加引号的凭据值或普通值都不会进入错误文本，错误仍给出行号。
+func TestLoadParseErrorsHideValues(t *testing.T) {
+	cases := []struct {
+		name, line, value, want string
+	}{
+		{"未加引号的凭据值", "authorization_code = abcdefghijklmnop", "abcdefghijklmnop", "凭据将由 init 写入 Keychain"},
+		{"未加引号的普通值", "imap_host = imapsecretvalue", "imapsecretvalue", "invalid TOML"},
+		{"类型错误", `imap_port = "portsecretvalue"`, "portsecretvalue", "mailbox.imap_port"},
+	}
+	for _, testCase := range cases {
+		// 出错的键写在第 3 行。
+		_, paths, err := loadConfig(t, "[mailbox]\naddress = \"bot@example.invalid\"\n"+testCase.line+"\n")
+		requireErrorWithoutPath(t, err, paths)
+		if strings.Contains(err.Error(), testCase.value) {
+			t.Errorf("%s: 错误文本回显了原始取值: %v", testCase.name, err)
+		}
+		for _, want := range []string{"line 3", testCase.want} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: 错误未包含 %q: %v", testCase.name, want, err)
+			}
+		}
+	}
 }
 
 // TestLoadFilePermissions 仅在 Unix 上验证组或其他用户可写的配置文件被拒绝。

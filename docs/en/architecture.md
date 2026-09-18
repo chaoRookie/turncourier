@@ -79,7 +79,7 @@ Dependencies point one way: `cmd` → `internal/cli` → `internal/doctor`, and 
 | --- | --- |
 | `cmd/turncourier` | Entry point. Turns SIGINT and SIGTERM into context cancellation, passes `doctor.New()` to `cli.Run` and exits with the returned code. |
 | `internal/cli` | Parses `help`, `version`, `doctor` and `--json`. Rejects planned commands, unknown commands and extra arguments, and writes text or JSON output. `cli.Version` defaults to `0.1.0-dev` and can be set at build time with `-ldflags -X`. |
-| `internal/config` | Resolves the configuration file and data directory paths, normalizes email addresses and loads the TOML file. It rejects unknown keys, credential keys, invalid addresses, a bot address in the sender allowlist, unknown or duplicate events, invalid ports, hosts and token lifetimes, and unsafe files. All validation errors are returned together, without local absolute paths. |
+| `internal/config` | Resolves the configuration file and data directory paths, normalizes email addresses and loads the TOML file. It rejects unknown keys, credential keys, invalid addresses, a bot address in the sender allowlist, unknown or duplicate events, invalid ports, hosts and token lifetimes, and unsafe files. TOML syntax and type errors are returned on their own, without echoing the offending text. Unknown and credential keys are reported together before any value is checked. Once the file decodes cleanly, all remaining validation errors are returned together with `errors.Join`. No error contains local absolute paths. |
 | `internal/task` | Task states (`CREATED`, `RUNNING`, `WAITING_INPUT`, `WAITING_APPROVAL`, `COMPLETED`, `FAILED`, `DELIVERY_UNCERTAIN`, `CLOSED`), events and the only transition table. It also decides which states accept replies and which can dispatch one. |
 | `internal/queue` | Reply queue states (`QUEUED`, `DISPATCHING`, `ACKNOWLEDGED`, `UNCERTAIN`, `REJECTED`), events and the transition table, kept separate from task states. |
 | `internal/store/sqlite` | Opens and migrates the database, creates task IDs, persists tasks with optimistic versioning, and deduplicates, queues, dispatches and recovers replies. Every state change runs in one transaction and goes through the state machines first. |
@@ -121,7 +121,7 @@ These rules are implemented and tested in `internal/config` and `internal/store/
 
 **Locations.** The configuration file is `$TURNCOURIER_CONFIG`, which must be an absolute path, or else `TurnCourier/turncourier.toml` under `os.UserConfigDir()` (on macOS, `~/Library/Application Support/TurnCourier/turncourier.toml`). The data directory is `$TURNCOURIER_DATA_DIR`, which must also be absolute, or else the directory that holds the configuration file. The database file is `turncourier.db` in the data directory. `TURNCOURIER_NOTIFY_EVENTS` (comma-separated) is the only setting an environment variable can override. The sender allowlist, addresses and token lifetime cannot be overridden this way.
 
-**Configuration file.** It must be a regular file of at most 1 MiB. On Unix it must belong to the current user and must not be writable by group or others. Unknown keys and credential keys such as `password` or `token` are rejected: the mail authorization code and signing key are meant for the Keychain, which is not wired up yet.
+**Configuration file.** It must be a regular file of at most 1 MiB. On Unix it must belong to the current user and must not be writable by group or others. Key names are case-sensitive, so a variant such as `ADDRESS` counts as an unknown key. Unknown keys and credential keys such as `password` or `token` (in any letter case) are rejected: the mail authorization code and signing key are meant for the Keychain, which is not wired up yet.
 
 **Database.** On Unix the data directory must be `0700` and the database file `0600`. Both are created with those modes, and wider existing modes are refused. The connection uses WAL, `synchronous=FULL`, foreign keys and a 5-second busy timeout, and write transactions start with `BEGIN IMMEDIATE`. Each process uses a single connection, and all tables are `STRICT`. Migrations are embedded SQL files. Each one runs in a transaction together with the `user_version` update, and a database with a newer schema than the build knows is refused unchanged.
 
@@ -140,7 +140,7 @@ These rules are implemented and tested in `internal/config` and `internal/store/
 | Module | Version | License | Used by |
 | --- | --- | --- | --- |
 | `modernc.org/sqlite` | v1.59.0 | BSD-style | `internal/store/sqlite`. Pure Go SQLite, so builds keep `CGO_ENABLED=0`. |
-| `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`. `MetaData.Undecoded()` lets the loader reject unknown keys exactly. |
+| `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`. The loader compares every key path from `MetaData.Keys()` against an allowlist, segment by segment and case-sensitively. `MetaData.Undecoded()` is not enough, because the library matches keys to struct fields case-insensitively. |
 
 `modernc.org/sqlite` also brings in `dustin/go-humanize`, `google/uuid`, `mattn/go-isatty`, `ncruces/go-strftime`, `remyoudompheng/bigfft`, `golang.org/x/sys`, `modernc.org/libc`, `modernc.org/mathutil` and `modernc.org/memory`, all under MIT or BSD-style licenses.
 
