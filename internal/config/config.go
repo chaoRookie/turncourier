@@ -1,3 +1,4 @@
+// Package config 的 Load 严格解码 TOML 配置，填充默认值、应用环境变量白名单，并通过 errors.Join 一次返回全部校验错误。
 package config
 
 import (
