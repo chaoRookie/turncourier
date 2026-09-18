@@ -6,7 +6,7 @@ The format is based on Keep a Changelog. TurnCourier has no releases yet, so eve
 
 ## [Unreleased]
 
-TurnCourier is pre-alpha. It does not yet send or receive email and has no Agent adapters, configuration, Keychain storage, SQLite storage or background service.
+TurnCourier is pre-alpha. It does not yet send or receive email and has no Agent adapters, Keychain storage or background service. Configuration, storage and the state machines exist as internal packages, but no command uses them yet.
 
 ### Added
 
@@ -39,5 +39,25 @@ TurnCourier is pre-alpha. It does not yet send or receive email and has no Agent
 - Apache-2.0 `LICENSE`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), `CONTRIBUTING.md`, `SECURITY.md` (GitHub private vulnerability reporting), issue forms and a pull request template.
 - Bilingual `README.md` and `README.zh-CN.md`, English architecture overview `docs/en/architecture.md`, Chinese development guide `docs/zh-CN/development.md` and Phase 2 plan `docs/zh-CN/plans/phase-02.md`.
 - `AGENTS.md`, `CLAUDE.md` and `HANDOFF.md` with project rules and task checkpoints for AI coding tools.
+
+#### Phase 3: configuration, storage and state machines
+
+These packages are tested but not yet used by any command, so the `turncourier` binary links no new modules.
+
+- `internal/task`: task states, events and the single transition table, plus which states accept and dispatch replies. `internal/queue`: reply queue states, events and transitions, separate from task states. Neither package does any I/O.
+- `internal/config`: strict email address normalization; configuration file and data directory paths from `TURNCOURIER_CONFIG`, `TURNCOURIER_DATA_DIR` or the user config directory; strict TOML loading with defaults, the `TURNCOURIER_NOTIFY_EVENTS` override and all validation errors returned together. Unknown keys, credential keys, invalid addresses, the bot address in the sender allowlist and config files writable by the group or other users are rejected. Error messages contain no local absolute paths.
+- `configs/turncourier.example.toml`, loaded by tests so it stays in sync with validation.
+- `internal/store/sqlite`: SQLite storage with embedded migrations tracked by `user_version`, private file permissions, WAL and `synchronous=FULL`; tasks with optimistic versioning and an event log; inbound reply deduplication by mailbox UID and Message-ID in the same transaction as enqueueing; FIFO dispatch with at most one reply in flight per task, enforced by the API and a partial unique index; crash recovery that marks in-flight replies uncertain and never resends automatically. Only metadata and body SHA-256 digests are stored, never email bodies.
+- `tests/integration`: end-to-end lifecycle test combining the example configuration, a real SQLite database and both state machines.
+- Dependencies `modernc.org/sqlite` v1.59.0 (pure Go, no CGO) and `github.com/BurntSushi/toml` v1.6.0. Only permissive licenses are accepted, and new dependencies must be justified in a plan or issue.
+- `make modverify` runs `go mod verify` and is part of `make check`.
+- Phase 3 plan `docs/zh-CN/plans/phase-03.md`.
+
+### Changed
+
+- Production code is no longer limited to the standard library: the two dependencies above are allowed under the new dependency rules in `CONTRIBUTING.md` and `docs/zh-CN/development.md`.
+- `make fmt` and `make fmt-check` also cover `tests`.
+- The `help` description and the message for planned commands no longer name a phase; the description now starts with `pre-alpha`.
+- README, architecture, development and contribution documents describe the new packages, dependencies and checks.
 
 [Unreleased]: https://github.com/chaoRookie/turncourier

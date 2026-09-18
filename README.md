@@ -6,9 +6,15 @@ Email bridge for Codex and Claude Code, under development: the goal is to contin
 
 ## Status
 
-Pre-alpha. This repository contains the Phase 2 engineering skeleton: a Go command-line program with `help`, `version` and a read-only `doctor`, plus quality gates and CI.
+Pre-alpha. The Go command-line program offers only `help`, `version` and a read-only `doctor`. The repository also has quality gates and CI.
 
-TurnCourier cannot send or receive email yet. There are no agent adapters, no configuration file, no Keychain or SQLite storage and no background service. There are no releases or tags; the only branch is `main`.
+Configuration, storage and the state machines are implemented and tested as internal packages, but no command uses them yet:
+
+- `internal/config` loads and strictly validates the TOML configuration ([example](configs/turncourier.example.toml)).
+- `internal/task` and `internal/queue` are the task and reply queue state machines.
+- `internal/store/sqlite` stores tasks and reply metadata in SQLite, with migrations, deduplication, a FIFO reply queue and crash recovery. It stores no email bodies, only their SHA-256 digests.
+
+TurnCourier cannot send or receive email yet. There are no agent adapters, no Keychain access and no background service. There are no releases or tags; the only branch is `main`.
 
 The Phase 0–1 research probes (Node.js scripts, not product code) resumed the same Codex and Claude Code sessions from a new process on one Mac. Claude Code's first attempt exited abnormally on its second turn, for a reason not yet determined; the retest passed. No real mail round trip has been tested. See the [research report](docs/zh-CN/research/phase-01.md) (Chinese) for evidence and limits.
 
@@ -90,22 +96,23 @@ Contributors should read [CONTRIBUTING.md](CONTRIBUTING.md) and the [development
 | Target | What it does |
 | --- | --- |
 | `make build` | Builds `dist/turncourier`. |
-| `make fmt`, `make fmt-check` | Formats, or checks formatting of, `cmd`, `internal` and `tools`. |
+| `make fmt`, `make fmt-check` | Formats, or checks formatting of, `cmd`, `internal`, `tests` and `tools`. |
 | `make vet` | `go vet ./...` |
+| `make modverify` | `go mod verify`: module checksums must match `go.sum`. |
 | `make comments` | `tools/commentcheck`: Chinese doc comments on packages, types and named functions. |
 | `make test` | `go test -race` writing `coverage.out`; `tools/covercheck` fails below 80% statement coverage of all hand-written Go code, with no exclusions. |
 | `make lint` | staticcheck v0.8.1, with ST1020–ST1022 enabled in `staticcheck.conf`. |
-| `make check` | `fmt-check`, `vet`, `comments`, `test` and `lint`. |
+| `make check` | `fmt-check`, `vet`, `modverify`, `comments`, `test` and `lint`. |
 | `make security` | govulncheck v1.8.0 and `secrets`. |
 | `make secrets` | gitleaks v8.30.1 over all Git history, the staged changes and a snapshot of tracked and non-ignored files. Refuses to run if `.gitleaks.toml` or `.gitleaksignore` exists at the repository root. |
 | `make workflows` | actionlint v1.7.12. |
 | `make tools` | Installs the four quality tools. |
 
-CI runs `make check`, `make security` and `make workflows`; run them locally before opening a pull request. Quality tools are installed on first use into `.local/bin/<tool>-<version>/`, which needs network access.
+CI runs `make check`, `make security` and `make workflows`; run them locally before opening a pull request. Quality tools are installed on first use into `.local/bin/<tool>-<version>/`, which needs network access. The first `make check` also downloads the Go module dependencies; `modernc.org/sqlite` is large and takes several minutes to download and compile the first time.
 
 Code rules:
 
-- Production code uses only the Go standard library.
+- Besides the Go standard library, production code uses two third-party modules: `modernc.org/sqlite` v1.59.0 (pure Go SQLite, no CGO) and `github.com/BurntSushi/toml` v1.6.0. Versions are pinned in `go.mod` and `go.sum`. A new dependency needs its reason and license stated in a plan or issue, and only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
 - Identifiers are in English.
 - Every hand-written package, type (including local types) and named function (including methods and tests) has a Chinese comment, checked by `tools/commentcheck`.
 - Comments on exported identifiers start with the identifier name, checked by staticcheck.
@@ -121,6 +128,7 @@ CI:
 
 - [Design](docs/zh-CN/design.md) (Chinese): approved scope, architecture, security boundaries and target tree
 - [Phase 2 plan](docs/zh-CN/plans/phase-02.md) (Chinese)
+- [Phase 3 plan](docs/zh-CN/plans/phase-03.md) (Chinese): configuration, storage and state machines
 - [Phase 0–1 research report](docs/zh-CN/research/phase-01.md) (Chinese)
 - [Architecture](docs/en/architecture.md)
 - [Research probes](experiments/phase01/README.md) (Chinese)
@@ -142,16 +150,50 @@ turncourier/
 ├── cmd/turncourier/                 # Executable
 │   ├── main.go                      # Entry point: signal cancellation, exit code
 │   └── main_test.go                 # Entry point tests
+├── configs/                         # Configuration examples
+│   └── turncourier.example.toml     # Loaded by tests to stay in sync with validation
 ├── internal/                        # Product packages
 │   ├── cli/                         # Command-line interface
 │   │   ├── cli.go                   # help, version, doctor; planned commands exit 2
 │   │   └── cli_test.go              # Output, argument and exit code tests
-│   └── doctor/                      # Environment diagnostics
-│       ├── doctor.go                # Read-only platform and --version checks
-│       ├── doctor_test.go           # Missing, failing, timeout and cancel tests
-│       ├── process_unix.go          # Unix: kill the version process group
-│       ├── process_other.go         # Other platforms: default cancellation
-│       └── process_unix_test.go     # Process group termination test
+│   ├── config/                      # TOML configuration, not used by commands yet
+│   │   ├── address.go               # Strict email address normalization
+│   │   ├── address_test.go          # Table cases and fuzz seeds
+│   │   ├── config.go                # Config types, defaults, Load, validation
+│   │   ├── config_test.go           # Defaults, rejected keys, env override
+│   │   ├── paths.go                 # Config file and data directory paths
+│   │   ├── paths_test.go            # Default and environment variable paths
+│   │   ├── fileperm_unix.go         # Unix: config file owner and write bits
+│   │   └── fileperm_other.go        # Other platforms: regular file and size
+│   ├── doctor/                      # Environment diagnostics
+│   │   ├── doctor.go                # Read-only platform and --version checks
+│   │   ├── doctor_test.go           # Missing, failing, timeout and cancel tests
+│   │   ├── process_unix.go          # Unix: kill the version process group
+│   │   ├── process_other.go         # Other platforms: default cancellation
+│   │   └── process_unix_test.go     # Process group termination test
+│   ├── queue/                       # Reply queue state machine, no I/O
+│   │   ├── state.go                 # Queue states, events, transition table
+│   │   └── state_test.go            # Every state × event combination
+│   ├── store/sqlite/                # SQLite storage, not used by commands yet
+│   │   ├── store.go                 # Open, Close, connection parameters
+│   │   ├── migrate.go               # Embedded migrations and user_version
+│   │   ├── migrations/0001_init.sql # Initial schema
+│   │   ├── perm_unix.go             # Unix: data directory and file modes
+│   │   ├── perm_other.go            # Other platforms: no mode check
+│   │   ├── id.go                    # Task ID generation
+│   │   ├── tasks.go                 # Tasks and task events, versioned
+│   │   ├── replies.go               # Reply dedup, queue, dispatch, recovery
+│   │   ├── store_test.go            # Pragmas, path escaping, file modes
+│   │   ├── migrate_test.go          # Migration version, rollback, too new
+│   │   ├── id_test.go               # Task ID encoding tests
+│   │   ├── tasks_test.go            # Task lifecycle and version conflicts
+│   │   ├── replies_test.go          # Deduplication, conflicts, atomicity
+│   │   └── dispatch_test.go         # FIFO, uncertain delivery, recovery
+│   └── task/                        # Task state machine, no I/O
+│       ├── state.go                 # Task states, events, transition table
+│       └── state_test.go            # Every state × event combination
+├── tests/integration/               # Cross-package tests
+│   └── lifecycle_test.go            # Config, storage and state machines together
 ├── tools/                           # Engineering checkers run by make
 │   ├── commentcheck/                # make comments
 │   │   ├── main.go                  # Chinese doc comment checker
@@ -166,7 +208,9 @@ turncourier/
 │   └── zh-CN/                       # Chinese documents
 │       ├── design.md                # Approved design and target tree
 │       ├── development.md           # Development guide
-│       ├── plans/phase-02.md        # Phase 2 checklist
+│       ├── plans/                   # Phase checklists
+│       │   ├── phase-02.md          # Phase 2: engineering skeleton
+│       │   └── phase-03.md          # Phase 3: config, storage, state machines
 │       └── research/phase-01.md     # Phase 0–1 findings and limits
 ├── experiments/phase01/             # Research probes, not product code
 │   ├── README.md                    # How to run the probes
@@ -185,7 +229,8 @@ turncourier/
 ├── README.md                        # English README
 ├── README.zh-CN.md                  # Chinese README
 ├── SECURITY.md                      # Vulnerability reporting
-├── go.mod                           # Module path and Go 1.27.1
+├── go.mod                           # Module path, Go 1.27.1, dependencies
+├── go.sum                           # Dependency checksums
 └── staticcheck.conf                 # Enables ST1020–ST1022
 ```
 
@@ -193,7 +238,7 @@ turncourier/
 
 - Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/chaoRookie/turncourier/security/advisories/new), not public issues. See [SECURITY.md](SECURITY.md). There are no supported releases; only `main` exists.
 - Do not put QQ Mail authorization codes, tokens, real email content, agent session transcripts or absolute local paths in issues, pull requests or logs. Use synthetic data to reproduce problems.
-- The current code reads no configuration, credentials or sessions. Public CI does not use real mailboxes or call models.
+- The `turncourier` command reads no configuration, credentials or sessions. The configuration file rejects credential keys; the mail authorization code is to be stored in the Keychain by `init`, which is not implemented. Public CI does not use real mailboxes or call models.
 
 ## License
 

@@ -4,22 +4,23 @@
 
 ## Project status and scope
 
-TurnCourier is pre-alpha. The repository contains the Phase 2 engineering skeleton. There are no releases and no version tags; only the `main` branch exists.
+TurnCourier is pre-alpha. There are no releases and no version tags; only the `main` branch exists.
 
 What exists today:
 
 - `turncourier help`, `turncourier version` and `turncourier doctor`, each with an optional `--json` flag.
 - `doctor` checks the platform and runs `git --version`, `codex --version` and `claude --version`, with a 3-second timeout per tool. It does not check logins, permissions, Agent sessions or mailboxes.
 - `init`, `run`, `tasks`, `logs` and `service` are planned. They print that they are not implemented and exit with code 2.
+- Configuration loading, SQLite storage and the task and reply queue state machines exist as internal packages with tests, but no command uses them yet.
 - Exit codes: `0` on success; `1` when `doctor` is not ready (the platform is not macOS, or the version check for `git`, `codex` or `claude` did not pass: missing, timed out, failed, cancelled or printed unexpected output) or when writing output fails; `2` for usage errors, unknown commands and planned commands. If stdout is a closed pipe, the process is terminated by `SIGPIPE` (exit status 141).
 
-What does not exist yet: sending or receiving email, Agent adapters, configuration, Keychain storage, SQLite storage and any background service. Do not describe these as supported in code, help output or documentation.
+What does not exist yet: sending or receiving email, Agent adapters, Keychain storage, commands that read the configuration or open the database, and any background service. Do not describe these as supported in code, help output or documentation.
 
-The approved scope, boundaries and target directory tree are in [docs/zh-CN/design.md](docs/zh-CN/design.md). The current phase checklist is [docs/zh-CN/plans/phase-02.md](docs/zh-CN/plans/phase-02.md). Before working on something that belongs to a later phase or changes the design, open a feature request so the scope can be agreed first.
+The approved scope, boundaries and target directory tree are in [docs/zh-CN/design.md](docs/zh-CN/design.md). The current phase checklist is [docs/zh-CN/plans/phase-03.md](docs/zh-CN/plans/phase-03.md). Before working on something that belongs to a later phase or changes the design, open a feature request so the scope can be agreed first.
 
 ## Development environment
 
-- Go 1.27.1, as declared in [go.mod](go.mod). Production code uses only the Go standard library; propose any new third-party dependency in an issue first.
+- Go 1.27.1, as declared in [go.mod](go.mod). Besides the Go standard library, production code uses `modernc.org/sqlite` v1.59.0 and `github.com/BurntSushi/toml` v1.6.0, pinned in `go.mod` and `go.sum`. A new dependency must have its reason and license stated in an implementation plan or issue. Only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
 - `git`, `bash` and `tar` for `make secrets`.
 - Network access the first time each quality tool is installed.
 
@@ -44,7 +45,7 @@ Run these from the repository root:
 
 | Command | What it runs |
 | --- | --- |
-| `make check` | `fmt-check`, `vet`, `comments` (tools/commentcheck), `test` (`go test -race` writing `coverage.out`, then tools/covercheck requiring at least 80% statement coverage over all handwritten Go code, with no exclusions) and `lint` (staticcheck with [staticcheck.conf](staticcheck.conf)) |
+| `make check` | `fmt-check`, `vet`, `modverify` (`go mod verify` against `go.sum`), `comments` (tools/commentcheck), `test` (`go test -race` writing `coverage.out`, then tools/covercheck requiring at least 80% statement coverage over all handwritten Go code, with no exclusions) and `lint` (staticcheck with [staticcheck.conf](staticcheck.conf)) |
 | `make security` | `make secrets` (gitleaks over the full Git history, the staged changes and a snapshot of tracked and untracked, non-ignored files) and govulncheck |
 | `make workflows` | actionlint on the GitHub Actions workflows |
 | `make build` | builds `dist/turncourier` |
@@ -59,7 +60,7 @@ After `make build`, run a manual smoke test:
 
 `doctor` exits with 1 on platforms other than macOS or when a tool is missing. That is expected behavior.
 
-`make fmt` applies gofmt to `cmd`, `internal` and `tools`.
+`make fmt` applies gofmt to `cmd`, `internal`, `tests` and `tools`.
 
 `make secrets` refuses to run if `.gitleaks.toml` or `.gitleaksignore` exists at the repository root, because either file can replace the default rules or allow findings while the scan still passes. Do not add them.
 
@@ -120,22 +121,23 @@ Everyone taking part in this project follows the [Code of Conduct](CODE_OF_CONDU
 
 ## 项目阶段与范围
 
-TurnCourier 处于 pre-alpha 阶段，仓库目前是 Phase 2 工程骨架。没有发布版本，也没有版本标签，只有 `main` 分支。
+TurnCourier 处于 pre-alpha 阶段。没有发布版本，也没有版本标签，只有 `main` 分支。
 
 目前已有：
 
 - `turncourier help`、`turncourier version`、`turncourier doctor`，均支持可选的 `--json`。
 - `doctor` 检查平台，并执行 `git --version`、`codex --version`、`claude --version`，每个工具超时 3 秒。它不验证登录、权限、Agent 会话或邮箱。
 - `init`、`run`、`tasks`、`logs`、`service` 是规划命令，运行时输出「尚未实现」，退出码为 2。
+- 配置加载、SQLite 存储以及任务与回复队列状态机已作为内部包实现并有测试，但还没有任何命令使用它们。
 - 退出码：`0` 表示成功；`1` 表示 `doctor` 未就绪（平台不是 macOS，或 `git`、`codex`、`claude` 任一版本检查未通过：缺失、超时、执行失败、被取消或输出异常），或写入输出失败；`2` 表示用法错误、未知命令或规划命令。stdout 管道已断开时，进程按 `SIGPIPE` 终止（退出状态 141）。
 
-尚不存在：邮件收发、Agent 适配器、配置、Keychain 存储、SQLite 存储和任何后台服务。不要在代码、帮助输出或文档中把它们写成已支持。
+尚不存在：邮件收发、Agent 适配器、Keychain 存储、读取配置或打开数据库的命令，以及任何后台服务。不要在代码、帮助输出或文档中把它们写成已支持。
 
-已批准的范围、边界和目标目录树见 [docs/zh-CN/design.md](docs/zh-CN/design.md)，当前阶段清单见 [docs/zh-CN/plans/phase-02.md](docs/zh-CN/plans/phase-02.md)。如果要做属于后续阶段或会改变设计的工作，先提交功能建议，确认范围后再动手。
+已批准的范围、边界和目标目录树见 [docs/zh-CN/design.md](docs/zh-CN/design.md)，当前阶段清单见 [docs/zh-CN/plans/phase-03.md](docs/zh-CN/plans/phase-03.md)。如果要做属于后续阶段或会改变设计的工作，先提交功能建议，确认范围后再动手。
 
 ## 开发环境
 
-- Go 1.27.1，以 [go.mod](go.mod) 为准。生产代码只使用 Go 标准库；需要新增第三方依赖时先开 issue 讨论。
+- Go 1.27.1，以 [go.mod](go.mod) 为准。生产代码除 Go 标准库外使用 `modernc.org/sqlite` v1.59.0 与 `github.com/BurntSushi/toml` v1.6.0，版本固定在 `go.mod` 与 `go.sum`。新增依赖须在实施清单或 issue 中说明理由与许可证，只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。
 - `make secrets` 需要 `git`、`bash` 和 `tar`。
 - 每个质量工具首次安装时需要联网。
 
@@ -160,7 +162,7 @@ make GO=/path/to/go check
 
 | 命令 | 内容 |
 | --- | --- |
-| `make check` | `fmt-check`、`vet`、`comments`（tools/commentcheck）、`test`（`go test -race` 生成 `coverage.out`，再由 tools/covercheck 要求全部手写 Go 代码的语句覆盖率不低于 80%，没有排除项）和 `lint`（按 [staticcheck.conf](staticcheck.conf) 运行 staticcheck） |
+| `make check` | `fmt-check`、`vet`、`modverify`（按 `go.sum` 执行 `go mod verify`）、`comments`（tools/commentcheck）、`test`（`go test -race` 生成 `coverage.out`，再由 tools/covercheck 要求全部手写 Go 代码的语句覆盖率不低于 80%，没有排除项）和 `lint`（按 [staticcheck.conf](staticcheck.conf) 运行 staticcheck） |
 | `make security` | `make secrets`（gitleaks 扫描全部 Git 历史、暂存区，以及受跟踪和未被忽略的未跟踪文件快照）和 govulncheck |
 | `make workflows` | 用 actionlint 检查 GitHub Actions 工作流 |
 | `make build` | 构建 `dist/turncourier` |
@@ -175,7 +177,7 @@ make GO=/path/to/go check
 
 在非 macOS 平台或缺少工具时，`doctor` 退出码为 1，这是预期行为。
 
-`make fmt` 对 `cmd`、`internal`、`tools` 执行 gofmt。
+`make fmt` 对 `cmd`、`internal`、`tests`、`tools` 执行 gofmt。
 
 仓库根目录存在 `.gitleaks.toml` 或 `.gitleaksignore` 时，`make secrets` 会拒绝扫描，因为这两个文件可能替换默认规则或放行发现，而扫描仍显示通过。不要添加它们。
 

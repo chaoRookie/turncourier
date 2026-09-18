@@ -776,19 +776,21 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
 **Files:**
 - Modify: `internal/cli/cli.go`、`internal/cli/cli_test.go`、`cmd/turncourier/main_test.go`、`README.md`、`README.zh-CN.md`、`docs/en/architecture.md`、`docs/zh-CN/development.md`、`docs/zh-CN/design.md`、`CONTRIBUTING.md`、`CHANGELOG.md`、`AGENTS.md`
 
-- [ ] **Step 1：** 帮助描述由「Phase 2 工程骨架：…」改为「pre-alpha：当前没有邮件收发、任务执行或后台服务能力。」，规划命令的提示去掉阶段号；相应测试断言改为检查 `pre-alpha`。`go test ./cmd/... ./internal/cli/` 通过。
-- [ ] **Step 2：** README 中英文同步：状态说明（配置、存储、状态机已实现但尚未接入命令）、代码规则中的依赖说明、实际文件树（新增 `configs/`、`internal/task`、`internal/queue`、`internal/config`、`internal/store/sqlite`、`tests/integration`、`docs/zh-CN/plans/phase-03.md`），并用 `git ls-files --cached --others --exclude-standard | sort` 核对；两个 README 的 make 目标表格增加 `make modverify` 行，`make check` 行（`README.md`、`README.zh-CN.md` 各一处）改为 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint`。
-- [ ] **Step 3：** `docs/en/architecture.md`：当前范围、包与依赖方向（`store/sqlite → task, queue`；`config`、`task`、`queue` 互不依赖，也不依赖存储）、持久化与恢复语义、依赖列表；「Quality gates and CI」一节开头列举 `make check` 子目标的句子补上 `modverify`，并加一条说明 `go mod verify` 校验 `go.sum` 哈希。
-- [ ] **Step 4：** `docs/zh-CN/development.md`：依赖政策与许可证记录、`modverify`（「常用 make 目标」表格新增 `make modverify` 行，并把 `make check` 行的子目标链补上 `modverify`）、配置文件与数据目录位置、SQLite 测试约定（临时目录、真实数据库、触发器注入故障）、集成测试目录、模糊测试的本地运行方式。
-- [ ] **Step 5：** `CONTRIBUTING.md` 依赖规则改为「新增依赖须在实施清单或 issue 中说明理由与许可证」，并把英文与中文两处「提交前检查」表格的 `make check` 行补上 `modverify`；`CHANGELOG.md` 在 `[Unreleased]` 增加 Phase 3 条目；`AGENTS.md` 当前范围改为「已实现配置、存储与状态机，尚未接入邮件与 Agent」；`design.md` 状态行更新。
-- [ ] **Step 6：** `git diff --check` 通过；在全部文档中检索本机路径与个人信息无结果；下面的断言无输出，确认没有文档漏掉 `check` 链的新子目标：
+- [x] **Step 1：** 帮助描述由「Phase 2 工程骨架：…」改为「pre-alpha：当前没有邮件收发、任务执行或后台服务能力。」，规划命令的提示去掉阶段号；相应测试断言改为检查 `pre-alpha`。`go test ./cmd/... ./internal/cli/` 通过。
+- [x] **Step 2：** README 中英文同步：状态说明（配置、存储、状态机已实现但尚未接入命令）、代码规则中的依赖说明、实际文件树（新增 `configs/`、`internal/task`、`internal/queue`、`internal/config`、`internal/store/sqlite`、`tests/integration`、`docs/zh-CN/plans/phase-03.md`），并用 `git ls-files --cached --others --exclude-standard | sort` 核对；两个 README 的 make 目标表格增加 `make modverify` 行，`make check` 行（`README.md`、`README.zh-CN.md` 各一处）改为 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint`。
+- [x] **Step 3：** `docs/en/architecture.md`：当前范围、包与依赖方向（`store/sqlite → task, queue`；`config`、`task`、`queue` 互不依赖，也不依赖存储）、持久化与恢复语义、依赖列表；「Quality gates and CI」一节开头列举 `make check` 子目标的句子补上 `modverify`，并加一条说明 `go mod verify` 校验 `go.sum` 哈希。
+- [x] **Step 4：** `docs/zh-CN/development.md`：依赖政策与许可证记录、`modverify`（「常用 make 目标」表格新增 `make modverify` 行，并把 `make check` 行的子目标链补上 `modverify`）、配置文件与数据目录位置、SQLite 测试约定（临时目录、真实数据库、触发器注入故障）、集成测试目录、模糊测试的本地运行方式。
+- [x] **Step 5：** `CONTRIBUTING.md` 依赖规则改为「新增依赖须在实施清单或 issue 中说明理由与许可证」，并把英文与中文两处「提交前检查」表格的 `make check` 行补上 `modverify`；`CHANGELOG.md` 在 `[Unreleased]` 增加 Phase 3 条目；`AGENTS.md` 当前范围改为「已实现配置、存储与状态机，尚未接入邮件与 Agent」；`design.md` 状态行更新。
+- [x] **Step 6：** `git diff --check` 通过；在全部文档中检索本机路径与个人信息无结果；下面的断言无输出，确认没有文档漏掉 `check` 链的新子目标：
 
 ```sh
 # 同时出现 fmt-check 与 lint 的行就是在枚举 check 链，这些行都必须含 modverify。
 grep -rn fmt-check README.md README.zh-CN.md CONTRIBUTING.md \
   docs/en/architecture.md docs/zh-CN/development.md | grep lint | grep -v modverify
 ```
-- [ ] **Step 7：** `git commit -m "docs: document phase 3 configuration, storage and state machines"`
+- [x] **Step 7：** `git commit -m "docs: document phase 3 configuration, storage and state machines"`
+
+**实施说明：** Step 1 的测试除把帮助描述断言改为 `pre-alpha` 外，还断言规划命令与其他用法错误的提示不含 `Phase`，钉住「去掉阶段号」；改动前 `TestRun`、`TestHelpJSON` 与 `TestUsageFailures` 的 5 个规划命令子用例失败，改动后通过。清单之外的同步（均为让既有文字与实现一致，不涉及新功能）：Task 10 已把 `tests` 加入 `fmt`、`fmt-check` 的目录列表，但各步骤未点名描述这两个目标的文档，因此两个 README 的 make 目标表格、`CONTRIBUTING.md` 中英文两处、`development.md` 与 `architecture.md` 的目录列表一并补上 `tests`；`CONTRIBUTING.md` 中英文「项目阶段与范围」原写配置与 SQLite 存储不存在、当前清单为 phase-02，`design.md` 末段写「当前执行工程骨架」，`architecture.md`「Planned architecture」开头写本节均未实现，README「安全与隐私」写当前代码不读取配置，均改为与本阶段实际状态一致；`development.md`「常用 make 目标」的「是否联网」列中 `vet`、`test`、`check` 改为首次下载模块依赖时需要联网（在临时副本中用空模块缓存加 `GOPROXY=off` 验证：`go build ./cmd/turncourier` 与 `go run ./tools/commentcheck .` 可离线完成，`go vet` 与 `go mod verify` 需要下载模块）；`CHANGELOG.md` 在 Phase 3 条目之外新增 `### Changed` 一节，记录依赖规则、`fmt` 目录与帮助文案的变化。README 两份文件树按 `git ls-files --cached --others --exclude-standard` 逐项核对，结构一致，新增 `go.sum` 与 `internal/store/sqlite` 的全部测试文件。`go build` 后 `go version -m` 只列出本模块，确认产品二进制未链接两个新依赖。
 
 ### Task 12：全量验证、审查与合并
 

@@ -45,7 +45,7 @@ func TestHelpJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &help); err != nil {
 		t.Fatal(err)
 	}
-	if help.Name != "turncourier" || len(help.Commands) != 3 || len(help.Planned) != 5 || !strings.Contains(help.Description, "Phase 2") {
+	if help.Name != "turncourier" || len(help.Commands) != 3 || len(help.Planned) != 5 || !strings.Contains(help.Description, "pre-alpha") {
 		t.Fatalf("unexpected help: %+v", help)
 	}
 }
@@ -68,7 +68,7 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-// TestUsageFailures 确认未知命令（即使带参数）、未知参数及规划命令不会伪报执行成功，也不会启动外部工具。
+// TestUsageFailures 确认未知命令（即使带参数）、未知参数及规划命令不会伪报执行成功，也不会启动外部工具；提示中不含阶段号。
 func TestUsageFailures(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -86,7 +86,7 @@ func TestUsageFailures(t *testing.T) {
 	for _, test := range cases {
 		t.Run(strings.Join(test.args, "/"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code := Run(context.Background(), test.args, &stdout, &stderr, doctor.Checker{}); code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), test.want) {
+			if code := Run(context.Background(), test.args, &stdout, &stderr, doctor.Checker{}); code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), test.want) || strings.Contains(stderr.String(), "Phase") {
 				t.Errorf("unexpected usage result: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
 			}
 		})

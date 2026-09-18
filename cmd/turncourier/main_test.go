@@ -15,7 +15,7 @@ func TestRun(t *testing.T) {
 		code int
 		want string
 	}{
-		{nil, 0, "Phase 2"},
+		{nil, 0, "pre-alpha"},
 		{[]string{"version"}, 0, "turncourier"},
 		{[]string{"run", "codex"}, 2, "尚未实现"},
 	}

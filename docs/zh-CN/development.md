@@ -1,6 +1,6 @@
 # 开发指南
 
-状态：pre-alpha，Phase 2 工程骨架。当前只有 `help`、`version`、`doctor` 三个命令和一套质量门槛，没有邮件收发、Agent 适配器、配置、Keychain、SQLite 或后台服务。规划内容见[设计文档](design.md)，当前代码结构见[英文架构文档](../en/architecture.md)，Phase 2 范围见[实施清单](plans/phase-02.md)。
+状态：pre-alpha。命令只有 `help`、`version`、`doctor` 三个，另有一套质量门槛。配置、存储与状态机（Phase 3）已作为内部包实现并通过测试，但尚未接入任何命令；没有邮件收发、Agent 适配器、Keychain 或后台服务。规划内容见[设计文档](design.md)，当前代码结构与持久化语义见[英文架构文档](../en/architecture.md)，各阶段范围见实施清单（[Phase 2](plans/phase-02.md)、[Phase 3](plans/phase-03.md)）。
 
 本文所有命令都在仓库根目录执行。
 
@@ -8,7 +8,7 @@
 
 ### Go 1.27.1
 
-`go.mod` 要求 Go 1.27.1。生产代码只用标准库，构建和测试不需要下载第三方模块。
+`go.mod` 要求 Go 1.27.1。生产代码依赖两个第三方模块（见[第三方依赖](#第三方依赖)），首次运行 `go vet`、`go test` 或 `make check` 时，go 命令会从模块代理下载它们；`modernc.org/sqlite` 体积较大，首次下载和编译需要几分钟。
 
 本机已经装有 Go 时，先确认版本：
 
@@ -61,18 +61,35 @@ git check-ignore .local/toolchains/go/bin/go
 - `doctor` 会查找 `git`、`codex`、`claude`，但测试不依赖本机是否安装了它们。
 - Node.js 22 或更高版本只在运行 `experiments/phase01/` 的研究探针时需要，见[探针说明](../../experiments/phase01/README.md)。
 
+## 第三方依赖
+
+| 模块 | 版本 | 许可证 | 使用方 |
+| --- | --- | --- | --- |
+| `modernc.org/sqlite` | v1.59.0 | BSD 风格 | `internal/store/sqlite`；纯 Go 实现，构建保持 `CGO_ENABLED=0` |
+| `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`；用 `MetaData.Undecoded()` 精确拒绝未知键 |
+
+`modernc.org/sqlite` 另外带入 `dustin/go-humanize`、`google/uuid`、`mattn/go-isatty`、`ncruces/go-strftime`、`remyoudompheng/bigfft`、`golang.org/x/sys`、`modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory`，许可证均为 MIT 或 BSD 风格。选型理由与实测记录见 [Phase 3 实施清单](plans/phase-03.md) 的决策 D1。
+
+依赖规则：
+
+- 只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。新增依赖须在实施清单或 issue 中说明理由与许可证，并在上表记录。
+- 版本固定在 `go.mod` 与 `go.sum`。`make modverify`（`make check` 的一部分）执行 `go mod verify`，确认模块缓存中的依赖与 `go.sum` 记录的哈希一致，防止被篡改的依赖进入构建。
+- govulncheck（`make security`）与 Dependabot 的 `gomod` 更新覆盖这些依赖。
+- 目前没有命令导入配置、状态机或存储包，产品二进制不链接上述模块。正式发布链接它们的二进制之前，必须补齐第三方许可声明。
+
 ## 常用 make 目标
 
 | 目标 | 作用 | 是否联网 |
 | --- | --- | --- |
 | `make build` | `go build -trimpath` 输出 `dist/turncourier`。版本号默认 `0.1.0-dev`，可用 `make build VERSION=0.1.0-dev.local` 覆盖 | 否 |
-| `make fmt` | 用 `gofmt -w` 格式化 `cmd`、`internal`、`tools` | 否 |
+| `make fmt` | 用 `gofmt -w` 格式化 `cmd`、`internal`、`tests`、`tools` | 否 |
 | `make fmt-check` | 列出未格式化的文件并失败；gofmt 本身出错也算失败 | 否 |
-| `make vet` | `go vet ./...` | 否 |
+| `make vet` | `go vet ./...` | 首次下载模块依赖时 |
+| `make modverify` | `go mod verify`，校验依赖与 `go.sum` 记录的哈希一致 | 首次下载模块依赖时 |
 | `make comments` | `go run ./tools/commentcheck .`，检查中文注释 | 否 |
-| `make test` | `go test -race -covermode=atomic -coverprofile=coverage.out ./...`，再用 `tools/covercheck` 要求覆盖率不低于 80% | 否 |
+| `make test` | `go test -race -covermode=atomic -coverprofile=coverage.out ./...`，再用 `tools/covercheck` 要求覆盖率不低于 80% | 首次下载模块依赖时 |
 | `make lint` | staticcheck v0.8.1 检查 `./...` | 首次安装时 |
-| `make check` | 依次运行 `fmt-check`、`vet`、`comments`、`test`、`lint` | 首次安装 staticcheck 时 |
+| `make check` | 依次运行 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint` | 首次下载模块依赖或安装 staticcheck 时 |
 | `make secrets` | 用 gitleaks v8.30.1 执行 `scripts/scan-secrets.sh` | 首次安装时 |
 | `make security` | 先执行 `make secrets`，再用 govulncheck v1.8.0 检查 `./...` | 是：govulncheck 每次运行都要查询 Go 漏洞数据库 |
 | `make workflows` | actionlint v1.7.12 检查 `.github/workflows` | 首次安装时 |
@@ -155,11 +172,13 @@ go run ./tools/commentcheck .
 ## 测试约定
 
 - 单元测试和被测代码放在同一目录（`*_test.go`）。
-- 跨模块的集成、端到端和真实验收测试，按设计将来放在 `tests/` 下。目前没有这类测试，不要提前建空目录。
+- 跨包的集成测试放在 `tests/integration/`（包名 `integration_test`，只有测试文件，需要单独写中文包注释）。`lifecycle_test.go` 组合示例配置、临时目录中的真实 SQLite 与两个状态机，走完一条回复从入队、派发、模拟崩溃后恢复到任务关闭的完整流程。端到端和真实验收测试按设计将来也放在 `tests/` 下，有代码时再建对应目录。
 - 测试必须离线：不访问网络、真实邮箱、模型或 Agent 会话，也不依赖本机是否装有 `git`、`codex`、`claude`。`internal/doctor` 的测试通过 `Checker` 注入 `GOOS`、`Lookup`、`Run` 和 `Timeout`，使用合成的版本字符串（见 `doctor_test.go` 中的 `healthyChecker`）。CLI 测试把输出写到 `bytes.Buffer`。
 - 需要真实子进程时，使用测试辅助子进程模式，让测试二进制自己扮演被调用的命令。`internal/doctor/doctor_test.go` 中的 `TestMain` 发现环境变量 `TURNCOURIER_TEST_VERSION_PROCESS` 非空时不运行测试，而是按模式（`ok`、`error`、`large`、`wait`、`background`、`group`）模拟版本命令。测试用 `os.Executable()` 取得自身路径，用 `t.Setenv` 选择模式，通过 `TURNCOURIER_TEST_PID_FILE` 取回孙进程 PID，结束前清理遗留进程。现有这类变量都以 `TURNCOURIER_TEST_` 开头，正常测试流程不会设置它们。
 - 平台相关的测试用构建约束，例如 `process_unix_test.go` 的 `//go:build unix`。平台缺少前提条件（例如不能创建符号链接）时，用 `t.Skip` 并写明原因。
 - 临时文件放在 `t.TempDir()` 里。
+- 配置测试把合成的 TOML 写入 `t.TempDir()` 并设为 0600，环境变量通过注入的 `getenv` 或 `t.Setenv` 提供，断言错误文本不含临时目录路径。
+- SQLite 测试使用临时目录中的真实数据库，不用内存库或替身驱动。`t.TempDir()` 按 umask 创建（通常为 0755），会被数据目录的权限检查拒绝，因此数据目录用它下面尚不存在、由 `sqlite.Open` 以 0700 新建的子目录。时钟与随机源通过 `sqlite.Options` 注入。验证事务回滚时，在测试中直接对数据库创建触发器注入故障，例如 `CREATE TRIGGER boom BEFORE INSERT ON replies BEGIN SELECT RAISE(ABORT, 'boom'); END;`，再断言相关表的行数和状态没有变化。
 - 测试数据全部使用合成内容。需要邮箱地址时，使用 `.invalid` 这类保留域名。
 
 常用命令：
@@ -167,11 +186,36 @@ go run ./tools/commentcheck .
 ```sh
 go test ./internal/doctor
 go test -run TestCheckTimeout ./internal/doctor
+go test -race ./tests/...
 go test -race ./...
 make test
 ```
 
 覆盖率门槛只以 `make test` 的结果为准。
+
+模糊测试：`internal/config` 的 `FuzzNormalizeAddress` 在普通 `go test` 与 CI 中只运行种子用例。需要运行模糊引擎时在本地执行：
+
+```sh
+go test -run='^$' -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/
+```
+
+发现失败时，go 会把触发失败的输入写入 `internal/config/testdata/fuzz/FuzzNormalizeAddress/`，之后的 `go test` 会把它当作种子重跑。
+
+## 配置文件与数据目录
+
+目前没有命令读取配置或打开数据库，以下位置由 `internal/config` 与 `internal/store/sqlite` 实现，供后续命令使用：
+
+| 项目 | 位置 |
+| --- | --- |
+| 配置文件 | `$TURNCOURIER_CONFIG`（须为绝对路径）；未设置时为 `os.UserConfigDir()` 下的 `TurnCourier/turncourier.toml`，macOS 上即 `~/Library/Application Support/TurnCourier/turncourier.toml` |
+| 数据目录 | `$TURNCOURIER_DATA_DIR`（须为绝对路径）；未设置时为配置文件所在目录 |
+| 数据库 | 数据目录下的 `turncourier.db` |
+
+- 配置示例是 `configs/turncourier.example.toml`，测试会加载它，修改校验规则时同步修改示例。配置只保存账户与选项，出现 `password`、`token` 等凭据类键或未知键都会报错；授权码与签名密钥将由 `init` 写入 Keychain（尚未实现）。
+- 配置文件须是不超过 1 MiB 的常规文件；在 Unix 上须归当前用户所有，且组和其他用户不可写。
+- 环境变量只能覆盖 `TURNCOURIER_NOTIFY_EVENTS`（逗号分隔，空字符串视为未设置）。白名单、邮箱地址、令牌有效期等安全相关项不接受环境变量覆盖。
+- 在 Unix 上，数据目录权限须为 0700、数据库文件须为 0600；缺失时按此权限创建，已有目录或文件权限更宽时拒绝打开。数据库只保存元数据与正文 SHA-256 摘要，不保存正文和凭据。
+- `.gitignore` 已忽略 `turncourier.toml` 与 `*.db`，不要把本机配置或数据库提交进仓库。
 
 ## 隐私与凭据
 
@@ -214,7 +258,7 @@ make test
 
    输出里没有 `.local/`、`dist/`、`coverage.out` 这类被忽略的内容，树形图里也不要出现。
 3. 包职责或依赖方向变化时，同步更新[英文架构文档](../en/architecture.md)。
-4. Phase 2 生产代码不引入第三方依赖。
+4. 新增第三方依赖按[第三方依赖](#第三方依赖)一节的规则处理。
 5. 改动了 `.github/workflows/` 时，运行 `make workflows`。
 
 ## CI 工作流
