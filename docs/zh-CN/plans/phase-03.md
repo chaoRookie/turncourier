@@ -757,8 +757,8 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
 - Create: `tests/integration/lifecycle_test.go`
 - Modify: `Makefile`（`fmt`、`fmt-check` 目录加入 `tests`）
 
-- [ ] **Step 1：** 修改 Makefile 目录列表；`make fmt-check` 通过。
-- [ ] **Step 2：写测试。** 包名 `integration_test`，文件开头写中文包注释。`TestReplyLifecycle`：
+- [x] **Step 1：** 修改 Makefile 目录列表；`make fmt-check` 通过。
+- [x] **Step 2：写测试。** 包名 `integration_test`，文件开头写中文包注释。`TestReplyLifecycle`：
   1. 把 `configs/turncourier.example.toml` 复制到临时目录并设为 0600；设置 `TURNCOURIER_CONFIG` 与 `TURNCOURIER_DATA_DIR`（均在临时目录内）；`config.ResolvePaths` + `config.Load` 成功；
   2. `sqlite.Open(ctx, cfg.Paths.DataDir, sqlite.Options{})`；创建 codex 任务，`StartTask` 会话 ID `thread-synthetic-0001`，执行 `turn_completed`；
   3. 以 `cfg.Mailbox.Address` 为账户，用 `sha256.Sum256` 计算合成正文 `"first synthetic reply"` 与 `"second synthetic reply"` 的摘要，记录两条回复；
@@ -766,8 +766,10 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
   5. 派发得到第 2 条 → `AcknowledgeReply` → `close`；
   6. 再次记录第 1 条回复为 `Duplicate=true`；记录第 3 条新回复为 REJECTED(`task_closed`)；
   7. 断言完整任务事件序列：`start, turn_completed, reply_dispatched, delivery_unknown, delivery_confirmed, turn_completed, reply_dispatched, close`。
-- [ ] **Step 3：** `go test -race ./tests/...` 通过；`make comments` 通过（确认测试专用包的中文包注释被识别）。
-- [ ] **Step 4：** `git commit -m "test: cover config, store and state machine lifecycle end to end"`
+- [x] **Step 3：** `go test -race ./tests/...` 通过；`make comments` 通过（确认测试专用包的中文包注释被识别）。
+- [x] **Step 4：** `git commit -m "test: cover config, store and state machine lifecycle end to end"`
+
+**实施说明：** `tests` 目录在 Step 2 之前不存在，`gofmt -l` 对缺失目录报 `lstat tests: no such file or directory` 并以非零码退出，因此 Step 1 改完 Makefile 后 `make fmt-check` 失败，建立测试文件后才通过；在临时副本中放入未格式化的测试文件，新目录列表下 `make fmt-check` 失败、旧列表下通过。Step 2 第 7 点的事件序列与 Task 8–9 已合入的实现一致（`RecoverInFlight` 处理的是已为 UNCERTAIN 的回复，不产生事件；`AcknowledgeReply` 不产生任务事件），无需调整。清单之外的两处补充：用 `t.Setenv` 清空 `TURNCOURIER_NOTIFY_EVENTS`，避免开发者环境影响加载；断言 `cfg.Paths.DataDir` 等于环境变量给出的目录。数据目录是临时目录下尚不存在、由 `sqlite.Open` 以 0700 创建的子目录。本任务只加测试，存储实现已在 Task 6–9 合入，测试首次运行即通过；在临时副本中对存储层做 5 个变异（派发改为倒序、`RecoverInFlight` 返回空列表、核对已送达时不执行 delivery_confirmed、关闭任务的拒绝原因改为 `task_failed`、确认改为标记不确定）均被本测试拦截，去掉包注释后 `make comments` 执行的 `go run ./tools/commentcheck .` 报「包 integration_test 缺少中文包级文档」。
 
 ### Task 11：命令行文案与文档同步
 

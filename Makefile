@@ -19,11 +19,11 @@ build:
 	$(GO) build -trimpath -ldflags '-X github.com/chaoRookie/turncourier/internal/cli.Version=$(VERSION)' -o dist/turncourier ./cmd/turncourier
 
 fmt:
-	"$$($(GO) env GOROOT)/bin/gofmt" -w cmd internal tools
+	"$$($(GO) env GOROOT)/bin/gofmt" -w cmd internal tests tools
 
 # gofmt 自身失败（找不到工具链、文件不可读、语法错误）时输出为空，需单独检查退出码以免误报通过。
 fmt-check:
-	@files="$$("$$($(GO) env GOROOT)/bin/gofmt" -l cmd internal tools)" || exit 1; test -z "$$files" || { printf '需格式化的文件：\n%s\n' "$$files"; exit 1; }
+	@files="$$("$$($(GO) env GOROOT)/bin/gofmt" -l cmd internal tests tools)" || exit 1; test -z "$$files" || { printf '需格式化的文件：\n%s\n' "$$files"; exit 1; }
 
 vet:
 	$(GO) vet ./...
