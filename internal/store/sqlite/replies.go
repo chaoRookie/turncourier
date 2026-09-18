@@ -55,6 +55,14 @@ var ErrNoDispatchableReply = errors.New("no dispatchable reply")
 // 恢复的目标取决于派发时记下的状态，因此不在 task 状态机的事件表中，也不能经 ApplyTaskEvent 执行。
 const replyUnsent task.Event = "reply_unsent"
 
+// eventsSinceDispatch 是在途回复处于各状态、且任务自派发以来没有发生其他事件时，该任务按发生顺序的最后几条事件。
+// 回复标记不确定时任务仍为派发后的 RUNNING，才会在 reply_dispatched 之后紧跟 delivery_unknown，因此只看最新一条不够：
+// 审批往返后回到 RUNNING 再标记不确定，最新一条同样是 delivery_unknown。
+var eventsSinceDispatch = map[queue.State][]string{
+	queue.Dispatching: {string(task.ReplyDispatched)},
+	queue.Uncertain:   {string(task.ReplyDispatched), string(task.DeliveryUnknown)},
+}
+
 // stateRejectReasons 是不接受回复的任务状态对应的拒绝原因；未列出的状态记为 task_not_accepting。
 var stateRejectReasons = map[task.State]string{
 	task.Failed: "task_failed",
@@ -247,16 +255,19 @@ func (s *Store) MarkReplyUncertain(ctx context.Context, seq int64) (Reply, Task,
 
 // RequeueUnsentReply 在确定回复没有发给 Agent 时把 DISPATCHING 回复按原序号放回 QUEUED，
 // 任务恢复到派发前状态；任务已不接受回复时改为 REJECTED。
-// 任务仍接受回复却已离开派发后的 RUNNING 时，task.ResumeAfterUnsent 拒绝恢复，返回 task.ErrInvalidTransition 且不改动数据。
+// 任务仍接受回复、但自派发以来已发生其他事件（例如回合结束或审批往返）时，说明 Agent 已处理该回复，
+// 返回包装 task.ErrInvalidTransition 的错误且不改动数据；此时应改用 AcknowledgeReply 确认，确认后不再阻塞后续派发。
 func (s *Store) RequeueUnsentReply(ctx context.Context, seq int64) (Reply, Task, error) {
 	return s.changeReply(ctx, seq, func(ctx context.Context, tx *sql.Tx, r Reply, t Task, now int64) error {
 		return putBack(ctx, tx, r, queue.Dispatching, t, now)
 	})
 }
 
-// ResolveUncertainReply 记录本地核对结果：delivered 为 true 时回复 ACKNOWLEDGED，任务处于 DELIVERY_UNCERTAIN 时执行 delivery_confirmed；
-// 为 false 时回复按原序号回到 QUEUED、任务恢复派发前状态；任务已关闭或失败时回复改为 REJECTED，任务状态不变。
-// 回复不处于 UNCERTAIN 时返回 queue.ErrInvalidTransition；未送达时任务的恢复规则与 RequeueUnsentReply 相同。
+// ResolveUncertainReply 记录本地核对结果：delivered 为 true 时回复 ACKNOWLEDGED（任务已关闭或失败时同样如此），
+// 任务处于 DELIVERY_UNCERTAIN 时执行 delivery_confirmed，其他状态不变。为 false 时按 RequeueUnsentReply 的规则处理：
+// 任务已关闭或失败时回复改为 REJECTED、任务状态不变；否则须任务自派发以来只发生过标记不确定时的 delivery_unknown，
+// 回复才按原序号回到 QUEUED、任务恢复派发前状态，不满足时返回包装 task.ErrInvalidTransition 的错误，应改为核对为已送达。
+// 回复不处于 UNCERTAIN 时返回 queue.ErrInvalidTransition。
 func (s *Store) ResolveUncertainReply(ctx context.Context, seq int64, delivered bool) (Reply, Task, error) {
 	return s.changeReply(ctx, seq, func(ctx context.Context, tx *sql.Tx, r Reply, t Task, now int64) error {
 		if !delivered {
@@ -373,8 +384,10 @@ func markUncertain(ctx context.Context, tx *sql.Tx, r Reply, t Task, now int64) 
 }
 
 // putBack 处理确认未送达 Agent 的在途回复，回复须处于 from：任务已不接受回复时回复改为 REJECTED，
-// 原因与 RecordReply 相同，任务不变；否则回复按原序号回到 QUEUED 并清除派发前状态，
-// 任务经 task.ResumeAfterUnsent 恢复派发前状态并记录 reply_unsent 事件。
+// 原因与 RecordReply 相同，任务不变。否则任务最新的事件必须恰为 eventsSinceDispatch[from]，
+// 即自派发以来任务没有发生其他事件，回复才按原序号回到 QUEUED 并清除派发前状态，
+// 任务经 task.ResumeAfterUnsent 恢复派发前状态并记录 reply_unsent 事件；任务已继续推进说明 Agent 已处理该回复，
+// 放回队列会重复投递，因此返回包装 task.ErrInvalidTransition 的错误，由调用方把回复核对为已送达。
 func putBack(ctx context.Context, tx *sql.Tx, r Reply, from queue.State, t Task, now int64) error {
 	if !task.AcceptsReplies(t.State) {
 		next, err := nextReply(r, from, queue.Reject)
@@ -387,6 +400,16 @@ func putBack(ctx context.Context, tx *sql.Tx, r Reply, from queue.State, t Task,
 	next, err := nextReply(r, from, queue.Requeue)
 	if err != nil {
 		return err
+	}
+	want := eventsSinceDispatch[from]
+	var latest string
+	if err := tx.QueryRowContext(ctx,
+		"SELECT coalesce(group_concat(event, ' ' ORDER BY seq), '') FROM (SELECT seq, event FROM task_events WHERE task_id = ? ORDER BY seq DESC LIMIT ?)",
+		t.ID, len(want)).Scan(&latest); err != nil {
+		return fmt.Errorf("cannot read task events: %w", err)
+	}
+	if latest != strings.Join(want, " ") {
+		return fmt.Errorf("%w: reply %d: 任务在派发后已继续推进，回复应核对为已送达", task.ErrInvalidTransition, r.Seq)
 	}
 	resumed, err := task.ResumeAfterUnsent(t.State, r.ResumeState)
 	if err != nil {

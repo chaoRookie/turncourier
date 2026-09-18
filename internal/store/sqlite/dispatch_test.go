@@ -82,17 +82,19 @@ func allReplies(t *testing.T, s *Store) []Reply {
 	return replies
 }
 
-// requireRejected 调用 op 并断言错误包装 want，且回复队列、任务与事件记录都没有改动。
-func requireRejected(t *testing.T, s *Store, name string, want error, taskID string, op func() (Reply, Task, error)) {
+// requireRejected 调用 op 并断言错误包装 want，且回复队列、任务与事件记录都没有改动；返回 op 的错误供调用方进一步断言。
+func requireRejected(t *testing.T, s *Store, name string, want error, taskID string, op func() (Reply, Task, error)) error {
 	t.Helper()
 	replies, current, events := allReplies(t, s), mustGetTask(t, s, taskID), countRows(t, s.db, "task_events")
-	if reply, got, err := op(); !errors.Is(err, want) {
+	reply, got, err := op()
+	if !errors.Is(err, want) {
 		t.Errorf("%s = %+v, %+v, %v; want %v", name, reply, got, err, want)
 	}
 	if after := allReplies(t, s); !slices.Equal(after, replies) {
 		t.Errorf("%s 改动了回复队列: %+v; want %+v", name, after, replies)
 	}
 	requireUnchanged(t, s, current, events)
+	return err
 }
 
 // requireNoDispatch 断言对任务调用 ClaimNextReply 返回 ErrNoDispatchableReply，且没有改动任何数据。
@@ -241,8 +243,8 @@ func TestClaimNextReplyWithoutQueuedReply(t *testing.T) {
 
 // TestInFlightReplyAfterTurnCompleted 验证任务回到可派发状态、但上一条回复仍在途（DISPATCHING 或 UNCERTAIN）时不派发，
 // 返回 ErrNoDispatchableReply 而不是违反唯一索引的数据库错误。任务不是 RUNNING 时标记不确定不改动任务；
-// 核对为已送达时回复 ACKNOWLEDGED、任务不执行 delivery_confirmed；核对为未送达时任务不处于派发后的状态，
-// task.ResumeAfterUnsent 拒绝恢复，回复保持不变。在途回复处理完毕后才派发下一条。
+// 核对为已送达时回复 ACKNOWLEDGED、任务不执行 delivery_confirmed；核对为未送达时任务自派发以来已发生 turn_completed，
+// 说明 Agent 已处理该回复，拒绝放回队列，回复保持不变。在途回复处理完毕后才派发下一条。
 func TestInFlightReplyAfterTurnCompleted(t *testing.T) {
 	store, clock := openTaskStore(t, nil)
 	completed, replies := completedTask(t, store, 2)
@@ -401,6 +403,100 @@ func TestUnsentReplyRejectedWhenTaskStopped(t *testing.T) {
 			requireUnchanged(t, store, stopped, events)
 		})
 	}
+}
+
+// TestDeliveredReplyAcknowledgedWhenTaskStopped 验证 UNCERTAIN 回复核对为已送达、而任务在此期间已关闭或失败时，
+// 回复仍记为 ACKNOWLEDGED（RejectReason 为空、保留派发前状态），任务状态、版本与事件记录都不变；只有核对为未送达才改为 REJECTED。
+// COMPLETED 与 DELIVERY_UNCERTAIN 任务不能 fail，失败变体先经 input_requested 离开 RUNNING 再标记不确定。
+func TestDeliveredReplyAcknowledgedWhenTaskStopped(t *testing.T) {
+	tests := []struct {
+		name    string
+		advance []task.Event // 派发后、标记不确定前执行的事件
+		stop    task.Event
+	}{
+		{"任务已关闭", nil, task.Close},
+		{"任务已失败", []task.Event{task.InputRequested}, task.Fail},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, clock := openTaskStore(t, nil)
+			completed, _ := completedTask(t, store, 1)
+			reply, running := claim(t, store, completed.ID)
+			applyEvents(t, store, running, tt.advance...)
+			reply, current := mustMarkUncertain(t, store, reply.Seq)
+			stopped := applyEvents(t, store, current, tt.stop)
+			events := countRows(t, store.db, "task_events")
+
+			*clock = clock.Add(time.Minute)
+			got, after, err := store.ResolveUncertainReply(t.Context(), reply.Seq, true)
+			want := reply
+			want.State, want.UpdatedAt = queue.Acknowledged, clock.UTC()
+			if err != nil || got != want || after != stopped {
+				t.Fatalf("ResolveUncertainReply(true) = %+v, %+v, %v; want %+v, %+v, nil", got, after, err, want, stopped)
+			}
+			requireUnchanged(t, store, stopped, events)
+		})
+	}
+}
+
+// TestRequeueUnsentReplyAfterTurnCompleted 验证派发后任务经 turn_completed 回到 COMPLETED 时，说明 Agent 已处理该回复：
+// RequeueUnsentReply 返回包装 task.ErrInvalidTransition、提示核对为已送达的错误且不改动数据，回复不会放回队列重复投递；
+// 队列并未阻塞，AcknowledgeReply 确认该回复后即可派发下一条。
+func TestRequeueUnsentReplyAfterTurnCompleted(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	completed, replies := completedTask(t, store, 2)
+	reply, running := claim(t, store, completed.ID)
+	finished := applyEvents(t, store, running, task.TurnCompleted)
+	err := requireRejected(t, store, "RequeueUnsentReply", task.ErrInvalidTransition, completed.ID, func() (Reply, Task, error) {
+		return store.RequeueUnsentReply(t.Context(), reply.Seq)
+	})
+	if err == nil || !strings.Contains(err.Error(), "回复应核对为已送达") {
+		t.Errorf("RequeueUnsentReply 错误 = %v; want 提示回复应核对为已送达", err)
+	}
+
+	acked, current, err := store.AcknowledgeReply(t.Context(), reply.Seq)
+	if err != nil || acked.State != queue.Acknowledged || current != finished {
+		t.Fatalf("AcknowledgeReply = %+v, %+v, %v; want ACKNOWLEDGED, %+v, nil", acked, current, err, finished)
+	}
+	if next, _ := claim(t, store, completed.ID); next.Seq != replies[1].Seq {
+		t.Errorf("确认后派发 = %+v; want seq %d", next, replies[1].Seq)
+	}
+	requireEvents(t, store, completed.ID,
+		"start CREATED->RUNNING", "turn_completed RUNNING->COMPLETED", "reply_dispatched COMPLETED->RUNNING",
+		"turn_completed RUNNING->COMPLETED", "reply_dispatched COMPLETED->RUNNING")
+}
+
+// TestUnsentReplyRejectedAfterApprovalRoundTrip 验证派发后任务经 approval_requested、approval_resolved 离开又回到 RUNNING 时，
+// 任务状态与派发后相同，但 Agent 已处理该回复：RequeueUnsentReply 返回包装 task.ErrInvalidTransition、提示核对为已送达的错误；
+// 随后标记不确定（任务经 delivery_unknown 进入 DELIVERY_UNCERTAIN），最新事件虽为 delivery_unknown，ResolveUncertainReply(false)
+// 同样被拒绝。两次失败都不改动回复（仍在途）、任务版本与事件记录；核对为已送达后回复 ACKNOWLEDGED、任务回到 RUNNING。
+func TestUnsentReplyRejectedAfterApprovalRoundTrip(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	completed, _ := completedTask(t, store, 1)
+	reply, running := claim(t, store, completed.ID)
+	applyEvents(t, store, running, task.ApprovalRequested, task.ApprovalResolved)
+
+	err := requireRejected(t, store, "RequeueUnsentReply", task.ErrInvalidTransition, completed.ID, func() (Reply, Task, error) {
+		return store.RequeueUnsentReply(t.Context(), reply.Seq)
+	})
+	if err == nil || !strings.Contains(err.Error(), "回复应核对为已送达") {
+		t.Errorf("RequeueUnsentReply 错误 = %v; want 提示回复应核对为已送达", err)
+	}
+	if _, current := mustMarkUncertain(t, store, reply.Seq); current.State != task.DeliveryUncertain {
+		t.Fatalf("MarkReplyUncertain 后任务为 %s; want DELIVERY_UNCERTAIN", current.State)
+	}
+	requireRejected(t, store, "ResolveUncertainReply(false)", task.ErrInvalidTransition, completed.ID, func() (Reply, Task, error) {
+		return store.ResolveUncertainReply(t.Context(), reply.Seq, false)
+	})
+
+	acked, current, err := store.ResolveUncertainReply(t.Context(), reply.Seq, true)
+	if err != nil || acked.State != queue.Acknowledged || current.State != task.Running {
+		t.Fatalf("ResolveUncertainReply(true) = %+v, %+v, %v; want ACKNOWLEDGED、任务 RUNNING", acked, current, err)
+	}
+	requireEvents(t, store, completed.ID,
+		"start CREATED->RUNNING", "turn_completed RUNNING->COMPLETED", "reply_dispatched COMPLETED->RUNNING",
+		"approval_requested RUNNING->WAITING_APPROVAL", "approval_resolved WAITING_APPROVAL->RUNNING",
+		"delivery_unknown RUNNING->DELIVERY_UNCERTAIN", "delivery_confirmed DELIVERY_UNCERTAIN->RUNNING")
 }
 
 // TestReplyOperationsRejectInvalidState 验证按序号操作的方法只接受各自的来源状态：对其他状态的回复返回
