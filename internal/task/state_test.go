@@ -69,6 +69,15 @@ func TestNextUnknownState(t *testing.T) {
 	assertInvalid(t, err, "BOGUS", string(Start))
 }
 
+// TestNextUnknownEvent 确认已知状态收到未知事件时同样返回 ErrInvalidTransition，错误文本写明状态名与事件名；
+// 穷举矩阵只含已知事件，覆盖不到这一情形。
+func TestNextUnknownEvent(t *testing.T) {
+	for _, from := range allStates {
+		_, err := Next(from, "bogus")
+		assertInvalid(t, err, string(from), "bogus")
+	}
+}
+
 // TestClosedIsTerminal 确认 Closed 是终态，任何事件都不能离开。
 func TestClosedIsTerminal(t *testing.T) {
 	for _, event := range allEvents {

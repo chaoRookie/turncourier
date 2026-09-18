@@ -96,6 +96,14 @@ func TestReplyLifecycle(t *testing.T) {
 	}
 
 	store := openStore(t, cfg.Paths.DataDir)
+	// 配置与存储各自定义数据库文件名；存储打开后 cfg.Paths.Database 须恰好是它创建的数据库文件。
+	info, err := os.Stat(cfg.Paths.Database)
+	if err != nil {
+		t.Fatalf("存储打开后 cfg.Paths.Database 不存在: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("cfg.Paths.Database 的类型 = %v; want 常规文件", info.Mode().Type())
+	}
 	created, err := store.CreateTask(ctx, sqlite.AgentCodex)
 	if err != nil {
 		t.Fatalf("CreateTask 返回错误: %v", err)

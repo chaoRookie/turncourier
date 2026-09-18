@@ -1,5 +1,5 @@
 // Package sqlite 的入站回复测试用临时目录中的真实 SQLite 数据库验证去重、冲突、拒绝原因、字段校验、原子性，
-// 以及 fail 与 close 对排队回复的拒绝。
+// 以及 fail 与 close 对排队回复的拒绝、其他事件不改动排队回复。
 package sqlite
 
 import (
@@ -365,4 +365,71 @@ func TestFailAndCloseRejectQueuedReplies(t *testing.T) {
 	for _, reply := range closingReplies[1:] {
 		requireReplies(rejected(reply, "task_closed"))
 	}
+}
+
+// TestNonTerminalEventsKeepQueuedReplies 验证 fail、close 之外、会在有排队回复时发生的任务事件不拒绝也不改写排队回复：
+// 任务依次经历 approval_requested、approval_resolved、input_requested，再由派发、标记不确定、核对为未送达、
+// 派发时即确认未发出、核对为已送达产生 reply_dispatched、delivery_unknown、reply_unsent、delivery_confirmed，最后 turn_completed；
+// 每一步都在推进过的时钟下执行，之后排在队首之后的两条回复仍为 QUEUED，拒绝原因与更新时间都保持入队时的值。
+// start 不在其中：CREATED 任务收到的回复直接记为 REJECTED，启动前不会有排队回复。
+func TestNonTerminalEventsKeepQueuedReplies(t *testing.T) {
+	store, clock := openTaskStore(t, nil)
+	current := startTask(t, store)
+	replies := enqueueReplies(t, store, current.ID, 3)
+	head, waiting := replies[0].Seq, replies[1:]
+	// requireWaiting 断言排在队首之后的回复与入队时的快照完全一致，再推进时钟，使下一步若改写回复会留下不同的更新时间。
+	requireWaiting := func(after string) {
+		t.Helper()
+		for _, reply := range waiting {
+			if got := mustGetReply(t, store, reply.Seq); got != reply {
+				t.Errorf("%s 之后回复 %d = %+v; want 保持 %+v", after, reply.Seq, got, reply)
+			}
+		}
+		*clock = clock.Add(time.Minute)
+	}
+
+	requireWaiting("入队")
+	for _, event := range []task.Event{task.ApprovalRequested, task.ApprovalResolved, task.InputRequested} {
+		current = applyEvents(t, store, current, event)
+		requireWaiting(string(event))
+	}
+	claim(t, store, current.ID)
+	requireWaiting("reply_dispatched")
+	mustMarkUncertain(t, store, head)
+	requireWaiting("delivery_unknown")
+	if _, _, err := store.ResolveUncertainReply(t.Context(), head, false); err != nil {
+		t.Fatalf("ResolveUncertainReply(false) 返回错误: %v", err)
+	}
+	requireWaiting("reply_unsent（核对为未送达）")
+	claim(t, store, current.ID)
+	requireWaiting("再次 reply_dispatched")
+	if _, _, err := store.RequeueUnsentReply(t.Context(), head); err != nil {
+		t.Fatalf("RequeueUnsentReply 返回错误: %v", err)
+	}
+	requireWaiting("reply_unsent（派发时即确认未发出）")
+	claim(t, store, current.ID)
+	mustMarkUncertain(t, store, head)
+	requireWaiting("第三次派发并标记不确定")
+	_, current, err := store.ResolveUncertainReply(t.Context(), head, true)
+	if err != nil {
+		t.Fatalf("ResolveUncertainReply(true) 返回错误: %v", err)
+	}
+	requireWaiting("delivery_confirmed")
+	applyEvents(t, store, current, task.TurnCompleted)
+	requireWaiting("turn_completed")
+	requireEvents(t, store, current.ID,
+		"start CREATED->RUNNING",
+		"approval_requested RUNNING->WAITING_APPROVAL",
+		"approval_resolved WAITING_APPROVAL->RUNNING",
+		"input_requested RUNNING->WAITING_INPUT",
+		"reply_dispatched WAITING_INPUT->RUNNING",
+		"delivery_unknown RUNNING->DELIVERY_UNCERTAIN",
+		"reply_unsent DELIVERY_UNCERTAIN->WAITING_INPUT",
+		"reply_dispatched WAITING_INPUT->RUNNING",
+		"reply_unsent RUNNING->WAITING_INPUT",
+		"reply_dispatched WAITING_INPUT->RUNNING",
+		"delivery_unknown RUNNING->DELIVERY_UNCERTAIN",
+		"delivery_confirmed DELIVERY_UNCERTAIN->RUNNING",
+		"turn_completed RUNNING->COMPLETED",
+	)
 }

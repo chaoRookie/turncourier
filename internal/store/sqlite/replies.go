@@ -294,6 +294,8 @@ func (s *Store) ResolveUncertainReply(ctx context.Context, seq int64, delivered 
 // RecoverInFlight 在进程启动时调用：把所有 DISPATCHING 回复改为 UNCERTAIN（对应 RUNNING 任务进入 DELIVERY_UNCERTAIN），
 // 返回全部 UNCERTAIN 回复供本地核对；不会自动重新派发任何回复。
 // 回复按序号升序返回；恢复后再次调用不改动任何数据，返回相同的结果。
+// 它把全部 DISPATCHING 回复都当作崩溃遗留，因此只能由唯一的派发进程在开始派发之前调用，调用期间不得有其他进程持有在途回复，
+// 否则另一个进程正在派发的回复会被误标为 UNCERTAIN；保证这一点的单实例锁属于尚未实现的后台服务。
 func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
