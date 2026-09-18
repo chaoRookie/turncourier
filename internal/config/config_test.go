@@ -148,7 +148,7 @@ imap_host = "imap.example.invalid"
 [recipient]
 `)
 	requireErrorWithoutPath(t, err, paths)
-	for _, want := range []string{"mailbox.address", "recipient.address", "allowed_senders"} {
+	for _, want := range []string{"mailbox.address is required", "recipient.address is required", "allowed_senders"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("错误未提到 %s: %v", want, err)
 		}
@@ -291,7 +291,7 @@ allowed_senders = ["me@example.invalid"]
 	}
 }
 
-// TestLoadHosts 验证主机名含协议前缀、空白或为空时报错。
+// TestLoadHosts 验证主机名含协议前缀、空白或为空时报错，合法且非默认的主机名被采用。
 func TestLoadHosts(t *testing.T) {
 	for _, host := range []string{`"imaps://imap.example.invalid"`, `"imap example invalid"`, `""`} {
 		_, paths, err := loadConfig(t, `
@@ -304,6 +304,22 @@ address = "me@example.invalid"
 allowed_senders = ["me@example.invalid"]
 `)
 		requireErrorWithoutPath(t, err, paths)
+	}
+	cfg, _, err := loadConfig(t, `
+[mailbox]
+address = "bot@example.invalid"
+imap_host = "imap.163.com"
+smtp_host = "smtp.163.com"
+
+[recipient]
+address = "me@example.invalid"
+allowed_senders = ["me@example.invalid"]
+`)
+	if err != nil {
+		t.Fatalf("合法主机名应当通过: %v", err)
+	}
+	if cfg.Mailbox.IMAPHost != "imap.163.com" || cfg.Mailbox.SMTPHost != "smtp.163.com" {
+		t.Errorf("主机名 = %s、%s; want imap.163.com、smtp.163.com", cfg.Mailbox.IMAPHost, cfg.Mailbox.SMTPHost)
 	}
 }
 
@@ -382,6 +398,10 @@ func TestLoadFileProblems(t *testing.T) {
 	asDirectory := Paths{ConfigFile: target, DataDir: directory}
 	_, err = Load(asDirectory, envOf(nil))
 	requireErrorWithoutPath(t, err, asDirectory)
+	// 目录也能被 os.Open 打开，只有断言拒绝原因才能钉住常规文件检查。
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("错误 = %v; want 常规文件检查失败", err)
+	}
 }
 
 // TestLoadRejectsBrokenTOML 验证语法错误的配置被拒绝，且错误文本不含本机路径。

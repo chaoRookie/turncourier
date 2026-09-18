@@ -1,4 +1,3 @@
-// Package config 加载并严格校验 TOML 配置文件；配置只保存账户与选项，不保存任何凭据。
 package config
 
 import (
