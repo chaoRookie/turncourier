@@ -108,12 +108,13 @@ func TestCreateTask(t *testing.T) {
 	}
 }
 
-// TestCreateTaskRejectsUnknownAgent 验证未知或大小写不符的 Agent 类型被拒绝，且不写入任何任务。
+// TestCreateTaskRejectsUnknownAgent 验证未知或大小写不符的 Agent 类型在写库前被 Go 端校验拒绝，
+// 错误文本须含 "unknown agent"，以区别于 agent 列 CHECK 约束的报错；且不写入任何任务。
 func TestCreateTaskRejectsUnknownAgent(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	for _, agent := range []Agent{"", "gemini", "Codex", "claude "} {
-		if got, err := store.CreateTask(t.Context(), agent); err == nil {
-			t.Errorf("CreateTask(%q) = %+v, nil; want 错误", agent, got)
+		if got, err := store.CreateTask(t.Context(), agent); err == nil || !strings.Contains(err.Error(), "unknown agent") {
+			t.Errorf("CreateTask(%q) = %+v, %v; want 含 \"unknown agent\" 的错误", agent, got, err)
 		}
 	}
 	if got := countRows(t, store.db, "tasks"); got != 0 {
