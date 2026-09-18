@@ -674,7 +674,7 @@ var ErrMessageConflict = errors.New("inbound message conflict")
 func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult, error)
 ```
 
-- [ ] **Step 1：写失败的测试。** 以 RUNNING 任务 `T`、账户 `bot@example.invalid` 为基础：
+- [x] **Step 1：写失败的测试。** 以 RUNNING 任务 `T`、账户 `bot@example.invalid` 为基础：
 
 | 场景 | 期望 |
 | --- | --- |
@@ -691,10 +691,12 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 | 原子性：测试中创建触发器 `CREATE TRIGGER boom BEFORE INSERT ON replies BEGIN SELECT RAISE(ABORT, 'boom'); END;` 后记录新邮件 | 返回错误，`inbound_messages` 行数不变 |
 
   补测 Task 7 遗留项：3 条 QUEUED 回复后执行 `fail`，3 条都变为 REJECTED(`task_failed`)；另一任务执行 `close` 后都变为 REJECTED(`task_closed`)；两种情况下已处于 DISPATCHING 的回复保持不变。
-- [ ] **Step 2：** 测试失败。
-- [ ] **Step 3：实现。** 事务内顺序：读取任务 → 按 `(account, uid_validity, uid)` 查找 → 按 `(account, message_id)` 查找 → 判定重复或冲突 → 插入 `inbound_messages` → 插入 `replies`。存储层不导入 `config`，只做长度与空白检查，地址规范化由调用方负责，以保持 `store/sqlite` 只依赖 `task` 与 `queue`。
-- [ ] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
-- [ ] **Step 5：** `git commit -m "feat(store): deduplicate and enqueue inbound replies atomically"`
+- [x] **Step 2：** 测试失败。
+- [x] **Step 3：实现。** 事务内顺序：读取任务 → 按 `(account, uid_validity, uid)` 查找 → 按 `(account, message_id)` 查找 → 判定重复或冲突 → 插入 `inbound_messages` → 插入 `replies`。存储层不导入 `config`，只做长度与空白检查，地址规范化由调用方负责，以保持 `store/sqlite` 只依赖 `task` 与 `queue`。
+- [x] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
+- [x] **Step 5：** `git commit -m "feat(store): deduplicate and enqueue inbound replies atomically"`
+
+**实施说明：** 表格只比较 Message-ID 与摘要，入站记录却同时绑定任务；同一邮件标识指向另一任务时按「同一邮件标识对应了不同内容」处理，返回 `ErrMessageConflict`，而不是返回别的任务的回复并标为重复，测试「同一邮件指向另一任务」钉住这一点。字段校验与表约束对齐：Account 为 3–254 字节且不含空白（空字符串包含在内），MessageID 为 3–998 字节，UIDValidity 与 UID 为正；长度按字节计，ASCII 地址与 Message-ID 与表约束的字符数一致，其余情况仍由 CHECK 约束兜底。清单未定义字段错误的哨兵值，错误文本统一以 `invalid inbound reply` 开头，测试据此区分 Go 端校验与 CHECK 约束、任务查询的报错，并用「任务不存在且 UID 为 0」证明校验先于事务。按 Step 3 的顺序先读任务再查重，因此任务不存在时总是返回 `ErrNotFound`；重复邮件返回原回复，不按任务的当前状态重新判定。fail 与 close 拒绝 QUEUED 回复的行为 Task 7 已实现，本任务只补测试。
 
 ### Task 9：派发、确认与崩溃恢复
 
