@@ -674,7 +674,7 @@ var ErrMessageConflict = errors.New("inbound message conflict")
 func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult, error)
 ```
 
-- [ ] **Step 1：写失败的测试。** 以 RUNNING 任务 `T`、账户 `bot@example.invalid` 为基础：
+- [x] **Step 1：写失败的测试。** 以 RUNNING 任务 `T`、账户 `bot@example.invalid` 为基础：
 
 | 场景 | 期望 |
 | --- | --- |
@@ -691,10 +691,12 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 | 原子性：测试中创建触发器 `CREATE TRIGGER boom BEFORE INSERT ON replies BEGIN SELECT RAISE(ABORT, 'boom'); END;` 后记录新邮件 | 返回错误，`inbound_messages` 行数不变 |
 
   补测 Task 7 遗留项：3 条 QUEUED 回复后执行 `fail`，3 条都变为 REJECTED(`task_failed`)；另一任务执行 `close` 后都变为 REJECTED(`task_closed`)；两种情况下已处于 DISPATCHING 的回复保持不变。
-- [ ] **Step 2：** 测试失败。
-- [ ] **Step 3：实现。** 事务内顺序：读取任务 → 按 `(account, uid_validity, uid)` 查找 → 按 `(account, message_id)` 查找 → 判定重复或冲突 → 插入 `inbound_messages` → 插入 `replies`。存储层不导入 `config`，只做长度与空白检查，地址规范化由调用方负责，以保持 `store/sqlite` 只依赖 `task` 与 `queue`。
-- [ ] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
-- [ ] **Step 5：** `git commit -m "feat(store): deduplicate and enqueue inbound replies atomically"`
+- [x] **Step 2：** 测试失败。
+- [x] **Step 3：实现。** 事务内顺序：读取任务 → 按 `(account, uid_validity, uid)` 查找 → 按 `(account, message_id)` 查找 → 判定重复或冲突 → 插入 `inbound_messages` → 插入 `replies`。存储层不导入 `config`，只做长度与空白检查，地址规范化由调用方负责，以保持 `store/sqlite` 只依赖 `task` 与 `queue`。
+- [x] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
+- [x] **Step 5：** `git commit -m "feat(store): deduplicate and enqueue inbound replies atomically"`
+
+**实施说明：** 表格只比较 Message-ID 与摘要，入站记录却同时绑定任务；同一邮件标识指向另一任务时按「同一邮件标识对应了不同内容」处理，返回 `ErrMessageConflict`，而不是返回别的任务的回复并标为重复，测试「同一邮件指向另一任务」钉住这一点。字段校验与表约束对齐：Account 为 3–254 个字符且不含空白（空字符串包含在内），MessageID 为 3–998 个字符，UIDValidity 与 UID 为正；长度按 Unicode 字符计，与表约束中 SQLite 的 `length()` 一致。`length()` 遇到 NUL 即停止计数，而地址与邮件头本不应含 NUL，因此 Account 或 MessageID 含 NUL 时同样在事务前拒绝，这是清单之外的补充；含非法 UTF-8 时两者计数可能不同，仍由 CHECK 约束兜底。清单未定义字段错误的哨兵值，错误文本统一以 `invalid inbound reply` 开头，测试据此区分 Go 端校验与 CHECK 约束、任务查询的报错；用已取消的上下文调用仍得到校验错误，证明校验先于开始事务，用「任务不存在且 UID 为 0」证明校验先于读取任务。按 Step 3 的顺序先读任务再查重，因此任务不存在时总是返回 `ErrNotFound`；重复邮件返回原回复，不按任务的当前状态重新判定。fail 与 close 拒绝 QUEUED 回复的行为 Task 7 已实现，本任务只补测试。
 
 ### Task 9：派发、确认与崩溃恢复
 
@@ -730,7 +732,7 @@ func (s *Store) ResolveUncertainReply(ctx context.Context, seq int64, delivered 
 func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
 ```
 
-- [ ] **Step 1：写失败的测试。**
+- [x] **Step 1：写失败的测试。**
   - **FIFO：** 任务 COMPLETED，依次记录 3 条回复；`ClaimNextReply` 得到 seq 1，任务 RUNNING，`ResumeState=COMPLETED`；再次调用返回 `ErrNoDispatchableReply`（任务 RUNNING 且有在途）；`AcknowledgeReply(1)` 后仍返回 `ErrNoDispatchableReply`（任务 RUNNING）；`turn_completed` 后得到 seq 2。
   - **等待输入：** WAITING_INPUT 任务派发后 `ResumeState=WAITING_INPUT`。
   - **不可派发状态：** 任务为 RUNNING、WAITING_APPROVAL、DELIVERY_UNCERTAIN、FAILED、CLOSED 时返回 `ErrNoDispatchableReply`；任务不存在返回 `ErrNotFound`；队列为空返回 `ErrNoDispatchableReply`。
@@ -742,10 +744,12 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
   - **跨进程并发：** 两个独立 `Open` 同一数据目录的 Store，在 20 个 goroutine 中同时对同一任务 `ClaimNextReply`，恰好 1 个成功，其余返回 `ErrNoDispatchableReply`，没有 `SQLITE_BUSY` 错误泄漏；循环 20 轮。
   - **数据库兜底：** 绕过 API 直接插入同一任务的第二条 DISPATCHING 回复，违反 `replies_one_in_flight` 而失败。
   - **事件记录：** 上述操作产生的任务事件按顺序出现在 `TaskEvents` 中。
-- [ ] **Step 2：** 测试失败。
-- [ ] **Step 3：实现。** 每个方法一个事务：读取回复与任务 → 用 `queue.Next` 与 `task.Next`/`task.ResumeAfterUnsent` 计算新状态 → 以 `WHERE seq=? AND state=?`、`WHERE id=? AND version=?` 条件更新 → 写任务事件。任何一步受影响行数不为 1 时回滚并返回对应错误。
-- [ ] **Step 4：** `go test -race -count=3 ./internal/store/sqlite/` 通过，无抖动；包覆盖率 ≥ 85%。
-- [ ] **Step 5：** `git commit -m "feat(store): dispatch, acknowledge and recover replies without blind resend"`
+- [x] **Step 2：** 测试失败。
+- [x] **Step 3：实现。** 每个方法一个事务：读取回复与任务 → 用 `queue.Next` 与 `task.Next`/`task.ResumeAfterUnsent` 计算新状态 → 以 `WHERE seq=? AND state=?`、`WHERE id=? AND version=?` 条件更新 → 写任务事件。任何一步受影响行数不为 1 时回滚并返回对应错误。
+- [x] **Step 4：** `go test -race -count=3 ./internal/store/sqlite/` 通过，无抖动；包覆盖率 ≥ 85%。
+- [x] **Step 5：** `git commit -m "feat(store): dispatch, acknowledge and recover replies without blind resend"`
+
+**实施说明：** 清单没有给「未送达后恢复派发前状态」命名任务事件，`task.ResumeAfterUnsent` 也不在转移表中，存储层以 `reply_unsent` 记录（与 `reply_dispatched` 对应），该事件不能经 `ApplyTaskEvent` 执行。按序号操作的方法只接受各自的来源状态：`AcknowledgeReply`、`MarkReplyUncertain`、`RequeueUnsentReply` 只接受 DISPATCHING，`ResolveUncertainReply` 只接受 UNCERTAIN；队列转移表允许 UNCERTAIN 直接 acknowledge 或 requeue，但若经 `AcknowledgeReply` 处理，DELIVERY_UNCERTAIN 任务将失去执行 delivery_confirmed 的途径，因此这类调用同样返回 `queue.ErrInvalidTransition`。回到 QUEUED 的回复清除 `resume_state`，与新入队的回复一致；改为 REJECTED 的回复保留它，记录曾被派发。任务仍接受回复时，放回队列与核对为未送达只在任务自派发以来没有发生其他事件时成功：同一事务中读取该任务最新的事件，DISPATCHING 回复要求最新一条为 `reply_dispatched`，UNCERTAIN 回复要求最新两条依次为 `reply_dispatched`、`delivery_unknown`（审批往返后回到 RUNNING 再标记不确定，最新一条同样是 `delivery_unknown`，只看一条会放行）；否则说明 Agent 已处理该回复（例如回合已结束或审批往返），返回包装 `task.ErrInvalidTransition`、提示「回复应核对为已送达」的错误且不改动数据。这不会阻塞队列：DISPATCHING 回复经 `AcknowledgeReply`、UNCERTAIN 回复经 `ResolveUncertainReply(true)` 确认后不再阻塞后续派发（任务回到 COMPLETED 或 WAITING_INPUT 后派发下一条）；审查建议的「只放回回复、不改任务」会造成重复投递，未采纳。任务不是 RUNNING 时标记不确定不改动任务。清单中「任务已关闭或失败时回复改为 REJECTED」只适用于未送达：核对为已送达的回复一律记为 ACKNOWLEDGED，任务已关闭或失败时同样如此，`RejectReason` 为空，任务状态、版本与事件都不变。`ClaimNextReply` 在任务可派发时先检查在途回复，使其返回 `ErrNoDispatchableReply` 而不是违反 `replies_one_in_flight` 的数据库错误。`getReply` 查不到回复时改为返回 `ErrNotFound`。为让回复操作与 `applyEvent` 共用同一条带版本条件的任务更新与事件写入，把这段代码从 `applyEvent` 提取为 `tasks.go` 中的 `writeTaskTransition`，这是 Files 列表之外对 `tasks.go` 的唯一改动，行为不变。清单场景之外补测：不可派发状态加测 CREATED；用触发器让每个多步写入的操作在回复更新、任务更新、事件写入处失败或更新不命中，证明整体回滚，另测已取消的上下文，包覆盖率首次提交时由 83.6% 升至 86.8%，审查修复后为 86.5%。`updateReply` 的 `state` 条件与 Task 7 的版本条件一样，在 IMMEDIATE 事务下只作防御，去掉它的变异无法被测试区分；去掉 `_txlock=immediate` 的变异会被跨进程并发测试以 SQLITE_BUSY 错误拦截。
 
 ### Task 10：集成测试
 
