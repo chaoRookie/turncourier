@@ -499,6 +499,55 @@ func TestUnsentReplyRejectedAfterApprovalRoundTrip(t *testing.T) {
 		"delivery_unknown RUNNING->DELIVERY_UNCERTAIN", "delivery_confirmed DELIVERY_UNCERTAIN->RUNNING")
 }
 
+// TestUnsentReplyRequeuedAfterOtherTaskEvents 验证「自派发以来无其他事件」只看本任务的事件：第一个任务派发（或随后标记不确定）后，
+// 第二个任务发生派发、确认与 turn_completed，全库最新的事件已属于第二个任务，但第一个任务的 RequeueUnsentReply 与
+// ResolveUncertainReply(false) 仍然成功：回复按原序号回到 QUEUED，任务经 reply_unsent 恢复为 COMPLETED，第二个任务不受影响。
+func TestUnsentReplyRequeuedAfterOtherTaskEvents(t *testing.T) {
+	tests := []struct {
+		name      string
+		uncertain bool
+	}{
+		{"RequeueUnsentReply", false},
+		{"ResolveUncertainReply(false)", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, clock := openTaskStore(t, nil)
+			first, queued := completedTask(t, store, 1)
+			second, _ := completedTask(t, store, 1)
+			reply, current := claim(t, store, first.ID)
+			if tt.uncertain {
+				reply, current = mustMarkUncertain(t, store, reply.Seq)
+			}
+			other, running := claim(t, store, second.ID)
+			if _, _, err := store.AcknowledgeReply(t.Context(), other.Seq); err != nil {
+				t.Fatalf("AcknowledgeReply 返回错误: %v", err)
+			}
+			finished := applyEvents(t, store, running, task.TurnCompleted)
+
+			*clock = clock.Add(time.Minute)
+			var got Reply
+			var after Task
+			var err error
+			if tt.uncertain {
+				got, after, err = store.ResolveUncertainReply(t.Context(), reply.Seq, false)
+			} else {
+				got, after, err = store.RequeueUnsentReply(t.Context(), reply.Seq)
+			}
+			wantReply := queued[0]
+			wantReply.UpdatedAt = clock.UTC()
+			wantTask := current
+			wantTask.State, wantTask.Version, wantTask.UpdatedAt = task.Completed, current.Version+1, clock.UTC()
+			if err != nil || got != wantReply || after != wantTask {
+				t.Fatalf("%s = %+v, %+v, %v; want %+v, %+v, nil", tt.name, got, after, err, wantReply, wantTask)
+			}
+			if got := mustGetTask(t, store, second.ID); got != finished {
+				t.Errorf("第二个任务被改动: %+v; want %+v", got, finished)
+			}
+		})
+	}
+}
+
 // TestReplyOperationsRejectInvalidState 验证按序号操作的方法只接受各自的来源状态：对其他状态的回复返回
 // queue.ErrInvalidTransition（包括队列状态机允许、但不属于该方法的来源状态，例如对 UNCERTAIN 回复调用 AcknowledgeReply），
 // 序号不存在时返回 ErrNotFound；两种情况都不改动任何数据。
