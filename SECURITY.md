@@ -38,7 +38,7 @@ The current code is the CLI (`help`, `version`, `doctor`), build, test and scann
 - `doctor` running anything other than `git --version`, `codex --version` and `claude --version`, printing executable paths, raw errors or control characters taken from tool output, or, on Unix, leaving version subprocesses running after a timeout;
 - a way to make `make secrets` pass while skipping Git history, staged changes or files that would be published;
 - workflow problems such as broader token permissions, actions not pinned to a full commit SHA, or exposed secrets;
-- a way to get past the configuration checks (rejecting credential keys, requiring the config file to be owned by the current user and not writable by group or others) or the permission checks on the data directory and database file, or to make storage enqueue the same inbound reply twice or automatically resend a reply whose delivery is uncertain.
+- a way to get past the configuration checks (rejecting credential keys and, on Unix, requiring the config file to be owned by the current user and not writable by group or others) or, on Unix, the permission checks on the data directory and database file, or to make storage enqueue the same inbound reply twice or automatically resend a reply whose delivery is uncertain.
 
 Out of scope:
 
@@ -100,7 +100,7 @@ TurnCourier 按 [Apache License 2.0](LICENSE) 提供，不附带任何形式的�
 - `doctor` 执行了 `git --version`、`codex --version`、`claude --version` 以外的命令，输出了可执行文件路径、原始错误或来自工具输出的控制字符，或在 Unix 上超时后仍留下版本子进程；
 - 能让 `make secrets` 在跳过 Git 历史、暂存区或待公开文件的情况下仍然通过的方法；
 - 工作流问题，例如令牌权限扩大、Action 未固定到完整提交 SHA 或泄露密钥；
-- 能绕过配置检查（拒绝凭据类键，要求配置文件归当前用户所有且组和其他用户不可写）或数据目录与数据库文件权限检查的方法，或能让存储把同一封入站回复入队两次、自动重发投递结果不确定的回复的方法。
+- 能绕过配置检查（拒绝凭据类键；在 Unix 上还要求配置文件归当前用户所有且组和其他用户不可写）或在 Unix 上绕过数据目录与数据库文件权限检查的方法，或能让存储把同一封入站回复入队两次、自动重发投递结果不确定的回复的方法。
 
 不属于范围：
 
