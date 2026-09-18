@@ -24,12 +24,15 @@ func testChecker() doctor.Checker {
 	}
 }
 
-// TestHelp 确认所有帮助入口说明当前阶段，并且不运行诊断或 Agent。
+// wantDescription 是帮助描述的原文；与实施清单一致，不含阶段号。
+const wantDescription = "pre-alpha：当前没有邮件收发、任务执行或后台服务能力。"
+
+// TestHelp 确认所有帮助入口说明当前阶段且不含阶段号，并且不运行诊断或 Agent。
 func TestHelp(t *testing.T) {
 	for _, args := range [][]string{nil, {"help"}, {"-h"}, {"--help"}} {
 		var stdout, stderr bytes.Buffer
 		code := Run(context.Background(), args, &stdout, &stderr, doctor.Checker{})
-		if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "没有邮件收发") || !strings.Contains(stdout.String(), "尚未实现") {
+		if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), wantDescription) || !strings.Contains(stdout.String(), "尚未实现") || strings.Contains(stdout.String(), "Phase") {
 			t.Errorf("help failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 	}
@@ -45,7 +48,7 @@ func TestHelpJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &help); err != nil {
 		t.Fatal(err)
 	}
-	if help.Name != "turncourier" || len(help.Commands) != 3 || len(help.Planned) != 5 || !strings.Contains(help.Description, "pre-alpha") {
+	if help.Name != "turncourier" || len(help.Commands) != 3 || len(help.Planned) != 5 || help.Description != wantDescription {
 		t.Fatalf("unexpected help: %+v", help)
 	}
 }

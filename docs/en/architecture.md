@@ -24,7 +24,7 @@ None of this workflow exists yet.
 
 ## Current scope
 
-There are no releases and no tags, including `v0.1.0-alpha`. The repository has only the `main` branch.
+There are no releases and no tags, including `v0.1.0-alpha`. The default branch is `main`.
 
 ### Implemented
 

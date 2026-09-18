@@ -88,7 +88,7 @@ git check-ignore .local/toolchains/go/bin/go
 | `make modverify` | `go mod verify`，校验依赖与 `go.sum` 记录的哈希一致 | 首次下载模块依赖时 |
 | `make comments` | `go run ./tools/commentcheck .`，检查中文注释 | 否 |
 | `make test` | `go test -race -covermode=atomic -coverprofile=coverage.out ./...`，再用 `tools/covercheck` 要求覆盖率不低于 80% | 首次下载模块依赖时 |
-| `make lint` | staticcheck v0.8.1 检查 `./...` | 首次安装时 |
+| `make lint` | staticcheck v0.8.1 检查 `./...` | 首次安装或首次下载模块依赖时 |
 | `make check` | 依次运行 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint` | 首次下载模块依赖或安装 staticcheck 时 |
 | `make secrets` | 用 gitleaks v8.30.1 执行 `scripts/scan-secrets.sh` | 首次安装时 |
 | `make security` | 先执行 `make secrets`，再用 govulncheck v1.8.0 检查 `./...` | 是：govulncheck 每次运行都要查询 Go 漏洞数据库 |
@@ -304,4 +304,4 @@ shasum -a 256 -c SHA256SUMS
 - 其中的二进制只有 `help`、`version`、`doctor`，没有经过任何邮件验收。
 - 本地 `make build` 产出的 `0.1.0-dev` 同样不是发布版本。
 
-完成真实邮箱验收之前，不打 `v0.1.0-alpha` 标签。按设计，发布前 Codex 和 Claude Code 各要完成连续十轮真实邮件交互，覆盖断网恢复、重复、伪造和过期邮件、忙碌时的 FIFO 顺序以及隐私过滤；编译成功不能代替真实验收。目前没有任何发布版本，仓库只有 `main` 分支。
+完成真实邮箱验收之前，不打 `v0.1.0-alpha` 标签。按设计，发布前 Codex 和 Claude Code 各要完成连续十轮真实邮件交互，覆盖断网恢复、重复、伪造和过期邮件、忙碌时的 FIFO 顺序以及隐私过滤；编译成功不能代替真实验收。目前没有任何发布版本，默认分支为 `main`。

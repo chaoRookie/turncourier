@@ -14,7 +14,7 @@ Configuration, storage and the state machines are implemented and tested as inte
 - `internal/task` and `internal/queue` are the task and reply queue state machines.
 - `internal/store/sqlite` stores tasks and reply metadata in SQLite, with migrations, deduplication, a FIFO reply queue and crash recovery. It stores no email bodies, only their SHA-256 digests.
 
-TurnCourier cannot send or receive email yet. There are no agent adapters, no Keychain access and no background service. There are no releases or tags; the only branch is `main`.
+TurnCourier cannot send or receive email yet. There are no agent adapters, no Keychain access and no background service. There are no releases or tags; the default branch is `main`.
 
 The Phase 0–1 research probes (Node.js scripts, not product code) resumed the same Codex and Claude Code sessions from a new process on one Mac. Claude Code's first attempt exited abnormally on its second turn, for a reason not yet determined; the retest passed. No real mail round trip has been tested. See the [research report](docs/zh-CN/research/phase-01.md) (Chinese) for evidence and limits.
 
@@ -236,7 +236,7 @@ turncourier/
 
 ## Security and privacy
 
-- Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/chaoRookie/turncourier/security/advisories/new), not public issues. See [SECURITY.md](SECURITY.md). There are no supported releases; only `main` exists.
+- Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/chaoRookie/turncourier/security/advisories/new), not public issues. See [SECURITY.md](SECURITY.md). There are no supported releases; reproduce problems on the latest commit of `main`.
 - Do not put QQ Mail authorization codes, tokens, real email content, agent session transcripts or absolute local paths in issues, pull requests or logs. Use synthetic data to reproduce problems.
 - The `turncourier` command reads no configuration, credentials or sessions. The configuration file rejects credential keys; the mail authorization code is to be stored in the Keychain by `init`, which is not implemented. Public CI does not use real mailboxes or call models.
 

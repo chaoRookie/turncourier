@@ -33,11 +33,12 @@ TurnCourier is provided under the [Apache License 2.0](LICENSE), without warrant
 
 ## Scope
 
-The current code is a CLI skeleton (`help`, `version`, `doctor`) plus build, test and scanning scripts. Examples of relevant reports:
+The current code is the CLI (`help`, `version`, `doctor`), build, test and scanning scripts, and internal packages that no command uses yet: configuration loading (`internal/config`), SQLite storage (`internal/store/sqlite`) and the task and reply queue state machines (`internal/task`, `internal/queue`). Examples of relevant reports:
 
 - `doctor` running anything other than `git --version`, `codex --version` and `claude --version`, printing executable paths, raw errors or control characters taken from tool output, or, on Unix, leaving version subprocesses running after a timeout;
 - a way to make `make secrets` pass while skipping Git history, staged changes or files that would be published;
-- workflow problems such as broader token permissions, actions not pinned to a full commit SHA, or exposed secrets.
+- workflow problems such as broader token permissions, actions not pinned to a full commit SHA, or exposed secrets;
+- a way to get past the configuration checks (rejecting credential keys, requiring the config file to be owned by the current user and not writable by group or others) or the permission checks on the data directory and database file, or to make storage enqueue the same inbound reply twice or automatically resend a reply whose delivery is uncertain.
 
 Out of scope:
 
@@ -47,7 +48,7 @@ Out of scope:
 
 ## Boundaries of the planned design
 
-Email handling, Agent adapters, configuration, Keychain storage, SQLite storage and the background service are not implemented. The approved [design](docs/zh-CN/design.md) sets these boundaries for them:
+Email handling, Agent adapters, Keychain storage and the background service are not implemented. Configuration and SQLite storage are implemented as internal packages, but no command uses them yet. The approved [design](docs/zh-CN/design.md) sets these boundaries for the parts not yet implemented:
 
 - A Git worktree isolates working copies. It is not an operating-system sandbox, so the Agent's own sandbox and permission controls stay in place.
 - An email reply becomes natural-language input to an existing Agent session. Email cannot approve tool permissions or set parameters that bypass approval; approval requests are reported for local handling.
@@ -55,7 +56,7 @@ Email handling, Agent adapters, configuration, Keychain storage, SQLite storage 
 - Mailbox authorization codes and signing keys are to be stored in the macOS Keychain, not in configuration files or the repository. The authorization code is to be entered through a local `init` command.
 - Filtering outgoing email cannot guarantee that every secret is removed.
 
-Because this code does not exist yet, comments on these boundaries are design feedback and can go to a feature request. Do not include exploit details for existing code there.
+Because this code does not exist yet, comments on these boundaries are design feedback and can go to a feature request. Report problems in existing code, including the configuration and storage packages, through private vulnerability reporting, and do not include exploit details for existing code in a feature request.
 
 ---
 
@@ -94,11 +95,12 @@ TurnCourier 按 [Apache License 2.0](LICENSE) 提供，不附带任何形式的�
 
 ## 报告范围
 
-当前代码只是 CLI 骨架（`help`、`version`、`doctor`）以及构建、测试和扫描脚本。相关报告示例：
+当前代码包括 CLI（`help`、`version`、`doctor`），构建、测试和扫描脚本，以及还没有命令使用的内部包：配置加载（`internal/config`）、SQLite 存储（`internal/store/sqlite`）和任务与回复队列状态机（`internal/task`、`internal/queue`）。相关报告示例：
 
 - `doctor` 执行了 `git --version`、`codex --version`、`claude --version` 以外的命令，输出了可执行文件路径、原始错误或来自工具输出的控制字符，或在 Unix 上超时后仍留下版本子进程；
 - 能让 `make secrets` 在跳过 Git 历史、暂存区或待公开文件的情况下仍然通过的方法；
-- 工作流问题，例如令牌权限扩大、Action 未固定到完整提交 SHA 或泄露密钥。
+- 工作流问题，例如令牌权限扩大、Action 未固定到完整提交 SHA 或泄露密钥；
+- 能绕过配置检查（拒绝凭据类键，要求配置文件归当前用户所有且组和其他用户不可写）或数据目录与数据库文件权限检查的方法，或能让存储把同一封入站回复入队两次、自动重发投递结果不确定的回复的方法。
 
 不属于范围：
 
@@ -108,7 +110,7 @@ TurnCourier 按 [Apache License 2.0](LICENSE) 提供，不附带任何形式的�
 
 ## 规划设计中的边界
 
-邮件处理、Agent 适配器、配置、Keychain 存储、SQLite 存储和后台服务都尚未实现。已批准的[设计](docs/zh-CN/design.md)为它们规定了以下边界：
+邮件处理、Agent 适配器、Keychain 存储和后台服务都尚未实现；配置与 SQLite 存储已作为内部包实现，但还没有命令使用它们。已批准的[设计](docs/zh-CN/design.md)为尚未实现的部分规定了以下边界：
 
 - Git worktree 隔离工作副本，但不是操作系统沙箱，Agent 自身的沙箱和权限控制仍然保留。
 - 邮件回复只作为自然语言输入送入已有的 Agent 会话。邮件不能批准工具权限，也不能设置绕过审批的参数；审批请求会通知到本地处理。
@@ -116,4 +118,4 @@ TurnCourier 按 [Apache License 2.0](LICENSE) 提供，不附带任何形式的�
 - 邮箱授权码和签名密钥将存入 macOS Keychain，不写入配置文件或仓库；授权码将通过本地 `init` 命令输入。
 - 外发邮件的过滤不能保证清除所有机密。
 
-这些代码尚不存在，因此对上述边界的意见属于设计反馈，可以通过功能建议提交。不要在其中包含针对现有代码的利用细节。
+这些代码尚不存在，因此对上述边界的意见属于设计反馈，可以通过功能建议提交。现有代码（包括配置与存储包）中的问题请通过私密漏洞报告提交，不要在功能建议中包含针对现有代码的利用细节。

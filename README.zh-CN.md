@@ -14,7 +14,7 @@ Pre-alpha。Go 命令行程序只提供 `help`、`version` 和只读的 `doctor`
 - `internal/task` 与 `internal/queue` 分别是任务状态机和回复队列状态机。
 - `internal/store/sqlite` 用 SQLite 保存任务与回复元数据，包含迁移、去重、FIFO 回复队列和崩溃恢复。它不保存邮件正文，只保存正文的 SHA-256 摘要。
 
-TurnCourier 目前不能收发邮件。没有 Agent 适配器，不访问 Keychain，也没有后台服务。没有任何发布版本或标签，只有 `main` 分支。
+TurnCourier 目前不能收发邮件。没有 Agent 适配器，不访问 Keychain，也没有后台服务。没有任何发布版本或标签，默认分支为 `main`。
 
 Phase 0–1 的研究探针（Node.js 脚本，不是产品代码）在一台 Mac 上从新进程恢复了同一个 Codex 会话和 Claude Code 会话。Claude Code 首次尝试的第二轮异常退出，原因尚未确定，复测通过。尚未测试真实邮件往返。证据和限制见[验证报告](docs/zh-CN/research/phase-01.md)。
 
@@ -236,7 +236,7 @@ turncourier/
 
 ## 安全与隐私
 
-- 请通过 [GitHub 私密漏洞报告](https://github.com/chaoRookie/turncourier/security/advisories/new)提交漏洞，不要公开提 issue。详见 [SECURITY.md](SECURITY.md)。目前没有受支持的发布版本，只有 `main` 分支。
+- 请通过 [GitHub 私密漏洞报告](https://github.com/chaoRookie/turncourier/security/advisories/new)提交漏洞，不要公开提 issue。详见 [SECURITY.md](SECURITY.md)。目前没有受支持的发布版本，请在 `main` 分支最新提交上复现问题。
 - 不要在 issue、PR 或日志中提交 QQ 邮箱授权码、令牌、真实邮件内容、Agent 会话记录或本机绝对路径。复现问题请使用合成数据。
 - `turncourier` 命令不读取配置、凭据或会话。配置文件拒绝凭据类键；邮箱授权码将由 `init` 写入 Keychain，该命令尚未实现。公共 CI 不使用真实邮箱，也不调用模型。
 
