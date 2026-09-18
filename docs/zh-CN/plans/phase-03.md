@@ -838,6 +838,12 @@ go version -m dist/turncourier
   - S5（nit，仅文档）：`Open` 在迁移检查之前已执行 `journal_mode(WAL)`，回滚日志模式的新版本数据库会被切换为 WAL，`architecture.md`「Database」原写的 refused unchanged 不准确，改为表结构与数据不变、但打开时文件可能已被切换为 WAL 模式。
   - SM-1（不修复）：任务已关闭或失败时，`RequeueUnsentReply` 与 `ResolveUncertainReply(false)` 不做派发后事件核对，直接把回复记为 REJECTED。这是 Task 9 实施说明写定的行为：事件核对只为防止放回队列后重复投递，关闭或失败的任务不会再派发，拒绝不会造成重复投递；REJECTED 回复保留 `resume_state`，记录它曾被派发。`TestUnsentReplyRejectedWhenTaskStopped` 钉住此行为，代码不改。
   - 修正后 `make check`（总覆盖率 93.3%，`internal/store/sqlite` 87.3%，`internal/task` 与 `internal/queue` 100%）、`GOOS=windows go vet ./...`、`GOOS=linux go vet ./...`、`CGO_ENABLED=0 go test -count=1 ./...`、`git diff --check` 均通过，`go test -race -count=3 ./internal/store/sqlite/ ./tests/...` 通过。
+  **复查后补充：** 独立复查批准了上述修正：配置部分 28 个变异拦截 27 个，唯一存活的是去掉打开后按 `Stat` 的大小检查，超限内容仍由 `readConfigData` 拒绝；存储与状态机部分各项变异都被新测试拦截；两个真实进程同时首次打开同一新目录，旧代码 200 次失败 87 次，修正后 0 次。复查另提 5 条 nit，处理如下：
+  - N1：`TestOpenConcurrentlyOnNewDirectory` 对 S3 变异的拦截依赖调度，整包运行时可能漏过。新增 `TestMigrateRereadsVersionInsideTransaction`：另一连接在 IMMEDIATE 事务中执行 0001 并设置 `user_version = 1` 但暂不提交，此时开始迁移，200 ms 后提交，断言迁移返回 nil、版本为 1。S3 变异下该测试连跑 20 次全部失败（`table tasks already exists`）；整包运行时只有它失败，印证了原测试会漏检。
+  - N2：`openBusyTimeout` 的期限与 `isBusy` 取低 8 位的掩码没有测试钉住；`sqlite.Error` 的字段未导出，难以在测试中构造扩展错误码，因此不改，记录在此。
+  - N3：新增 `TestKnownKeysMatchRawConfig`，用反射遍历 `rawConfig` 的 `toml` 标签，断言与 `knownKeys` 完全一致；白名单多一项或少一项的变异都使其失败。
+  - N4：新增 `TestLoadKeyErrorsSkipValueChecks`：未知键与非法 `token_ttl` 同时出现时只报键名错误；去掉「键名有误时提前返回」的变异确定性地使其失败，原重复变体测试只能概率性拦截。
+  - N5：包注释补上「键名有误时只返回键名错误」；Task 5 契约代码块中 `Load` 注释「所有校验错误通过 errors.Join 一次返回」同样以 CFG-1、CFG-5 为准。
 - [ ] **Step 3：提交 PR。** 推送 `feat/phase-03-storage` 分支，开 PR，等待 `quality (ubuntu-24.04)`、`quality (macos-15)`、`security` 三项检查通过；记录 CI 耗时，若 modernc 编译使单次质量任务超过 10 分钟，再单独评估启用 setup-go 缓存，不在本阶段预先修改。
 - [ ] **Step 4：合并与记录。** squash 合并；在本文件末尾追加「验证记录」（本地、审查、远端分开记录，未运行的项写明原因），更新 `HANDOFF.md`。
 

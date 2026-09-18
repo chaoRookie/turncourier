@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 // openRawDB 在独立的临时目录创建尚未迁移的数据库连接，测试结束时关闭。
@@ -103,6 +104,50 @@ func TestMigrateTwiceIsNoop(t *testing.T) {
 	}
 	if got := countRows(t, store.db, "tasks"); got != 1 {
 		t.Errorf("重新打开后 tasks 行数 = %d; want 1", got)
+	}
+}
+
+// TestMigrateRereadsVersionInsideTransaction 验证迁移在事务内重新读取 user_version：另一连接已在 IMMEDIATE 事务中
+// 应用 0001 但尚未提交时开始迁移，等它提交后本次迁移须直接跳过，不重复执行脚本。
+// 只在事务外读取版本的实现会读到提交前的 0，随后以 table already exists 失败。
+func TestMigrateRereadsVersionInsideTransaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), databaseFileName)
+	var dbs [2]*sql.DB
+	for i := range dbs {
+		db, err := openDB(t.Context(), path)
+		if err != nil {
+			t.Fatalf("打开第 %d 个连接失败: %v", i+1, err)
+		}
+		t.Cleanup(func() { db.Close() })
+		dbs[i] = db
+	}
+	scripts, err := readMigrations(migrationFS)
+	if err != nil {
+		t.Fatalf("readMigrations 返回错误: %v", err)
+	}
+	holder, err := dbs[1].BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx 返回错误: %v", err)
+	}
+	defer holder.Rollback()
+	for _, stmt := range []string{scripts[0], "PRAGMA user_version = 1"} {
+		if _, err := holder.ExecContext(t.Context(), stmt); err != nil {
+			t.Fatalf("在持锁事务中执行迁移失败: %v", err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- migrate(t.Context(), dbs[0], migrationFS) }()
+	// 给迁移足够时间读到版本并在 busy_timeout 内等待写锁；即使调度更慢，正确实现也会在提交后读到 1 而通过。
+	time.Sleep(200 * time.Millisecond)
+	if err := holder.Commit(); err != nil {
+		t.Fatalf("提交持锁事务失败: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("并发迁移返回错误: %v", err)
+	}
+	if got := userVersion(t, dbs[0]); got != 1 {
+		t.Errorf("user_version = %d; want 1", got)
 	}
 }
 

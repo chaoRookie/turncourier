@@ -223,6 +223,46 @@ func TestLoadRejectsDuplicateCaseVariants(t *testing.T) {
 	}
 }
 
+// TestLoadKeyErrorsSkipValueChecks 验证键名有误时只返回键名错误：同一文件中非法的取值不被报告，
+// 使错误文本不随大小写变体被采用的顺序变化。
+func TestLoadKeyErrorsSkipValueChecks(t *testing.T) {
+	_, paths, err := loadConfig(t, configWithMailboxKey("bogus")+`
+[security]
+token_ttl = "1m"
+`)
+	requireErrorWithoutPath(t, err, paths)
+	if !strings.Contains(err.Error(), "unknown key mailbox.bogus") {
+		t.Fatalf("错误未报告未知键: %v", err)
+	}
+	if strings.Contains(err.Error(), "token_ttl") {
+		t.Fatalf("键名有误时仍校验了取值: %v", err)
+	}
+}
+
+// TestKnownKeysMatchRawConfig 用反射遍历 rawConfig 的 toml 标签，断言 knownKeys 与之完全一致，
+// 防止白名单多出没有对应字段、会被静默接受却不起作用的键，或漏掉新增字段。
+func TestKnownKeysMatchRawConfig(t *testing.T) {
+	var want []string
+	top := reflect.TypeFor[rawConfig]()
+	for i := range top.NumField() {
+		table := top.Field(i)
+		name := table.Tag.Get("toml")
+		want = append(want, name)
+		for j := range table.Type.NumField() {
+			want = append(want, name+"."+table.Type.Field(j).Tag.Get("toml"))
+		}
+	}
+	got := make([]string, 0, len(knownKeys))
+	for _, key := range knownKeys {
+		got = append(got, strings.Join(key, "."))
+	}
+	slices.Sort(want)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("knownKeys = %v; want %v（rawConfig 的 toml 标签）", got, want)
+	}
+}
+
 // TestLoadRejectsCredentialKeys 验证凭据类键被拒绝，并提示凭据由 init 写入 Keychain；
 // 键名按小写比较，大写或混合大小写的凭据类键同样给出 Keychain 提示。
 func TestLoadRejectsCredentialKeys(t *testing.T) {
