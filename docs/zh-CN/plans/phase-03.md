@@ -528,23 +528,25 @@ CREATE INDEX replies_by_task_state ON replies (task_id, state, seq);
 
 表中不存在任何正文字段（D2）。
 
-- [ ] **Step 1：写失败的测试（`migrate_test.go`）。** 迁移逻辑拆成 `migrate(ctx, db *sql.DB, fsys fs.FS) error` 以便注入：
+- [x] **Step 1：写失败的测试（`migrate_test.go`）。** 迁移逻辑拆成 `migrate(ctx, db *sql.DB, fsys fs.FS) error` 以便注入：
   - 空库迁移后 `user_version = 1`，四张表与两个索引存在（查询 `sqlite_schema`）；
   - 重复打开不重复执行，版本仍为 1；
   - 手动设置 `PRAGMA user_version = 99` 后 `Open` 返回 `ErrSchemaTooNew`，数据未改动；
   - 注入 `fstest.MapFS{"0001_init.sql": 合法SQL, "0002_bad.sql": "CREATE TABLE broken ("}`：返回错误，`user_version` 停在 1，不存在 `broken` 表；
   - 文件名不是 `四位数字_名称.sql`，或编号不连续（`0001`、`0003`）时报错。
-- [ ] **Step 2：写失败的测试（`store_test.go`）。**
+- [x] **Step 2：写失败的测试（`store_test.go`）。**
   - `PRAGMA journal_mode` 为 `wal`，`PRAGMA foreign_keys` 为 1，`PRAGMA synchronous` 为 2（FULL）；
   - 目录名含空格、`#`、中文时可以打开并完成读写；
   - 相对路径报错；数据库文件内容为随机字节时报错；
   - 仅 Unix：新建目录的权限为 0700、文件为 0600；已有目录权限 0755 或文件权限 0644 时拒绝；
   - 错误文本不包含临时目录路径；
   - STRICT 生效：直接执行 `INSERT INTO tasks (..., version, ...) VALUES (..., 'x', ...)` 失败。
-- [ ] **Step 3：** 测试失败。
-- [ ] **Step 4：实现。** `go get modernc.org/sqlite@v1.59.0`；用 `//go:embed migrations/*.sql` 嵌入迁移；每个待应用迁移在一个事务中执行 SQL 与 `PRAGMA user_version = N`。
-- [ ] **Step 5：** `go test -race ./internal/store/sqlite/` 通过；`make modverify` 通过；`GOOS=windows go vet ./internal/store/sqlite/` 通过；`CGO_ENABLED=0 go test ./internal/store/sqlite/` 通过（证明不依赖 CGO）。
-- [ ] **Step 6：** `git commit -m "feat(store): open SQLite database with embedded migrations"`
+- [x] **Step 3：** 测试失败。
+- [x] **Step 4：实现。** `go get modernc.org/sqlite@v1.59.0`；用 `//go:embed migrations/*.sql` 嵌入迁移；每个待应用迁移在一个事务中执行 SQL 与 `PRAGMA user_version = N`。
+- [x] **Step 5：** `go test -race ./internal/store/sqlite/` 通过；`make modverify` 通过；`GOOS=windows go vet ./internal/store/sqlite/` 通过；`CGO_ENABLED=0 go test ./internal/store/sqlite/` 通过（证明不依赖 CGO）。
+- [x] **Step 6：** `git commit -m "feat(store): open SQLite database with embedded migrations"`
+
+**实施说明：** Step 1 写的「两个索引」与 `0001_init.sql` 不符：脚本建了 `task_events_by_task`、`replies_one_in_flight`、`replies_by_task_state` 三个索引，测试按四张表加三个索引精确断言。`t.TempDir()` 按 0777 减去 umask 建目录（通常为 0755），直接作为数据目录会被权限检查拒绝，因此测试与后续集成测试都应使用其下由 `Open` 以 0700 新建的子目录。`synchronous` 在本构建中默认即为 FULL，去掉该连接参数的变异无法被测试区分，只能由 PRAGMA 断言与代码审查保证。
 
 ### Task 7：任务持久化
 
