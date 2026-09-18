@@ -617,7 +617,7 @@ func (s *Store) TaskEvents(ctx context.Context, id string) ([]TaskEvent, error)
 
 会话 ID 规则：1–200 个 `[A-Za-z0-9._:-]` 字符。
 
-- [ ] **Step 1：写失败的测试。**
+- [x] **Step 1：写失败的测试。**
   - `newTaskID`：固定输入 `bytes.NewReader([]byte{0,0,0,0,0,0,0})` 得到 `0000000000`，全 `0xff` 得到 `zzzzzzzzzz`；读取不足 7 字节时报错；1000 次真实随机生成的结果都匹配 `^[0-9abcdefghjkmnpqrstvwxyz]{10}$`；
   - `CreateTask`：返回 CREATED、Version 1、Owner `local`，时间来自注入时钟；未知 agent 报错；随机源连续 3 次给出与已有任务相同的 ID 时报错，第 2 次给出新 ID 时成功；
   - `GetTask` 不存在时 `ErrNotFound`；
@@ -625,10 +625,12 @@ func (s *Store) TaskEvents(ctx context.Context, id string) ([]TaskEvent, error)
   - `ApplyTaskEvent`：六个允许事件各至少一条成功路径；四个保留事件返回 `task.ErrInvalidTransition`；不存在的任务返回 `ErrNotFound`；错误版本返回 `ErrVersionConflict`，且数据库未改动；
   - `TaskEvents`：CREATED→RUNNING→COMPLETED→CLOSED 依次记录 from/to/event，按 seq 升序；
   - fail 与 close 拒绝排队回复的行为在 Task 8 数据就绪后补测（写入 Task 8 Step 1）。
-- [ ] **Step 2：** 测试失败。
-- [ ] **Step 3：实现。** 所有写操作使用 `BeginTx`（连接串已设置 IMMEDIATE）。更新语句形如 `UPDATE tasks SET state=?, version=version+1, updated_at=? WHERE id=? AND version=?`，受影响行数为 0 时再查一次任务，区分 `ErrNotFound` 与 `ErrVersionConflict`。读取时校验 `task.State(...).Valid()`，非法值返回错误，不静默接受。
-- [ ] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
-- [ ] **Step 5：** `git commit -m "feat(store): persist tasks with optimistic versioning"`
+- [x] **Step 2：** 测试失败。
+- [x] **Step 3：实现。** 所有写操作使用 `BeginTx`（连接串已设置 IMMEDIATE）。更新语句形如 `UPDATE tasks SET state=?, version=version+1, updated_at=? WHERE id=? AND version=?`，受影响行数为 0 时再查一次任务，区分 `ErrNotFound` 与 `ErrVersionConflict`。读取时校验 `task.State(...).Valid()`，非法值返回错误，不静默接受。
+- [x] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
+- [x] **Step 5：** `git commit -m "feat(store): persist tasks with optimistic versioning"`
+
+**实施说明：** 「主键冲突时最多重试 3 次」与 Step 1「随机源连续 3 次给出与已有任务相同的 ID 时报错」只有按「连同首次共尝试 3 次」理解才一致，实现如此，`CreateTask` 文档注释相应写明；测试在 3 个重复 ID 之后再放一个新 ID，断言仍报错且新 ID 未被读取，并用「第 3 次成功」钉住下限。Step 3 的写法在事务内先读取任务（`task.Next` 需要当前状态），不存在返回 `ErrNotFound`、版本不符返回 `ErrVersionConflict`，版本比较先于状态机校验，使持有过期版本的调用方总是得到版本冲突；`UPDATE` 仍带 `version` 条件，受影响行数不为 1 时返回 `ErrVersionConflict`，在 IMMEDIATE 事务下只作防御，去掉该 SQL 条件的变异无法被测试区分。清单未规定 `TaskEvents` 查询不存在的任务时的行为，按其他以 ID 读取的方法统一返回 `ErrNotFound`。
 
 ### Task 8：入站回复去重与入队
 
