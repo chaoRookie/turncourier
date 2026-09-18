@@ -1,9 +1,10 @@
-// Package sqlite 的迁移测试用临时目录中的真实 SQLite 数据库验证版本号、幂等、版本过新与失败回滚。
+// Package sqlite 的迁移测试用临时目录中的真实 SQLite 数据库验证版本号、幂等、多个迁移依次应用、版本过新与失败回滚。
 package sqlite
 
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -106,40 +107,85 @@ func TestMigrateTwiceIsNoop(t *testing.T) {
 }
 
 // TestOpenRejectsNewerSchema 验证 user_version 高于已知迁移时 Open 返回 ErrSchemaTooNew，且不改动数据库。
+// 版本恰好比已知迁移多 1 是旧版程序打开新版数据库的典型情形，用来钉住版本比较的边界；
+// 设置版本后 SchemaVersion 须读回同一个值，证明它读取的是真实的 user_version。
 func TestOpenRejectsNewerSchema(t *testing.T) {
-	dir := dataDir(t)
-	store := openStore(t, dir)
-	insertTask(t, store.db, "0123456789")
-	if _, err := store.db.ExecContext(t.Context(), "PRAGMA user_version = 99"); err != nil {
-		t.Fatalf("设置 user_version 失败: %v", err)
-	}
-	before := schemaObjects(t, store.db)
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close 返回错误: %v", err)
-	}
-
-	got, err := Open(t.Context(), dir, Options{})
-	if !errors.Is(err, ErrSchemaTooNew) {
-		t.Fatalf("Open 错误 = %v; want ErrSchemaTooNew", err)
-	}
-	if got != nil {
-		t.Errorf("Open 失败时返回了非空 Store")
-	}
-	requireErrorWithoutPath(t, err, dir)
-
-	db, err := openDB(t.Context(), filepath.Join(dir, databaseFileName))
+	scripts, err := readMigrations(migrationFS)
 	if err != nil {
-		t.Fatalf("重新打开数据库失败: %v", err)
+		t.Fatalf("读取迁移失败: %v", err)
 	}
-	defer db.Close()
-	if version := userVersion(t, db); version != 99 {
-		t.Errorf("user_version = %d; want 99", version)
+	for _, newer := range []int{len(scripts) + 1, 99} {
+		t.Run(fmt.Sprint(newer), func(t *testing.T) {
+			dir := dataDir(t)
+			store := openStore(t, dir)
+			insertTask(t, store.db, "0123456789")
+			// PRAGMA 不支持参数绑定；newer 是测试给定的整数，直接格式化即可。
+			if _, err := store.db.ExecContext(t.Context(), fmt.Sprintf("PRAGMA user_version = %d", newer)); err != nil {
+				t.Fatalf("设置 user_version 失败: %v", err)
+			}
+			if version, err := store.SchemaVersion(t.Context()); err != nil || version != newer {
+				t.Errorf("SchemaVersion = %d, %v; want %d, nil", version, err, newer)
+			}
+			before := schemaObjects(t, store.db)
+			if err := store.Close(); err != nil {
+				t.Fatalf("Close 返回错误: %v", err)
+			}
+
+			got, err := Open(t.Context(), dir, Options{})
+			if !errors.Is(err, ErrSchemaTooNew) {
+				t.Fatalf("Open 错误 = %v; want ErrSchemaTooNew", err)
+			}
+			if got != nil {
+				t.Errorf("Open 失败时返回了非空 Store")
+			}
+			requireErrorWithoutPath(t, err, dir)
+
+			db, err := openDB(t.Context(), filepath.Join(dir, databaseFileName))
+			if err != nil {
+				t.Fatalf("重新打开数据库失败: %v", err)
+			}
+			defer db.Close()
+			if version := userVersion(t, db); version != newer {
+				t.Errorf("user_version = %d; want %d", version, newer)
+			}
+			if after := schemaObjects(t, db); !slices.Equal(after, before) {
+				t.Errorf("schema = %v; want %v", after, before)
+			}
+			if rows := countRows(t, db, "tasks"); rows != 1 {
+				t.Errorf("tasks 行数 = %d; want 1", rows)
+			}
+		})
 	}
-	if after := schemaObjects(t, db); !slices.Equal(after, before) {
-		t.Errorf("schema = %v; want %v", after, before)
+}
+
+// TestMigrateAppliesMultipleMigrations 验证多个迁移按编号各执行一次：空库一次应用 0001 与 0002，
+// 已在版本 1 的库只追加执行 0002。任一迁移被重复执行或执行错脚本，都会因表已存在而失败。
+func TestMigrateAppliesMultipleMigrations(t *testing.T) {
+	first := &fstest.MapFile{Data: []byte("CREATE TABLE a (id INTEGER PRIMARY KEY) STRICT;")}
+	second := &fstest.MapFile{Data: []byte("CREATE TABLE b (id INTEGER PRIMARY KEY) STRICT;")}
+	tests := []struct {
+		name    string
+		initial fstest.MapFS
+	}{
+		{"空库一次应用两个迁移", fstest.MapFS{}},
+		{"版本 1 只追加新迁移", fstest.MapFS{"0001_a.sql": first}},
 	}
-	if rows := countRows(t, db, "tasks"); rows != 1 {
-		t.Errorf("tasks 行数 = %d; want 1", rows)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := openRawDB(t)
+			if err := migrate(t.Context(), db, tt.initial); err != nil {
+				t.Fatalf("初始迁移返回错误: %v", err)
+			}
+			if err := migrate(t.Context(), db, fstest.MapFS{"0001_a.sql": first, "0002_b.sql": second}); err != nil {
+				t.Fatalf("migrate 返回错误: %v", err)
+			}
+			if got := userVersion(t, db); got != 2 {
+				t.Errorf("user_version = %d; want 2", got)
+			}
+			if got, want := schemaObjects(t, db), []string{"table:a", "table:b"}; !slices.Equal(got, want) {
+				t.Errorf("schema = %v; want %v", got, want)
+			}
+		})
 	}
 }
 
@@ -188,6 +234,11 @@ func TestMigrateRejectsInvalidFileNames(t *testing.T) {
 		{"缺少下划线", []string{"0001-init.sql"}},
 		{"名称为空", []string{"0001_.sql"}},
 		{"扩展名错误", []string{"0001_init.txt"}},
+		// 以下用例钉住文件名正则的首尾锚点与名称字符集。
+		{"编号超过四位", []string{"00001_init.sql"}},
+		{"编号前有前缀", []string{"x0001_init.sql"}},
+		{"名称含点", []string{"0001_init.v2.sql"}},
+		{"扩展名后有后缀", []string{"0001_init.sql.bak"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

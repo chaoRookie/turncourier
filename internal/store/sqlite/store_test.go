@@ -109,7 +109,7 @@ func TestOpenConnectionSettings(t *testing.T) {
 }
 
 // TestOpenBeginsImmediateTransactions 验证事务一开始就取得写锁：
-// 存储持有未提交事务时，另一个不做忙等待的连接无法再开始 IMMEDIATE 事务。
+// 存储持有未提交事务时，另一个不做忙等待的连接开始 IMMEDIATE 事务会因数据库被锁而失败。
 func TestOpenBeginsImmediateTransactions(t *testing.T) {
 	dir := dataDir(t)
 	store := openStore(t, dir)
@@ -130,13 +130,20 @@ func TestOpenBeginsImmediateTransactions(t *testing.T) {
 		otherTx.Rollback()
 		t.Fatal("存储的事务未持有写锁，第二个连接不应能开始 IMMEDIATE 事务")
 	}
+	if !strings.Contains(err.Error(), "database is locked") {
+		t.Errorf("第二个连接的错误 = %v; want SQLITE_BUSY（database is locked）", err)
+	}
 }
 
 // TestOpenOptions 验证零值 Options 使用 time.Now 与 crypto/rand，注入的时钟与随机源被原样保存。
+// 默认时钟的读数须落在前后两次 time.Now 之间，仅判断非空无法区分其他时钟。
 func TestOpenOptions(t *testing.T) {
 	store := openStore(t, dataDir(t))
-	if store.now == nil || store.random != rand.Reader {
-		t.Errorf("零值 Options 未使用默认时钟与 crypto/rand")
+	before := time.Now()
+	now := store.now()
+	after := time.Now()
+	if now.Before(before) || now.After(after) || store.random != rand.Reader {
+		t.Errorf("零值 Options 未使用默认时钟与 crypto/rand: now = %v, want [%v, %v]", now, before, after)
 	}
 
 	fixed := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
@@ -186,6 +193,9 @@ func TestOpenRejectsRelativePath(t *testing.T) {
 		store.Close()
 		t.Fatal("Open 应当拒绝相对路径")
 	}
+	if !strings.Contains(err.Error(), "absolute path") {
+		t.Errorf("错误 = %v; want 绝对路径检查失败", err)
+	}
 	if _, statErr := os.Stat("relative"); !os.IsNotExist(statErr) {
 		t.Errorf("相对路径被创建: %v", statErr)
 	}
@@ -211,6 +221,10 @@ func TestOpenRejectsInvalidDatabaseFile(t *testing.T) {
 		}
 		_, err := Open(t.Context(), dir, Options{})
 		requireErrorWithoutPath(t, err, dir)
+		// 错误须来自 openDB 中 PingContext 触发的实际打开，而不是推迟到迁移阶段才暴露。
+		if !strings.Contains(err.Error(), "cannot open database") {
+			t.Errorf("错误 = %v; want 打开数据库失败", err)
+		}
 	})
 	t.Run("目录", func(t *testing.T) {
 		dir := existingDataDir(t)
@@ -258,8 +272,8 @@ func TestOpenRejectsWidePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
 		t.Skip("目录与文件权限检查只在 Unix 生效")
 	}
-	// 0o750 与 0o705（文件 0o640 与 0o604）分别只开放组或其他用户，用来钉住权限掩码同时覆盖两者。
-	for _, mode := range []os.FileMode{0o755, 0o750, 0o705} {
+	// 除 0o755 与 0o644 外，每个用例只给组或其他用户开放读、写、执行中的一位，用来钉住权限掩码覆盖全部六位。
+	for _, mode := range []os.FileMode{0o755, 0o740, 0o720, 0o710, 0o704, 0o702, 0o701} {
 		dir := dataDir(t)
 		if err := os.Mkdir(dir, mode); err != nil {
 			t.Fatalf("创建目录失败: %v", err)
@@ -269,8 +283,11 @@ func TestOpenRejectsWidePermissions(t *testing.T) {
 		}
 		_, err := Open(t.Context(), dir, Options{})
 		requireErrorWithoutPath(t, err, dir)
+		if !strings.Contains(err.Error(), "data directory must not be accessible by group or others") {
+			t.Errorf("目录权限 %o: 错误 = %v; want 数据目录权限检查失败", mode, err)
+		}
 	}
-	for _, mode := range []os.FileMode{0o644, 0o640, 0o604} {
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o620, 0o610, 0o604, 0o602, 0o601} {
 		dir := existingDataDir(t)
 		path := filepath.Join(dir, databaseFileName)
 		if err := os.WriteFile(path, nil, mode); err != nil {
@@ -282,6 +299,9 @@ func TestOpenRejectsWidePermissions(t *testing.T) {
 		}
 		_, err := Open(t.Context(), dir, Options{})
 		requireErrorWithoutPath(t, err, dir)
+		if !strings.Contains(err.Error(), "database file must not be accessible by group or others") {
+			t.Errorf("文件权限 %o: 错误 = %v; want 数据库文件权限检查失败", mode, err)
+		}
 	}
 	// 权限恰好为 0700 与 0600 的已有目录和空文件可以打开。
 	dir := existingDataDir(t)
