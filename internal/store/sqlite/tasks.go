@@ -149,7 +149,7 @@ func (s *Store) ApplyTaskEvent(ctx context.Context, id string, version int64, ev
 
 // applyEvent 在一个事务中读取任务、比较版本、用 task.Next 计算新状态，再以版本条件更新任务并追加事件记录。
 // 版本比较先于状态机校验：持有过期版本的调用方看到的状态已不可信，应得到 ErrVersionConflict 后重新读取。
-// sessionID 只由 start 传入；coalesce 保留已写入的会话 ID，使其一经写入不可修改。
+// sessionID 只由 start 传入。
 func (s *Store) applyEvent(ctx context.Context, id string, version int64, event task.Event, sessionID string) (Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -169,22 +169,8 @@ func (s *Store) applyEvent(ctx context.Context, id string, version int64, event 
 		return Task{}, err
 	}
 	now := s.now().UnixMilli()
-	result, err := tx.ExecContext(ctx,
-		"UPDATE tasks SET state = ?, version = version + 1, updated_at = ?, session_id = coalesce(session_id, ?) WHERE id = ? AND version = ?",
-		string(next), now, sql.NullString{String: sessionID, Valid: sessionID != ""}, id, version)
-	if err != nil {
-		return Task{}, fmt.Errorf("cannot update task: %w", err)
-	}
-	// IMMEDIATE 事务已在读取前取得写锁，这里的版本条件是防止并发覆盖的最后一道保证。
-	if updated, err := result.RowsAffected(); err != nil {
-		return Task{}, fmt.Errorf("cannot update task: %w", err)
-	} else if updated != 1 {
-		return Task{}, fmt.Errorf("%w: task %q changed during update", ErrVersionConflict, id)
-	}
-	if _, err := tx.ExecContext(ctx,
-		"INSERT INTO task_events (task_id, event, from_state, to_state, created_at) VALUES (?, ?, ?, ?, ?)",
-		id, string(event), string(current.State), string(next), now); err != nil {
-		return Task{}, fmt.Errorf("cannot record task event: %w", err)
+	if err := writeTaskTransition(ctx, tx, current, event, next, sessionID, now); err != nil {
+		return Task{}, err
 	}
 	if reason, ok := rejectReasons[event]; ok {
 		rejected, err := queue.Next(queue.Queued, queue.Reject)
@@ -205,6 +191,29 @@ func (s *Store) applyEvent(ctx context.Context, id string, version int64, event 
 		return Task{}, fmt.Errorf("cannot commit task event: %w", err)
 	}
 	return updated, nil
+}
+
+// writeTaskTransition 在事务 tx 中以读取时的版本为条件把任务更新为 next，并追加一条 event 事件记录；
+// 新状态由调用方经 task 状态机算出。sessionID 为空时不改动会话 ID，coalesce 保留已写入的值，使其一经写入不可修改。
+// IMMEDIATE 事务已在读取前取得写锁，版本条件是防止并发覆盖的最后一道保证，受影响行数不为 1 时返回 ErrVersionConflict。
+func writeTaskTransition(ctx context.Context, tx *sql.Tx, current Task, event task.Event, next task.State, sessionID string, now int64) error {
+	result, err := tx.ExecContext(ctx,
+		"UPDATE tasks SET state = ?, version = version + 1, updated_at = ?, session_id = coalesce(session_id, ?) WHERE id = ? AND version = ?",
+		string(next), now, sql.NullString{String: sessionID, Valid: sessionID != ""}, current.ID, current.Version)
+	if err != nil {
+		return fmt.Errorf("cannot update task: %w", err)
+	}
+	if updated, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("cannot update task: %w", err)
+	} else if updated != 1 {
+		return fmt.Errorf("%w: task %q changed during update", ErrVersionConflict, current.ID)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO task_events (task_id, event, from_state, to_state, created_at) VALUES (?, ?, ?, ?, ?)",
+		current.ID, string(event), string(current.State), string(next), now); err != nil {
+		return fmt.Errorf("cannot record task event: %w", err)
+	}
+	return nil
 }
 
 // TaskEvents 按发生顺序返回任务的状态变化记录。

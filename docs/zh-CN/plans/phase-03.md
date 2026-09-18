@@ -732,7 +732,7 @@ func (s *Store) ResolveUncertainReply(ctx context.Context, seq int64, delivered 
 func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
 ```
 
-- [ ] **Step 1：写失败的测试。**
+- [x] **Step 1：写失败的测试。**
   - **FIFO：** 任务 COMPLETED，依次记录 3 条回复；`ClaimNextReply` 得到 seq 1，任务 RUNNING，`ResumeState=COMPLETED`；再次调用返回 `ErrNoDispatchableReply`（任务 RUNNING 且有在途）；`AcknowledgeReply(1)` 后仍返回 `ErrNoDispatchableReply`（任务 RUNNING）；`turn_completed` 后得到 seq 2。
   - **等待输入：** WAITING_INPUT 任务派发后 `ResumeState=WAITING_INPUT`。
   - **不可派发状态：** 任务为 RUNNING、WAITING_APPROVAL、DELIVERY_UNCERTAIN、FAILED、CLOSED 时返回 `ErrNoDispatchableReply`；任务不存在返回 `ErrNotFound`；队列为空返回 `ErrNoDispatchableReply`。
@@ -744,10 +744,12 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
   - **跨进程并发：** 两个独立 `Open` 同一数据目录的 Store，在 20 个 goroutine 中同时对同一任务 `ClaimNextReply`，恰好 1 个成功，其余返回 `ErrNoDispatchableReply`，没有 `SQLITE_BUSY` 错误泄漏；循环 20 轮。
   - **数据库兜底：** 绕过 API 直接插入同一任务的第二条 DISPATCHING 回复，违反 `replies_one_in_flight` 而失败。
   - **事件记录：** 上述操作产生的任务事件按顺序出现在 `TaskEvents` 中。
-- [ ] **Step 2：** 测试失败。
-- [ ] **Step 3：实现。** 每个方法一个事务：读取回复与任务 → 用 `queue.Next` 与 `task.Next`/`task.ResumeAfterUnsent` 计算新状态 → 以 `WHERE seq=? AND state=?`、`WHERE id=? AND version=?` 条件更新 → 写任务事件。任何一步受影响行数不为 1 时回滚并返回对应错误。
-- [ ] **Step 4：** `go test -race -count=3 ./internal/store/sqlite/` 通过，无抖动；包覆盖率 ≥ 85%。
-- [ ] **Step 5：** `git commit -m "feat(store): dispatch, acknowledge and recover replies without blind resend"`
+- [x] **Step 2：** 测试失败。
+- [x] **Step 3：实现。** 每个方法一个事务：读取回复与任务 → 用 `queue.Next` 与 `task.Next`/`task.ResumeAfterUnsent` 计算新状态 → 以 `WHERE seq=? AND state=?`、`WHERE id=? AND version=?` 条件更新 → 写任务事件。任何一步受影响行数不为 1 时回滚并返回对应错误。
+- [x] **Step 4：** `go test -race -count=3 ./internal/store/sqlite/` 通过，无抖动；包覆盖率 ≥ 85%。
+- [x] **Step 5：** `git commit -m "feat(store): dispatch, acknowledge and recover replies without blind resend"`
+
+**实施说明：** 清单没有给「未送达后恢复派发前状态」命名任务事件，`task.ResumeAfterUnsent` 也不在转移表中，存储层以 `reply_unsent` 记录（与 `reply_dispatched` 对应），该事件不能经 `ApplyTaskEvent` 执行。按序号操作的方法只接受各自的来源状态：`AcknowledgeReply`、`MarkReplyUncertain`、`RequeueUnsentReply` 只接受 DISPATCHING，`ResolveUncertainReply` 只接受 UNCERTAIN；队列转移表允许 UNCERTAIN 直接 acknowledge 或 requeue，但若经 `AcknowledgeReply` 处理，DELIVERY_UNCERTAIN 任务将失去执行 delivery_confirmed 的途径，因此这类调用同样返回 `queue.ErrInvalidTransition`。回到 QUEUED 的回复清除 `resume_state`，与新入队的回复一致；改为 REJECTED 的回复保留它，记录曾被派发。派发期间任务被 `ApplyTaskEvent` 移出 RUNNING（例如回合已结束）且仍接受回复时，核对为未送达或放回队列由 `task.ResumeAfterUnsent` 拒绝，返回 `task.ErrInvalidTransition` 且不改动数据，不猜测恢复目标，测试钉住这一点；此时标记不确定不改动任务，核对为已送达只确认回复。`ClaimNextReply` 在任务可派发时先检查在途回复，使其返回 `ErrNoDispatchableReply` 而不是违反 `replies_one_in_flight` 的数据库错误。`getReply` 查不到回复时改为返回 `ErrNotFound`。为让回复操作与 `applyEvent` 共用同一条带版本条件的任务更新与事件写入，把这段代码从 `applyEvent` 提取为 `tasks.go` 中的 `writeTaskTransition`，这是 Files 列表之外对 `tasks.go` 的唯一改动，行为不变。清单场景之外补测：不可派发状态加测 CREATED；用触发器让每个多步写入的操作在回复更新、任务更新、事件写入处失败或更新不命中，证明整体回滚，另测已取消的上下文，包覆盖率由 83.6% 升至 86.8%。`updateReply` 的 `state` 条件与 Task 7 的版本条件一样，在 IMMEDIATE 事务下只作防御，去掉它的变异无法被测试区分；去掉 `_txlock=immediate` 的变异会被跨进程并发测试以 SQLITE_BUSY 错误拦截。
 
 ### Task 10：集成测试
 
