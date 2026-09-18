@@ -178,17 +178,17 @@ func AcceptsReplies(s State) bool
 func CanDispatchReply(s State) bool
 ```
 
-- [ ] **Step 1：写失败的测试。** `state_test.go` 中独立写一份期望矩阵 `want := map[State]map[Event]State{...}`（内容与上面的表逐项相同，作为规格副本），对 8 个状态 × 10 个事件全部调用 `Next`：矩阵中有的组合断言返回目标状态且 `err == nil`；没有的组合断言 `errors.Is(err, ErrInvalidTransition)`，且错误文本同时包含状态名和事件名。另外覆盖：
+- [x] **Step 1：写失败的测试。** `state_test.go` 中独立写一份期望矩阵 `want := map[State]map[Event]State{...}`（内容与上面的表逐项相同，作为规格副本），对 8 个状态 × 10 个事件全部调用 `Next`：矩阵中有的组合断言返回目标状态且 `err == nil`；没有的组合断言 `errors.Is(err, ErrInvalidTransition)`，且错误文本同时包含状态名和事件名。另外覆盖：
   - `Next("BOGUS", Start)` 返回 `ErrInvalidTransition`；
   - `Closed` 对任何事件都非法；
   - `ResumeAfterUnsent`：`(Running, Completed)`→`Completed`，`(DeliveryUncertain, WaitingInput)`→`WaitingInput`，`(Completed, Completed)`、`(Running, Running)`、`(Running, Closed)` 均为非法；
   - `AcceptsReplies`：Running、WaitingInput、WaitingApproval、Completed、DeliveryUncertain 为 true，Created、Failed、Closed 为 false；
   - `CanDispatchReply`：只有 Completed、WaitingInput 为 true；
   - `Valid`：8 个已知状态为 true，`""` 与 `"running"` 为 false。
-- [ ] **Step 2：确认测试失败。** 运行 `go test ./internal/task/`，期望编译失败（`undefined: Next` 等）。
-- [ ] **Step 3：最小实现。** 按契约实现；`Next` 查表，未命中时 `fmt.Errorf("%w: %s --%s-->", ErrInvalidTransition, from, event)`。
-- [ ] **Step 4：确认通过。** `go test -race ./internal/task/` 通过，`go test -cover ./internal/task/` 覆盖率 100%。
-- [ ] **Step 5：提交。** `git add internal/task && git commit -m "feat(task): add task state machine"`
+- [x] **Step 2：确认测试失败。** 运行 `go test ./internal/task/`，期望编译失败（`undefined: Next` 等）。
+- [x] **Step 3：最小实现。** 按契约实现；`Next` 查表，未命中时 `fmt.Errorf("%w: %s --%s-->", ErrInvalidTransition, from, event)`。
+- [x] **Step 4：确认通过。** `go test -race ./internal/task/` 通过，`go test -cover ./internal/task/` 覆盖率 100%。
+- [x] **Step 5：提交。** `git add internal/task && git commit -m "feat(task): add task state machine"`
 
 ### Task 2：回复队列状态机
 
@@ -241,18 +241,18 @@ func (s State) Valid() bool
 func Next(from State, event Event) (State, error)
 ```
 
-- [ ] **Step 1：写失败的测试。** 与 Task 1 相同的方法：测试文件中写独立期望矩阵，穷举 5 个状态 × 5 个事件；覆盖未知状态、两个终态对所有事件非法、`Valid` 的已知与未知输入。
-- [ ] **Step 2：** `go test ./internal/queue/` 编译失败。
-- [ ] **Step 3：** 按契约实现。
-- [ ] **Step 4：** `go test -race -cover ./internal/queue/` 通过且覆盖率 100%。
-- [ ] **Step 5：** `git commit -m "feat(queue): add reply queue state machine"`
+- [x] **Step 1：写失败的测试。** 与 Task 1 相同的方法：测试文件中写独立期望矩阵，穷举 5 个状态 × 5 个事件；覆盖未知状态、两个终态对所有事件非法、`Valid` 的已知与未知输入。
+- [x] **Step 2：** `go test ./internal/queue/` 编译失败。
+- [x] **Step 3：** 按契约实现。
+- [x] **Step 4：** `go test -race -cover ./internal/queue/` 通过且覆盖率 100%。
+- [x] **Step 5：** `git commit -m "feat(queue): add reply queue state machine"`
 
 ### Task 3：质量门槛调整
 
 **Files:**
 - Modify: `Makefile`
 
-- [ ] **Step 1：** 新增目标并加入 `check`（`fmt` 目录列表加入 `tests` 的延后项在 Task 10 创建该目录时完成，因为 gofmt 遇到不存在的目录会报错）：
+- [x] **Step 1：** 新增目标并加入 `check`（`fmt` 目录列表加入 `tests` 的延后项在 Task 10 创建该目录时完成，因为 gofmt 遇到不存在的目录会报错）：
 
 ```make
 # go.sum 记录的依赖哈希须与模块缓存一致，防止被篡改的依赖进入构建。
@@ -263,8 +263,10 @@ check: fmt-check vet modverify comments test lint
 ```
 
 并把 `.PHONY` 补上 `modverify`，第一行注释改为「工程命令在本地与 CI 共用；依赖固定在 go.mod/go.sum 并由 modverify 校验。」
-- [ ] **Step 2：** `make modverify` 输出 `all modules verified`；`make check` 通过。
-- [ ] **Step 3：** `git commit -m "build: verify module checksums in make check"`
+- [x] **Step 2：** `make modverify` 输出 `all modules verified`；`make check` 通过。
+- [x] **Step 3：** `git commit -m "build: verify module checksums in make check"`
+
+**实施说明：** `check` 链变化使 6 处枚举子目标的文档过时（`README.md`、`README.zh-CN.md`、`CONTRIBUTING.md` 两处、`docs/zh-CN/development.md`、`docs/en/architecture.md`），另有 3 处 make 目标表格缺 `modverify` 行（两个 README 与 `development.md`）。本任务范围只允许改 `Makefile`，故不在此同步文档；上述位置已逐一写入 Task 11 Step 2/3/4/5，并由 Step 6 的 grep 断言兜底。
 
 ### Task 4：邮箱地址规范化
 
@@ -287,7 +289,7 @@ func NormalizeAddress(raw string) (string, error)
 
 规则：去除首尾空白；总长 ≤ 254；恰好一个 `@`；本地部分 1–64 个字符，仅 dot-atom 字符 ``A-Za-z0-9.!#$%&'*+/=?^_`{|}~-``，不以 `.` 开头或结尾，不含 `..`；域名至少两个标签，每个标签 1–63 个 `[A-Za-z0-9-]` 且不以 `-` 开头或结尾，总长 ≤ 253；最后整体转小写。
 
-- [ ] **Step 1：写失败的测试。** 表格用例：
+- [x] **Step 1：写失败的测试。** 表格用例：
 
 | 输入 | 期望 |
 | --- | --- |
@@ -309,10 +311,12 @@ func NormalizeAddress(raw string) (string, error)
 | 总长 255 | 错误 |
 
   所有错误断言 `errors.Is(err, ErrInvalidAddress)`。再加 `FuzzNormalizeAddress`，种子为上表输入；性质：不 panic；成功时输出等于 `strings.ToLower(输出)`、只含一个 `@`、再次规范化结果不变。
-- [ ] **Step 2：** `go test ./internal/config/` 编译失败。
-- [ ] **Step 3：** 按规则实现，只用标准库。
-- [ ] **Step 4：** `go test -race ./internal/config/` 通过；`go test -run=^$ -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/` 无失败（本地执行一次，CI 只运行种子）。
-- [ ] **Step 5：** `git commit -m "feat(config): add strict email address normalization"`
+- [x] **Step 2：** `go test ./internal/config/` 编译失败。
+- [x] **Step 3：** 按规则实现，只用标准库。
+- [x] **Step 4：** `go test -race ./internal/config/` 通过；`go test -run=^$ -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/` 无失败（本地执行一次，CI 只运行种子）。
+- [x] **Step 5：** `git commit -m "feat(config): add strict email address normalization"`
+
+**实施说明：** 域名总长 ≤ 253 的规则在总长 ≤ 254 且本地部分至少 1 个字符时不可能触发，按规格保留为防御性上界，其 `return` 因此未被覆盖（`internal/config` 语句覆盖率 97.4%）。
 
 ### Task 5：配置加载与校验
 
@@ -405,11 +409,11 @@ func Load(paths Paths, getenv func(string) string) (Config, error)
 
 默认值：`imap_host = imap.qq.com`、`imap_port = 993`、`smtp_host = smtp.qq.com`、`smtp_port = 465`、`events = [waiting_input, failed, turn_completed]`、`token_ttl = 168h`。
 
-- [ ] **Step 1：写失败的测试（`paths_test.go`）。**
+- [x] **Step 1：写失败的测试（`paths_test.go`）。**
   - 未设置环境变量、`userConfigDir` 返回 `/home/u/.config` → `ConfigFile=/home/u/.config/TurnCourier/turncourier.toml`，`DataDir=/home/u/.config/TurnCourier`，`Database=.../turncourier.db`；
   - `TURNCOURIER_CONFIG=/abs/c.toml`、`TURNCOURIER_DATA_DIR=/abs/data` 分别覆盖；
   - 两个变量为相对路径时报错；`userConfigDir` 报错且未设置变量时报错。
-- [ ] **Step 2：写失败的测试（`config_test.go`）。** 用 `t.TempDir()` 写入 0600 文件后调用 `Load`：
+- [x] **Step 2：写失败的测试（`config_test.go`）。** 用 `t.TempDir()` 写入 0600 文件后调用 `Load`：
   - 加载 `configs/turncourier.example.toml` 的副本成功，字段与示例一致；
   - 只写必填字段时得到上述默认值；
   - 缺少 `mailbox.address`、`recipient.address`，或 `allowed_senders` 为空时报错，而且三个错误在同一个返回值中都能找到；
@@ -422,10 +426,12 @@ func Load(paths Paths, getenv func(string) string) (Config, error)
   - 文件不存在时 `errors.Is(err, ErrNotFound)`；文件超过 1 MiB 报错；不是常规文件（目录）报错；
   - 仅 Unix：权限 0622、0602 报错，0600、0644 通过；
   - 所有错误文本都不包含 `t.TempDir()` 路径。
-- [ ] **Step 3：** `go test ./internal/config/` 失败。
-- [ ] **Step 4：实现。** `go get github.com/BurntSushi/toml@v1.6.0`。读取时先用 `os.Stat` 检查常规文件与大小，再调用 `checkFileOwner(info)`（unix 版本比较 `Stat_t.Uid == os.Getuid()` 并检查 `mode&0o022 == 0`；other 版本直接返回 nil），然后 `toml.NewDecoder(io.LimitReader(f, 1<<20+1)).Decode(&raw)`，读取 `md.Undecoded()`。`raw` 结构使用 `toml` 标签，端口用 `*int` 区分未设置与 0。
-- [ ] **Step 5：** `go test -race ./internal/config/` 通过，覆盖率 ≥ 90%；`GOOS=windows go vet ./internal/config/` 通过；`make comments` 通过。
-- [ ] **Step 6：** `git add configs internal/config go.mod go.sum && git commit -m "feat(config): load and validate TOML configuration"`
+- [x] **Step 3：** `go test ./internal/config/` 失败。
+- [x] **Step 4：实现。** `go get github.com/BurntSushi/toml@v1.6.0`。读取时先用 `os.Stat` 检查常规文件与大小，再调用 `checkFileOwner(info)`（unix 版本比较 `Stat_t.Uid == os.Getuid()` 并检查 `mode&0o022 == 0`；other 版本直接返回 nil），然后 `toml.NewDecoder(io.LimitReader(f, 1<<20+1)).Decode(&raw)`，读取 `md.Undecoded()`。`raw` 结构使用 `toml` 标签，端口用 `*int` 区分未设置与 0。
+- [x] **Step 5：** `go test -race ./internal/config/` 通过，覆盖率 ≥ 90%；`GOOS=windows go vet ./internal/config/` 通过；`make comments` 通过。
+- [x] **Step 6：** `git add configs internal/config go.mod go.sum && git commit -m "feat(config): load and validate TOML configuration"`
+
+**实施说明：** 权限用例 0622 与 0602 都带「其他用户可写」位，把掩码收窄成 `mode&0o002` 仍能通过（变异测试验证），因此在 Step 2 的权限用例中增加只让组可写的 0620，使掩码的两个位都被钉住。
 
 ### Task 6：SQLite 打开与迁移
 
@@ -761,11 +767,17 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
 - Modify: `internal/cli/cli.go`、`internal/cli/cli_test.go`、`cmd/turncourier/main_test.go`、`README.md`、`README.zh-CN.md`、`docs/en/architecture.md`、`docs/zh-CN/development.md`、`docs/zh-CN/design.md`、`CONTRIBUTING.md`、`CHANGELOG.md`、`AGENTS.md`
 
 - [ ] **Step 1：** 帮助描述由「Phase 2 工程骨架：…」改为「pre-alpha：当前没有邮件收发、任务执行或后台服务能力。」，规划命令的提示去掉阶段号；相应测试断言改为检查 `pre-alpha`。`go test ./cmd/... ./internal/cli/` 通过。
-- [ ] **Step 2：** README 中英文同步：状态说明（配置、存储、状态机已实现但尚未接入命令）、代码规则中的依赖说明、实际文件树（新增 `configs/`、`internal/task`、`internal/queue`、`internal/config`、`internal/store/sqlite`、`tests/integration`、`docs/zh-CN/plans/phase-03.md`），并用 `git ls-files --cached --others --exclude-standard | sort` 核对。
-- [ ] **Step 3：** `docs/en/architecture.md`：当前范围、包与依赖方向（`store/sqlite → task, queue`；`config`、`task`、`queue` 互不依赖，也不依赖存储）、持久化与恢复语义、依赖列表。
-- [ ] **Step 4：** `docs/zh-CN/development.md`：依赖政策与许可证记录、`modverify`、配置文件与数据目录位置、SQLite 测试约定（临时目录、真实数据库、触发器注入故障）、集成测试目录、模糊测试的本地运行方式。
-- [ ] **Step 5：** `CONTRIBUTING.md` 依赖规则改为「新增依赖须在实施清单或 issue 中说明理由与许可证」；`CHANGELOG.md` 在 `[Unreleased]` 增加 Phase 3 条目；`AGENTS.md` 当前范围改为「已实现配置、存储与状态机，尚未接入邮件与 Agent」；`design.md` 状态行更新。
-- [ ] **Step 6：** `git diff --check` 通过；在全部文档中检索本机路径与个人信息无结果。
+- [ ] **Step 2：** README 中英文同步：状态说明（配置、存储、状态机已实现但尚未接入命令）、代码规则中的依赖说明、实际文件树（新增 `configs/`、`internal/task`、`internal/queue`、`internal/config`、`internal/store/sqlite`、`tests/integration`、`docs/zh-CN/plans/phase-03.md`），并用 `git ls-files --cached --others --exclude-standard | sort` 核对；两个 README 的 make 目标表格增加 `make modverify` 行，`make check` 行（`README.md`、`README.zh-CN.md` 各一处）改为 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint`。
+- [ ] **Step 3：** `docs/en/architecture.md`：当前范围、包与依赖方向（`store/sqlite → task, queue`；`config`、`task`、`queue` 互不依赖，也不依赖存储）、持久化与恢复语义、依赖列表；「Quality gates and CI」一节开头列举 `make check` 子目标的句子补上 `modverify`，并加一条说明 `go mod verify` 校验 `go.sum` 哈希。
+- [ ] **Step 4：** `docs/zh-CN/development.md`：依赖政策与许可证记录、`modverify`（「常用 make 目标」表格新增 `make modverify` 行，并把 `make check` 行的子目标链补上 `modverify`）、配置文件与数据目录位置、SQLite 测试约定（临时目录、真实数据库、触发器注入故障）、集成测试目录、模糊测试的本地运行方式。
+- [ ] **Step 5：** `CONTRIBUTING.md` 依赖规则改为「新增依赖须在实施清单或 issue 中说明理由与许可证」，并把英文与中文两处「提交前检查」表格的 `make check` 行补上 `modverify`；`CHANGELOG.md` 在 `[Unreleased]` 增加 Phase 3 条目；`AGENTS.md` 当前范围改为「已实现配置、存储与状态机，尚未接入邮件与 Agent」；`design.md` 状态行更新。
+- [ ] **Step 6：** `git diff --check` 通过；在全部文档中检索本机路径与个人信息无结果；下面的断言无输出，确认没有文档漏掉 `check` 链的新子目标：
+
+```sh
+# 同时出现 fmt-check 与 lint 的行就是在枚举 check 链，这些行都必须含 modverify。
+grep -rn fmt-check README.md README.zh-CN.md CONTRIBUTING.md \
+  docs/en/architecture.md docs/zh-CN/development.md | grep lint | grep -v modverify
+```
 - [ ] **Step 7：** `git commit -m "docs: document phase 3 configuration, storage and state machines"`
 
 ### Task 12：全量验证、审查与合并

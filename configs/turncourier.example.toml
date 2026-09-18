@@ -1,0 +1,24 @@
+# TurnCourier 配置示例。只保存账户与选项：
+# 邮箱授权码与签名密钥将由 init 命令写入 macOS Keychain，禁止写在本文件中。
+
+[mailbox]
+# 专用机器人发件邮箱
+address = "bot@example.invalid"
+imap_host = "imap.qq.com"
+imap_port = 993
+smtp_host = "smtp.qq.com"
+smtp_port = 465
+
+[recipient]
+# 接收通知的个人邮箱
+address = "me@example.invalid"
+# 只有这些发件人的回复会被处理；规范化后精确匹配
+allowed_senders = ["me@example.invalid"]
+
+[notify]
+# 可选：turn_completed、waiting_input、waiting_approval、failed
+events = ["waiting_input", "failed", "turn_completed"]
+
+[security]
+# 回复令牌有效期，1h 到 720h
+token_ttl = "168h"
