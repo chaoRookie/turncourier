@@ -4,6 +4,8 @@ go 1.27.1
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
+	github.com/emersion/go-smtp v0.25.0
 	modernc.org/sqlite v1.59.0
 )
 

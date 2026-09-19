@@ -1384,7 +1384,7 @@ func Send(ctx context.Context, cfg Config, password string, env Envelope, msg []
 
 调用方（4b）按以下方式映射到 Task 5 的状态机：成功 → `MarkNotificationSent`；`ErrUncertain` → `MarkNotificationUncertain`；`ErrRejected` 与 `ErrNotSent` 在 `ReplyError.Temporary()` 为真、或没有 `ReplyError` 时 → `RequeueNotification` 并退避，在 5xx 时 → `AbandonNotification(rejected)`；`ErrAuth` → 重新排队、打开与 IMAP 共享的认证熔断（见「4b 与 4a 的衔接」），并在本地提示授权码可能失效。频率阈值、退避时长与合并策略在 4b 定。
 
-- [ ] **Step 1：写失败的测试（`smtp_test.go`）。** 假服务器用 go-smtp 的服务端：后端记录 `AUTH PLAIN` 收到的用户名与密码、`MAIL`、`RCPT` 与 DATA 的全部字节，并可按用例设置：认证返回 535；`RCPT` 返回 550；结束标记后返回 451、554（文本为 `SERVER-TEXT-CANARY`）；DATA 读完后阻塞直到测试结束；收到 354 之后不再读取 DATA（接受的 TCP 连接以 `SetReadBuffer(4096)` 缩小接收缓冲）；会话不提供认证机制（不公告 AUTH）。TLS 证书借用 `httptest.NewUnstartedServer(nil)` 调用 `StartTLS()` 后的证书与 `Certificate()` 生成的根证书池（SAN 为 127.0.0.1、::1、example.com、*.example.com），成功类用例的 Host 为 `127.0.0.1`；测试期限用 200ms 级别的 `Timeouts`。
+- [x] **Step 1：写失败的测试（`smtp_test.go`）。** 假服务器用 go-smtp 的服务端：后端记录 `AUTH PLAIN` 收到的用户名与密码、`MAIL`、`RCPT` 与 DATA 的全部字节，并可按用例设置：认证返回 535；`RCPT` 返回 550；结束标记后返回 451、554（文本为 `SERVER-TEXT-CANARY`）；DATA 读完后阻塞直到测试结束；收到 354 之后不再读取 DATA（接受的 TCP 连接以 `SetReadBuffer(4096)` 缩小接收缓冲）；会话不提供认证机制（不公告 AUTH）。TLS 证书借用 `httptest.NewUnstartedServer(nil)` 调用 `StartTLS()` 后的证书与 `Certificate()` 生成的根证书池（SAN 为 127.0.0.1、::1、example.com、*.example.com），成功类用例的 Host 为 `127.0.0.1`；测试期限用 200ms 级别的 `Timeouts`。
   - **成功：** `Send` 返回服务器 250 响应的文本；后端收到用户名 `bot@example.invalid`、密码（运行时构造的 `strings.Repeat("pw", 8)`，遵循「测试向量与密钥扫描」的约定）、信封发件人与收件人一致；DATA 字节等于输入（输入含以 `.` 开头的行，服务端去掉点填充后相同）。
   - **参数校验先于联网：** `From` 与 `Username` 不同、`To` 为空或含 `\r\n`、邮件为空或 4 MiB + 1 字节、密码为空或含空格、端口为 0 时返回错误，监听器没有收到任何连接。
   - **明文防护：** 在不加 TLS 的普通监听器上运行同一个 go-smtp 服务端，监听器外包一层记录全部入站字节的连接；`Send` 返回 `ErrNotSent`，后端从未收到 `AUTH`，记录的入站字节中不含密码，也不含 `AUTH`。服务器证书不在 `RootCAs` 中时同样返回 `ErrNotSent` 且没有 `AUTH`。
@@ -1397,13 +1397,64 @@ func Send(ctx context.Context, cfg Config, password string, env Envelope, msg []
   - **问候阻塞：** 一个只完成 TLS 握手、从不写问候的监听器，`Command = 200ms` 时在 2 秒内返回 `ErrNotSent`。
   - **取消：** 后端在 `RCPT` 中阻塞时取消 ctx，返回的错误同时满足 `ErrNotSent` 与 `context.Canceled`；结束标记后阻塞时取消 ctx 返回 `ErrUncertain`。两种情况下连接都已关闭（服务端会话结束）。
   - **错误文本：** 以上所有用例返回的错误文本都不含密码、收件人与发件人地址、邮件中的金丝雀与 `SERVER-TEXT-CANARY`。
-- [ ] **Step 2：写失败的测试（`source_test.go`）。** 用 `go/parser` 解析本包全部非测试 `.go` 文件：对 go-smtp 包的选择器只允许 `DialTLS`、`Client`、`DataCommand`、`DataResponse`、`SMTPError`；对 go-sasl 只允许 `NewPlainClient`；任何文件都不出现标识符 `DebugWriter`、`InsecureSkipVerify`、`KeyLogWriter`、`VerifyPeerCertificate`、`VerifyConnection`；`tls.Config` 字面量只出现一次，位于包内构造它的函数中。在临时副本中加入对 `smtp.Dial` 或 `DialStartTLS` 的调用、或设置 `KeyLogWriter`，测试必须失败。
-- [ ] **Step 3：** `go get github.com/emersion/go-smtp@v0.25.0`；测试失败。
-- [ ] **Step 4：实现。** 按上表与「期限的实现」；看门狗与 ctx 监视合并为一个 goroutine：它等待 `ctx.Done()` 或当前步骤的计时器到期，任一发生即调用 `client.Close()`；`Send` 返回前停止该 goroutine。`*smtp.SMTPError` 转为 `*ReplyError`，丢弃其 `Message`。
-- [ ] **Step 5：** `go test -race ./internal/mail/smtp/` 通过，覆盖率 ≥ 90%；`CGO_ENABLED=0 go test ./internal/mail/smtp/`、`GOOS=windows go vet ./internal/mail/smtp/` 通过；`make modverify` 与 `make secrets` 通过。
-- [ ] **Step 6：** `git add go.mod go.sum internal/mail/smtp && git commit -m "feat(smtp): submit mail over implicit TLS with per-step deadlines"`
+- [x] **Step 2：写失败的测试（`source_test.go`）。** 用 `go/parser` 解析本包全部非测试 `.go` 文件：对 go-smtp 包的选择器只允许 `DialTLS`、`Client`、`DataCommand`、`DataResponse`、`SMTPError`；对 go-sasl 只允许 `NewPlainClient`；任何文件都不出现标识符 `DebugWriter`、`InsecureSkipVerify`、`KeyLogWriter`、`VerifyPeerCertificate`、`VerifyConnection`；`tls.Config` 字面量只出现一次，位于包内构造它的函数中。在临时副本中加入对 `smtp.Dial` 或 `DialStartTLS` 的调用、或设置 `KeyLogWriter`，测试必须失败。
+- [x] **Step 3：** `go get github.com/emersion/go-smtp@v0.25.0`；测试失败。
+- [x] **Step 4：实现。** 按上表与「期限的实现」；看门狗与 ctx 监视合并为一个 goroutine：它等待 `ctx.Done()` 或当前步骤的计时器到期，任一发生即调用 `client.Close()`；`Send` 返回前停止该 goroutine。`*smtp.SMTPError` 转为 `*ReplyError`，丢弃其 `Message`。
+- [x] **Step 5：** `go test -race ./internal/mail/smtp/` 通过，覆盖率 ≥ 90%；`CGO_ENABLED=0 go test ./internal/mail/smtp/`、`GOOS=windows go vet ./internal/mail/smtp/` 通过；`make modverify` 与 `make secrets` 通过。
+- [x] **Step 6：** `git add go.mod go.sum internal/mail/smtp && git commit -m "feat(smtp): submit mail over implicit TLS with per-step deadlines"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** 先写测试：`smtp_test.go` 与 `source_test.go` 写好后，`go test ./internal/mail/smtp/` 因缺少模块失败（`no required module provides package github.com/emersion/go-sasl`）；`go get github.com/emersion/go-smtp@v0.25.0` 之后编译失败（`undefined: Timeouts`、`undefined: Config`、`undefined: Envelope` 等），再实现。`go get` 同时加入 go-sasl `v0.0.0-20241020182733-b788ff22d5a6`（即 D2 的 `b788ff2`，由 go-smtp 的 `go.mod` 指定），`go mod tidy` 后两者都是直接依赖；`go.mod` 只多这两行，`go.sum` 只多四行哈希。本任务只新增 `internal/mail/smtp` 的三个文件。
+
+实现要点（`smtp.go`）：① 契约中的类型、常量、哨兵与签名照抄；go-smtp 的包名也是 `smtp`，以别名 `gosmtp` 导入。② 按表依次执行：参数校验；ctx 已结束则不拨号；`DialTLS`，`tls.Config` 只由 `tlsConfig` 构造（`ServerName` 为 Host、`RootCAs` 取自配置、`MinVersion` 为 TLS 1.2）；`Hello("localhost")`；确认 TLS 连接且公告 `AUTH PLAIN`；`AUTH PLAIN`；`MAIL`；逐个 `RCPT`；`DATA`；按 64 KiB 分块写正文；经包内函数变量 `closeData` 调用 `CloseWithResponse`；`QUIT`，忽略其结果。`Result.Response` 取 `DataResponse.StatusText`，即 250 之后的文本（含服务器给出的增强状态码，例如 `2.0.0 OK: queued`），按字节截到 512 字节。③ 看门狗是一次 `Send` 唯一的后台 goroutine：`step(d, fn)` 进入前以 d 重置计时器，fn 返回后停止计时，计时器只在步骤内运行（步骤之间没有网络读写）；ctx 结束或计时器到期即调用 `client.Close()` 并退出；`Send` 返回前 `halt` 通知它退出并等待。库的 `CommandTimeout` 与 `SubmissionTimeout` 设为同样的值，作第二道保险。ctx 在 `DialTLS` 期间结束时，看门狗启动后立即关闭连接，返回 `ErrNotSent`（`DialTLS` 本身最多 30 秒，见「风险与后续」）。④ 错误文本只由本包的固定文字、步骤名与状态码组成。`fail` 按以下规则包装：服务器 4xx/5xx 回复附 `*ReplyError`，丢弃 `Message`；ctx 结束时附 `ctx.Err()`，满足 `errors.Is(err, context.Canceled)`；超时写 `<步骤> timed out`；其余库错误只写 `<步骤> failed`，且不进入错误链，因为它们可能带地址、服务器文本或证书细节。步骤名为 `dial`、`ehlo`、`auth`、`mail`、`rcpt`、`data`、`body`（写正文）与 `submission`。
+
+契约未规定之处的取舍，均写入注释并由测试钉住：a. 参数校验失败返回包装 `ErrNotSent` 的错误（契约为「不包装 `ErrNotSent` 以外的哨兵」），文本以 `invalid` 开头，不含地址与密码。契约列表之外补了三项：From 非空且不含 CR/LF（From 与 Username 同为空时能通过相等检查）；每个收件人非空；期限不得为负（负值会让计时器立即到期）。b. 契约写「535 等拒绝为 `ErrAuth`」，实现把认证步骤的全部 5xx 回复都算作 `ErrAuth`；4xx（例如 454）只是 `ErrNotSent`，附 `Temporary()` 为真的 `ReplyError`。认证步骤的非回复错误也只是 `ErrNotSent`，例如 334 的挑战不是合法 base64。c. 问候与 EHLO 失败不附 `ReplyError`：契约表中该行只写 `ErrNotSent`，`ReplyError.Step` 的取值也不含 ehlo。这样 4b 按「`ErrNotSent` 附 5xx → `AbandonNotification(rejected)`」映射时，不会把服务器对连接的拒绝（例如问候阶段的 554）当成对这封邮件的拒绝。d. 只有 400–599 的回复转为 `ReplyError`；意外的 2xx、3xx 或 6xx 回复按普通失败处理，提交阶段为 `ErrUncertain`，之前为 `ErrNotSent`。e. EHLO 名为常量 `ehloName`，显式调用 `Hello("localhost")`，与库的默认值相同。这样「问候与 EHLO」成为一个有期限的步骤（契约表中两者同为一行、一个 30 秒期限），失败也不会被 `SupportsAuth` 吞掉。f. 看门狗计时器到期与库连接期限到期（`os.ErrDeadlineExceeded`）都写作超时。两者期限相同，库的期限只比看门狗晚设几微秒，哪一个先生效取决于调度；只看看门狗的标志，文本会在 `timed out` 与 `failed` 之间抖动。
+
+与契约的一处偏差：「期限的实现」写「一个原子标志记录当前是否已进入 `CloseWithResponse`，据此把关闭造成的错误分为 `ErrNotSent` 或 `ErrUncertain`」。实现在 `Send` 自身的 goroutine 内分类：失败发生在哪一步，就用哪一步的结果类别（提交一步为 `ErrUncertain`，之前各步为 `ErrNotSent`）。看门狗只负责关闭连接，不读取这一状态，所以没有另设原子的阶段标志；看门狗唯一的原子变量 `expired` 记录连接是否因计时器到期而关闭，只用于错误文本。语义与契约相同：契约的标志在调用 `CloseWithResponse` 之前置位，这里对应提交一步开始时以 `Submission` 重置计时器，flush 期间的失败同样归为 `ErrUncertain`，由 `TestSendFlushStall` 钉住。
+
+测试：`smtp_test.go` 用 go-smtp 服务端作假服务器，后端记录认证、信封、EHLO 名与 DATA，服务端的调试输出接到 `transcript`，记录 TLS 之内的往来内容。证书取自 `httptest.NewUnstartedServer(nil)` 的 `StartTLS()`，根证书池只含 `Certificate()`。所有用例都传入非 nil 的根证书池，不调用系统证书校验；证书不受信任的用例用空证书池，而不是 nil。
+- `TestSendSuccess`：两个收件人；断言用户名、密码、EHLO 名 `localhost`、MAIL、RCPT、Response；去掉点填充后的 DATA 等于输入（含以点开头的行与只有一个点的行）；服务端收到 `QUIT`。
+- `TestSendDefaultResponseAndTruncation`：库默认文本、恰为 512 字节与超长三种响应。
+- `TestSendValidatesBeforeDialing`：22 种非法参数，监听器没有收到连接，错误为 `ErrNotSent` 且是校验错误；另验证恰为 4 MiB 的邮件与由 94 个可打印 ASCII 组成的密码可以发送。
+- `TestSendCanceledBeforeDialing`。
+- `TestSendRefusesPlaintextServer`：明文 go-smtp 服务端开启 `AllowInsecureAuth` 并公告 `AUTH PLAIN`，监听器记录全部入站字节。等服务端读到连接结束后断言没有 `AUTH`，也没有密码。
+- `TestSendRejectsUntrustedCertificate`、`TestSendVerifiesHostname`（Host 为 `localhost`）。
+- `TestSendRequiresAuthPlain`：不公告 AUTH 与只公告 LOGIN 两种情形。
+- `TestSendClassifiesReplies`：认证 535 与 534 同时满足 `ErrAuth` 与 `ErrNotSent`，且没有发出 MAIL；认证 454 不是 `ErrAuth`；MAIL 553 不带增强状态码；RCPT 550 之后没有进入 DATA；结束标记后 451 与 554。
+- `TestSendUncertainWhenSubmissionStalls`：`Command` 10 秒、`Submission` 200ms；服务端收到完整 DATA 后不回复，Send 返回 `submission timed out`。
+- `TestSendBodyWriteStall`：4 MiB 邮件，`SetReadBuffer(4096)`，`Command` 200ms、`Submission` 10 秒，返回 `body timed out`。放行服务端后会话随即结束，说明客户端已关闭连接；若连接仍打开，服务端会一直等待结束标记。
+- `TestSendFlushStall`：`closeData` 替身在服务端发现连接被关闭前不返回；看门狗缺席时替身 5 秒后放弃，用例以耗时失败。
+- `TestSendGreetingStall`，以及 `TestSendCanceled`（阻塞在 RCPT 与结束标记之后两种情形）。
+
+各阻塞用例断言 2 秒内返回、错误文本以 `<步骤> timed out` 或 `<步骤>: context canceled` 结尾，以及服务端观察到连接关闭。所有错误用例都断言错误文本不含密码、三个地址、`example.invalid`、邮件金丝雀与 `SERVER-TEXT-CANARY`。Step 1 中「DATA 读完后阻塞直到测试结束」实现为「阻塞到客户端关闭连接」，服务器至迟在用例结束时关闭连接，这样还能断言连接已关闭。
+
+契约之外补了：
+- `TestSendSlowReaderWithinChunkDeadlines`：服务端每读 64 KiB 停顿 10ms，4 MiB 邮件在 `Command` 200ms 下投递成功。本机写正文的循环约 0.8 秒，由此钉住「每块一个期限」，而不是整封正文一个期限。
+- `TestSendUnusualReplies`：`startScripted` 是按脚本应答的 TLS 假服务器，用来给出 go-smtp 服务端给不出的回复。用例覆盖：DATA 命令被 554 拒绝，得到 `ReplyError{Step: "data"}`；DATA 命令回 250、结束标记后回 354 或 600 时不附 `ReplyError`，分别为 `ErrNotSent` 与 `ErrUncertain`；MAIL 时断线为 `mail failed`；EHLO 554 不附 `ReplyError`；334 的挑战不是合法 base64 时不算 `ErrAuth`。
+- `TestSendIgnoresQuitFailure`：邮件被接受后 QUIT 无回应，2 秒内照常返回成功。
+- `TestWatchdogHalt`、`TestReplyError`、`TestTimeouts`。
+
+`source_test.go` 按 Step 2 检查白名单与禁用标识符；另要求 `tls.Config` 字面量的字段恰为 `ServerName`、`RootCAs`、`MinVersion`，并把 `tlsConfig` 之外对 `tls.Config` 的任何引用（例如 `new(tls.Config)`）报告为违规。`TestSourceProblemsDetectsViolations` 用内存中的源码确认检查本身有效，包括改名导入。测试只连接 127.0.0.1 上的本地假服务器，不连接任何真实服务器，不涉及钥匙串。测试密码用 `strings.Repeat("pw", 8)` 在运行时构造，没有使用 `gitleaks:allow`。
+
+变异测试在仓库副本中进行，每次只改一处。契约点名的三项：
+- 去掉写正文计时器（在步骤之外直接写）：`TestSendBodyWriteStall` 阻塞到测试期限（`-timeout 40s` 时报 `test timed out`）。本机 socket 缓冲没有吸收全部 4 MiB 正文，不需要再缩小缓冲。
+- 去掉提交阶段的看门狗：`TestSendFlushStall` 在 5 秒后以耗时失败。
+- 在副本中加入 `gosmtp.Dial`、`gosmtp.DialStartTLS`，或设置 `KeyLogWriter`：`TestSourceRestrictions` 分别失败。
+
+全部 75 个变异中，67 个被杀死，涉及：各项参数校验的去掉与边界；结果分类（提交阶段失败归为 `ErrNotSent`、拒绝报告为结果不确定、`ErrAuth` 的判定范围与包装、ehlo 附 `ReplyError`）；`replyOf` 的上下界；`fail` 忽略 ctx 或计时器、保留库错误文本；各步骤名；截断与 512 的边界；默认期限；分块大小；整封正文共用一个计时器；EHLO 名；`AUTH PLAIN` 检查；固定 `ServerName`；去掉 `MinVersion`；只发第一个收件人；绕过 `closeData`；计时器到期不关闭连接；看门狗不监视 ctx；`halt` 不等待；跳过 QUIT；QUIT 失败时返回错误。其中 halt、QUIT 两项是补测后才被杀死的。去掉 `RootCAs` 的变异只对源码检查运行（被杀死），没有运行功能测试，以免调用系统证书校验。
+
+存活 8 个，均为等价或设计上的冗余：
+- Hello 或 QUIT 放在看门狗之外、去掉库的 `CommandTimeout` 或 `SubmissionTimeout`（4 个）：命令步骤与读取提交响应有看门狗与库期限两道保险，期限相同，任一道单独都够；写正文与 flush 只有看门狗，去掉即被杀死。
+- 步骤之间不停止计时（2 种写法）：步骤之间没有网络读写。
+- 去掉 `os.ErrDeadlineExceeded` 分支：本机 3 次运行都是看门狗先生效；保留这个分支是为了让错误文本确定。
+- 去掉 `TLSConnectionState` 检查：`DialTLS` 得到的一定是 TLS 连接，按契约保留作纵深防御。
+
+验证：
+- `go test -race ./internal/mail/smtp/` 通过，覆盖率 100.0%；`-race -count=5` 稳定；与 sqlite、security 各包的 `-race -count=3` 并行运行时，本包 `-race -count=20` 通过。
+- `CGO_ENABLED=0 go test ./internal/mail/smtp/` 与 `CGO_ENABLED=0 go test ./...` 通过。
+- `GOOS=windows go vet ./internal/mail/smtp/`、全仓 `GOOS=windows go vet ./...` 与 `GOOS=linux go vet ./...` 通过。
+- `make modverify`、`make secrets`、`make check` 通过（含中文注释检查与 staticcheck，总覆盖率 93.59%）。
+
+测试只在 macOS 上运行，Linux 上的测试由 CI 运行；写正文阻塞与慢速读取两个用例依赖 socket 缓冲吸收不了全部正文，这一点在 Linux 上未在本机验证。与 Task 1–9 相同，本任务的提交包含本清单的勾选与实施说明。
 
 ### Task 11：IMAP 客户端
 
