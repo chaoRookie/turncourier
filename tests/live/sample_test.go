@@ -733,6 +733,24 @@ func TestAnalyzeRedactsMalformedLabels(t *testing.T) {
 	}
 }
 
+// TestAnalyzeCapsCharsetLabels 断言字符集位置按更短的上限截断：主题编码字中的字符集直接取自 Subject 头，
+// 形状合法的长文本若按媒体类型的上限输出，就会把主题内容带进样本。
+func TestAnalyzeCapsCharsetLabels(t *testing.T) {
+	tokenText := testToken(t)
+	long := strings.Repeat("ab.cd-ef_", 30) // 形状合法、远超字符集上限
+	subject := "=?" + long + "?B?" + base64.StdEncoding.EncodeToString([]byte("回复：[TC "+taskID+"] 探测")) + "?="
+	raw := rawSinglePart(t, replyHeaders(t, "Subject: "+subject, "In-Reply-To: "+sentID),
+		`text/plain; charset="`+long+`"`, tokenText)
+	sample := analyze(t, raw, testState(t))
+	wantCharset := long[:40]
+	if sample.Subject.Encoding != wantCharset+"/B" {
+		t.Errorf("subject.encoding = %q，期望 %q", sample.Subject.Encoding, wantCharset+"/B")
+	}
+	if sample.MIME[0].Charset != wantCharset {
+		t.Errorf("mime[0].charset = %q，期望 %q", sample.MIME[0].Charset, wantCharset)
+	}
+}
+
 // TestAnalyzeKeepsLongMediaType 断言形状合法的长媒体类型原样保留：Word 与 Excel 的 OOXML 类型前 40 个字符相同，
 // 按短标签上限截断会让两种附件在样本中无法分辨。
 func TestAnalyzeKeepsLongMediaType(t *testing.T) {

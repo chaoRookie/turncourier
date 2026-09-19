@@ -62,6 +62,10 @@ const (
 	// （type 与 subtype 各至多 127 个字符，加分隔符共 255）。脱敏屏障是 safeLabel 的形状检查，这个上限只是兜底：
 	// 截到 40 个字符会让 OOXML 的 Word 与 Excel 类型在样本中无法分辨，而 L1 采集 MIME 结构正是为了 4b 的解析器。
 	maxLabelRunes = 255
+	// maxCharsetRunes 是字符集与自动来信关键字的字符数上限：已注册的字符集名称与 auto-submitted、precedence 的
+	// 合法取值都远短于媒体类型，而主题编码字里的字符集位置直接取自 Subject 头（清单点名不输出完整主题），
+	// 因此这些位置在形状检查之外另按更短的上限截断。
+	maxCharsetRunes = 40
 	// crockfordAlphabet 是回复令牌使用的小写 Crockford base32 字母表；令牌文本为其中的 48 个字符。
 	crockfordAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
 )
@@ -539,7 +543,7 @@ func onlyReplyPrefixes(text string) bool {
 // 字符集位置经 safeLabel 约束：畸形 encoded-word 的这一位置可以是主题中的任意文字，原样输出会绕过脱敏。
 func encodingOf(rawValue string) string {
 	if match := encodedWordPattern.FindStringSubmatch(rawValue); match != nil {
-		return safeLabel(match[1]) + "/" + strings.ToUpper(match[2])
+		return safeCharset(match[1]) + "/" + strings.ToUpper(match[2])
 	}
 	for i := range len(rawValue) {
 		if rawValue[i] > 0x7e {
@@ -555,8 +559,8 @@ func describePart(e *message.Entity, b *bodies, depth int) Part {
 	mediaType, params, _ := e.Header.ContentType()
 	part := Part{
 		Type:     safeLabel(mediaType),
-		Charset:  safeLabel(params["charset"]),
-		Transfer: safeLabel(e.Header.Get("Content-Transfer-Encoding")),
+		Charset:  safeCharset(params["charset"]),
+		Transfer: safeCharset(e.Header.Get("Content-Transfer-Encoding")),
 	}
 	if reader := e.MultipartReader(); reader != nil && depth < maxDepth {
 		part.Charset, part.Transfer = "", ""
@@ -731,7 +735,7 @@ func autoSignals(h mail.Header) Auto {
 // 合法取值也同样是极小的一组 token，畸形邮件可以把任意文字放进去，不加约束就会绕过「不输出正文与完整主题」。
 func keyword(value string) string {
 	value, _, _ = strings.Cut(value, ";")
-	return safeLabel(value)
+	return safeCharset(value)
 }
 
 // classifyKind 判断来信类别：multipart/report 或来自 MAILER-DAEMON、postmaster 的记为 bounce；
@@ -821,6 +825,12 @@ func safeLabel(value string) string {
 		return "other"
 	}
 	return truncateRunes(value, maxLabelRunes)
+}
+
+// safeCharset 与 safeLabel 相同，但按 maxCharsetRunes 这个更短的上限截断，用于取值本就很短、
+// 又更贴近来信正文与主题的位置：主题编码字的字符集、Content-Type 的 charset、传输编码与自动来信关键字。
+func safeCharset(value string) string {
+	return truncateRunes(safeLabel(value), maxCharsetRunes)
 }
 
 // truncateRunes 把文本截到至多 n 个字符，不会截断在 UTF-8 字符中间。
