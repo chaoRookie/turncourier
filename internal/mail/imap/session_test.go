@@ -447,6 +447,53 @@ func TestScanClearsStaleSignal(t *testing.T) {
 	}
 }
 
+// TestExistsProbeSequence 按 Task 13 TestL1Idle 的预检顺序（Examine、以 UIDNEXT−1 为游标 Scan 两次、再 Examine、Idle）
+// 验证它能分辨两种服务器：每条 UID SEARCH 响应都附带邮件数不变的 EXISTS 时，两次 Examine 的状态相同，Idle 不发 IDLE
+// 立即返回 true；不附带时 Idle 发出 IDLE，到 IdleMax 返回 false。两种情况都不取回已有邮件。
+func TestExistsProbeSequence(t *testing.T) {
+	for _, attach := range []bool{true, false} {
+		t.Run(fmt.Sprintf("attach=%v", attach), func(t *testing.T) {
+			fs := newFakeServer(t, proxyOptions{})
+			fs.appendMessage(FolderInbox, testMessage(1, 100))
+			s := dial(t, fs, testTimeouts())
+			if attach {
+				fs.addRule(&rule{command: "UID SEARCH", kind: faultInject, exists: []uint32{1}})
+			}
+			ctx := context.Background()
+			before, err := s.Examine(ctx, FolderInbox)
+			if err != nil {
+				t.Fatalf("Examine: %v", err)
+			}
+			cur := Cursor{UIDValidity: before.UIDValidity, LastUID: before.UIDNext - 1}
+			for range 2 {
+				if b := scan(t, s, FolderInbox, cur); len(b.Messages) != 0 || b.Next != cur {
+					t.Fatalf("batch = %+v", b)
+				}
+			}
+			after, err := s.Examine(ctx, FolderInbox)
+			if err != nil || after != before {
+				t.Fatalf("Examine = %+v, %v; want %+v", after, err, before)
+			}
+			start := time.Now()
+			newMail, err := s.Idle(ctx)
+			if err != nil || newMail != attach {
+				t.Fatalf("Idle = %v, %v; want %v, nil", newMail, err, attach)
+			}
+			wantIdle := 1
+			if attach {
+				assertWithin(t, start, 100*time.Millisecond, "Idle with EXISTS attached to UID SEARCH")
+				wantIdle = 0
+			}
+			if n := fs.count("IDLE"); n != wantIdle {
+				t.Errorf("client sent %d IDLE commands, want %d", n, wantIdle)
+			}
+			if n := fs.count("UID FETCH"); n != 0 {
+				t.Errorf("client sent %d UID FETCH commands, want 0", n)
+			}
+		})
+	}
+}
+
 // TestIdlePush 覆盖 IDLE 推送：IDLE 期间放入 1 封，Idle 在 1 秒内返回 true。
 func TestIdlePush(t *testing.T) {
 	fs := newFakeServer(t, proxyOptions{})
