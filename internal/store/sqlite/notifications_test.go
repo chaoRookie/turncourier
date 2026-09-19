@@ -983,6 +983,7 @@ func TestClaimNotificationsOfOpenTasks(t *testing.T) {
 // 领取返回之后创建的通知，只有它时返回 ErrNoSendableNotification。第一个事务读到的时刻距过期还多 1 毫秒、第二个事务读到恰 10 分钟时，
 // 该通知既不被放弃也不被领取，下一次领取时放弃。
 func TestClaimAbandonsExpiringNotifications(t *testing.T) {
+	// hourly 构造任务 taskID 的一条合成通知：令牌有效期 1 小时，label 区分内容。
 	hourly := func(taskID, label string) NewNotification {
 		in := notificationFor(taskID, label)
 		in.TTL = time.Hour

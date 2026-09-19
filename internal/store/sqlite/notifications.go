@@ -218,7 +218,8 @@ func (s *Store) ClaimNextNotification(ctx context.Context) (Notification, []byte
 	if err != nil {
 		return Notification{}, nil, err
 	}
-	content, err := s.openNotificationPayload(ctx, tx, pending)
+	content, err := s.openPayload(ctx, tx, payload.KindNotification, "notification",
+		"SELECT key_id, sealed FROM notification_payloads WHERE notification_id = ?", pending.TaskID, pending.ID)
 	if err != nil {
 		return pending, nil, err
 	}
@@ -537,28 +538,29 @@ func (s *Store) activePayloadKey(ctx context.Context, q rowQuerier) (*payload.Ke
 	return s.payloadKey, nil
 }
 
-// openNotificationPayload 读出并解密通知 n 的内容：正文行缺失返回 ErrPayloadMissing；没有正文密钥、密文的 key_id 与当前密钥不符
-// 或该 kid 未登记为 active 返回 ErrPayloadKeyUnavailable；无法解密返回包装 payload.ErrDecrypt 的错误。错误文本不含内容与密文。
-func (s *Store) openNotificationPayload(ctx context.Context, tx *sql.Tx, n Notification) ([]byte, error) {
+// openPayload 在事务 tx 中按 query（以 id 为唯一参数，选出 key_id 与 sealed）读出并解密一条正文，回复与通知共用这套错误划分：
+// 正文行缺失返回 ErrPayloadMissing；没有正文密钥、密文的 key_id 与当前密钥不符或该 kid 未登记为 active 返回 ErrPayloadKeyUnavailable；
+// 无法解密返回包装 payload.ErrDecrypt 的错误。name 只用于错误文本，错误文本不含正文与密文。
+func (s *Store) openPayload(ctx context.Context, tx *sql.Tx, kind payload.Kind, name, query, taskID string, id int64) ([]byte, error) {
 	var keyID uint8
 	var sealed []byte
-	err := tx.QueryRowContext(ctx, "SELECT key_id, sealed FROM notification_payloads WHERE notification_id = ?", n.ID).Scan(&keyID, &sealed)
+	err := tx.QueryRowContext(ctx, query, id).Scan(&keyID, &sealed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("notification %d: %w", n.ID, ErrPayloadMissing)
+		return nil, fmt.Errorf("%s %d: %w", name, id, ErrPayloadMissing)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("cannot read notification content: %w", err)
+		return nil, fmt.Errorf("cannot read %s content: %w", name, err)
 	}
 	key, err := s.activePayloadKey(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
 	if keyID != key.ID() {
-		return nil, fmt.Errorf("%w: notification %d is sealed with key %d, not %d", ErrPayloadKeyUnavailable, n.ID, keyID, key.ID())
+		return nil, fmt.Errorf("%w: %s %d is sealed with key %d, not %d", ErrPayloadKeyUnavailable, name, id, keyID, key.ID())
 	}
-	content, err := key.Open(payload.KindNotification, n.TaskID, n.ID, sealed)
+	content, err := key.Open(kind, taskID, id, sealed)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open notification %d: %w", n.ID, err)
+		return nil, fmt.Errorf("cannot open %s %d: %w", name, id, err)
 	}
 	return content, nil
 }

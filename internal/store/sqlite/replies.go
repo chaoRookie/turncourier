@@ -86,7 +86,7 @@ type knownInbound struct {
 // 都一致才算重复，返回原回复且不写入；任一不一致返回 ErrMessageConflict。按 Message-ID 的查找不含文件夹，
 // 同一封信在 INBOX 与 Junk 各有一份时判为重复。重复邮件不按任务的当前状态重新判定。摘要只做字节比较，存储层不知道令牌密钥，
 // 不校验摘要与正文是否对应。
-// 开始事务前校验 Body 并确认 PayloadKey 非空；事务内确认正文密钥的 kid 已登记为 active，二者不满足时返回
+// 开始事务前校验 Body（不合法时返回校验错误）；PayloadKey 为空，或事务内发现正文密钥的 kid 未登记为 active 时，返回
 // ErrPayloadKeyUnavailable，对重复邮件与将被拒绝的邮件同样如此（Keychain 读取失败时不处理回复）。入队为 QUEUED 时，
 // 插入 replies 取得 seq 后用 (KindReply, TaskID, seq) 加密 Body 并插入 reply_payloads；记为 REJECTED 或命中重复时不写正文。
 func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult, error) {
@@ -249,7 +249,8 @@ func (s *Store) ClaimNextReply(ctx context.Context, taskID string) (Reply, Task,
 	if err != nil {
 		return Reply{}, Task{}, nil, err
 	}
-	body, err := s.openReplyPayload(ctx, tx, queued)
+	body, err := s.openPayload(ctx, tx, payload.KindReply, "reply",
+		"SELECT key_id, sealed FROM reply_payloads WHERE seq = ?", queued.TaskID, queued.Seq)
 	if err != nil {
 		return Reply{}, Task{}, nil, err
 	}
@@ -274,32 +275,6 @@ func (s *Store) ClaimNextReply(ctx context.Context, taskID string) (Reply, Task,
 		return Reply{}, Task{}, nil, err
 	}
 	return reply, dispatched, body, nil
-}
-
-// openReplyPayload 在事务 tx 中读出并解密回复 r 的正文：正文行缺失返回 ErrPayloadMissing；没有正文密钥、密文的 key_id 与当前密钥
-// 不符或该 kid 未登记为 active 返回 ErrPayloadKeyUnavailable；无法解密返回包装 payload.ErrDecrypt 的错误。错误文本不含正文与密文。
-func (s *Store) openReplyPayload(ctx context.Context, tx *sql.Tx, r Reply) ([]byte, error) {
-	var keyID uint8
-	var sealed []byte
-	err := tx.QueryRowContext(ctx, "SELECT key_id, sealed FROM reply_payloads WHERE seq = ?", r.Seq).Scan(&keyID, &sealed)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("reply %d: %w", r.Seq, ErrPayloadMissing)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cannot read reply body: %w", err)
-	}
-	key, err := s.activePayloadKey(ctx, tx)
-	if err != nil {
-		return nil, err
-	}
-	if keyID != key.ID() {
-		return nil, fmt.Errorf("%w: reply %d is sealed with key %d, not %d", ErrPayloadKeyUnavailable, r.Seq, keyID, key.ID())
-	}
-	body, err := key.Open(payload.KindReply, r.TaskID, r.Seq, sealed)
-	if err != nil {
-		return nil, fmt.Errorf("cannot open reply %d: %w", r.Seq, err)
-	}
-	return body, nil
 }
 
 // AcknowledgeReply 在 Agent 确认收到后把 DISPATCHING 回复改为 ACKNOWLEDGED；任务状态不变。

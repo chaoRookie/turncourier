@@ -300,7 +300,8 @@ func TestRecordReplySameUIDInDifferentFolders(t *testing.T) {
 	running := startTask(t, store)
 	first := recordReply(t, store, inbound(running.ID))
 	junk := inbound(running.ID)
-	junk.Folder, junk.MessageID, junk.BodyDigest = "Junk", "<b@example.invalid>", digestB
+	junk = withBody(junk, "synthetic reply B")
+	junk.Folder, junk.MessageID = "Junk", "<b@example.invalid>"
 	second, err := store.RecordReply(t.Context(), junk)
 	if err != nil || second.Duplicate || second.Reply.State != queue.Queued || second.Reply.Seq == first.Reply.Seq {
 		t.Errorf("Junk 中同一 UID 的另一封邮件: RecordReply = %+v, %v; want 新入队且序号不同于 %d", second, err, first.Reply.Seq)

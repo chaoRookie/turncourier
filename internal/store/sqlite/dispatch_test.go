@@ -991,6 +991,9 @@ func TestReplyPayloadLifecycle(t *testing.T) {
 
 	failing := startTask(t, store)
 	queued := enqueueReplies(t, store, failing.ID, 3)
+	for _, reply := range queued {
+		requirePayload("fail 之前", reply.Seq, 1)
+	}
 	applyEvents(t, store, failing, task.Fail)
 	for _, reply := range queued {
 		requirePayload("fail", reply.Seq, 0)
