@@ -608,7 +608,7 @@ func (k *Key) Open(kind Kind, taskID string, seq int64, sealed []byte) ([]byte, 
 
 关联数据为 `"turncourier/payload/v1\x00"` ‖ 用途（1 字节）‖ kid（1 字节）‖ 任务 ID（10 字节）‖ 序号（uint64 大端）。nonce 不由序号派生：新建数据库后序号从 1 重新计数，而 Keychain 中的密钥可能仍在，派生会造成 nonce 重复。回复放回队列时保留原序号（Phase 3），密文无需重新加密。
 
-- [ ] **Step 1：写失败的测试。**
+- [x] **Step 1：写失败的测试。**
   - **往返：** 明文 1、1000、`MaxPlaintext` 字节都能往返；密文长度等于明文加 29，首字节为 1。
   - **随机 nonce：** 同样的输入加密两次，第 2–13 字节不同，两份都能解密。
   - **篡改：** 64 字节明文的密文（93 字节），744 个单比特翻转全部返回 `ErrDecrypt`。
@@ -616,12 +616,12 @@ func (k *Key) Open(kind Kind, taskID string, seq int64, sealed []byte) ([]byte, 
   - **截断：** `sealed[:n]`（n 为 0–29 以及 `len−1`）返回 `ErrDecrypt`，不 panic；长于 `MaxPlaintext+29` 的输入返回 `ErrDecrypt`。
   - **非法输入：** 用途 `'x'`、任务 ID 9 个字符或含 `u`、序号 0 与 −1、明文为空或 `MaxPlaintext+1` 字节时，`Seal` 与 `Open` 返回 `ErrInvalidInput`。`NewKey` 的 id 为 0、密钥 16、31、33 字节返回 `ErrInvalidKey`。
   - **不泄露：** 明文含 `PLAINTEXT-CANARY` 时，所有错误文本不含它；`Key` 按 Task 3 的同一组动词与 slog 处理器格式化，输出不含密钥材料。
-- [ ] **Step 2：** `go test ./internal/security/payload/` 编译失败。
-- [ ] **Step 3：实现。** 只用标准库：`aes.NewCipher` 加 `cipher.NewGCMWithRandomNonce`；`Seal` 调用 `aead.Seal(nil, nil, 明文, 关联数据)` 并在前面加格式字节，`Open` 对 `sealed[1:]` 调用 `aead.Open(nil, nil, …, 关联数据)`。
-- [ ] **Step 4：** `go test -race -cover ./internal/security/payload/` 通过且覆盖率 100%；`CGO_ENABLED=0 go test ./internal/security/payload/` 与 `make secrets` 通过；测试密钥用 `bytes.Repeat` 或按下标填充构造，测试向量遵循「测试向量与密钥扫描」的约定。
-- [ ] **Step 5：** `git add internal/security/payload && git commit -m "feat(payload): encrypt pending bodies with AES-256-GCM bound to their row"`
+- [x] **Step 2：** `go test ./internal/security/payload/` 编译失败。
+- [x] **Step 3：实现。** 只用标准库：`aes.NewCipher` 加 `cipher.NewGCMWithRandomNonce`；`Seal` 调用 `aead.Seal(nil, nil, 明文, 关联数据)` 并在前面加格式字节，`Open` 对 `sealed[1:]` 调用 `aead.Open(nil, nil, …, 关联数据)`。
+- [x] **Step 4：** `go test -race -cover ./internal/security/payload/` 通过且覆盖率 100%；`CGO_ENABLED=0 go test ./internal/security/payload/` 与 `make secrets` 通过；测试密钥用 `bytes.Repeat` 或按下标填充构造，测试向量遵循「测试向量与密钥扫描」的约定。
+- [x] **Step 5：** `git add internal/security/payload && git commit -m "feat(payload): encrypt pending bodies with AES-256-GCM bound to their row"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** 先写测试，`go test ./internal/security/payload/` 编译失败（`undefined: Key`、`NewKey`、`Kind`、`FormatV1` 等），再实现。实现要点：`NewKey` 先调用 `aes.NewCipher` 与 `cipher.NewGCMWithRandomNonce`，再把密钥号、长度与构造错误合并为一次检查：`aes.NewCipher` 也接受 16 与 24 字节密钥，长度须另查；对 32 字节密钥两个构造函数都不会失败，合并检查使错误仍被处理，又不留下无法执行的分支（覆盖率要求 100%）。`Seal` 以只含格式字节的切片作 `aead.Seal` 的 dst，没有照 Step 3 写成 `aead.Seal(nil, nil, …)` 再在前面加格式字节：输出相同，省去一次最长 1 MiB 的复制。任务 ID 字母表在本包内另写一份，因为本包只用标准库，不导入 `internal/task`。契约与 Step 1 对 `Open` 的错误有一处需合读：契约写「任何失败都返回 `ErrDecrypt`」，Step 1 又要求非法的用途、任务 ID 与序号使 `Open` 返回 `ErrInvalidInput`。现按二者合读实现：绑定参数本身不合法时 `Open` 与 `Seal` 一样返回 `ErrInvalidInput`，并且先于长度检查；长度、格式字节与认证失败一律返回 `ErrDecrypt`。Step 1 中「明文为空或 `MaxPlaintext+1` 字节」只适用于 `Seal`，`Open` 对应的 29 字节输入与超长输入按「截断」一项返回 `ErrDecrypt`。格式化方法用值接收者；`Key` 只持有 AEAD、不保存密钥原文，`%p` 作用于密钥值时 fmt 绕过 `Format`，也只打印内部 AEAD 的地址，因此没有 Task 3 记录的 `%p` 泄露局限，测试对此做了断言。测试方面，契约之外补了三类用例。① 参考实现互通：测试按规格逐段拼接关联数据，直接用 `crypto/aes` 与显式 nonce 的 `cipher.NewGCM` 加解密，与 `Seal`、`Open` 双向互通；kid 取 7，序号取 `0x0102030405060708`，任务 ID 取 `zyxwvtsrqp`，钉住前缀、各段顺序、kid、序号的大端 64 位编码，以及 nonce ‖ 密文 ‖ 标签的布局。`Seal` 与 `Open` 共用同一个关联数据函数，只靠往返测试发现不了这类改错。② 长度边界：用参考实现构造认证有效、但明文为空（29 字节）或为 `MaxPlaintext+1` 字节的密文，断言 `Open` 返回 `ErrDecrypt`。普通的截断与超长输入不论有没有长度检查都会因标签不符而失败，钉不住边界本身。③ 其他：11 位与含大写字母的任务 ID；16 字节密钥，钉住长度检查不能交给 `aes.NewCipher`；非法绑定配空密文，钉住 `ErrInvalidInput` 先于长度检查；导出常量与 `ID()` 以字面量钉住。在仓库副本上做了 52 个变异，每次只改一处，涉及：各导出常量与两种用途值；字母表；关联数据的前缀与各段（缺失、换序、kid 换成常量、序号改小端或 32 位）；绑定校验的各边界；`Seal` 的明文上下界；`Open` 的长度上下界、格式字节检查与检查顺序；`Seal`、`Open` 不传关联数据；`Open` 透出底层错误；`NewKey` 的密钥号与长度检查；各格式化出口泄露与指针接收者；`ID` 返回常量；把随机 nonce 换成固定 nonce。全部被测试杀死。验证：`go test -race -cover` 通过，覆盖率 100%，`-count=3` 稳定；`CGO_ENABLED=0 go test`、全仓 `GOOS=linux go vet` 与 `GOOS=windows go vet`、`make check`（含中文注释检查与 staticcheck，总覆盖率 94.49%）、`make secrets` 均通过。本任务不涉及钥匙串与网络；测试只在 macOS 上运行，Linux 上的测试由 CI 运行。与 Task 1–3 相同，本任务的提交包含本清单的勾选与实施说明。
 
 ### Task 5：待发通知状态机
 
