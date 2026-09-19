@@ -783,8 +783,8 @@ func TestInitEnvironment(t *testing.T) {
 	})
 }
 
-// TestInitExistingData 验证已有配置含未知键时不修改它、输出含键名不含路径；配置路径是悬空的符号链接时不询问即退出，
-// 不创建链接目标；数据目录权限为 0755 时退出且 Keychain 未写入。
+// TestInitExistingData 验证已有配置含未知键时不修改它、输出含键名不含路径；配置文件或它的某一级上级目录是悬空的符号链接时
+// 不询问即退出，不创建链接目标，配置目录链接到已有目录时照常创建；数据目录权限为 0755 时退出且 Keychain 未写入。
 func TestInitExistingData(t *testing.T) {
 	t.Run("配置含未知键", func(t *testing.T) {
 		e := newInitEnv(t)
@@ -817,29 +817,57 @@ func TestInitExistingData(t *testing.T) {
 		requireNotExist(t, e.dataDir, "数据目录")
 		e.requireNoLeak(t, stdout, stderr)
 	})
-	t.Run("配置路径是悬空的符号链接", func(t *testing.T) {
+	// 悬空的链接可以是配置文件本身，也可以是它的某一级上级目录（例如 dotfiles 工具把配置目录链接到尚不存在的位置）；
+	// link 与 file 是相对临时目录的链接位置与配置文件路径。
+	danglingCases := []struct{ name, link, file string }{
+		{"配置路径是悬空的符号链接", "config/turncourier.toml", "config/turncourier.toml"},
+		{"配置目录是悬空的符号链接", "config", "config/turncourier.toml"},
+		{"更上级的目录是悬空的符号链接", "config", "config/sub/turncourier.toml"},
+	}
+	for _, tc := range danglingCases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInitEnv(t)
+			e.configFile = filepath.Join(e.root, tc.file)
+			e.env["TURNCOURIER_CONFIG"] = e.configFile
+			link := filepath.Join(e.root, tc.link)
+			target := filepath.Join(e.root, "dotfiles", "turncourier")
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			terminal := firstRunTerminal(canary())
+			code, stdout, stderr := e.run(t, t.Context(), terminal)
+			if code != 1 || stderr != "配置文件或它的上级目录是悬空的符号链接；init 不会修改它，请检查后重新运行 turncourier init。\n" {
+				t.Errorf("code=%d stderr=%q", code, stderr)
+			}
+			if len(terminal.linePrompts)+len(terminal.secretPrompts) != 0 || e.keychain.sets+e.keychain.adds != 0 {
+				t.Error("不应询问任何输入或写入 Keychain")
+			}
+			if got, err := os.Readlink(link); err != nil || got != target {
+				t.Errorf("符号链接被改动: %q, %v", got, err)
+			}
+			requireNotExist(t, target, "链接目标")
+			requireNotExist(t, e.dataDir, "数据目录")
+			e.requireNoLeak(t, stdout, stderr)
+		})
+	}
+	t.Run("配置目录是指向已有目录的符号链接", func(t *testing.T) {
 		e := newInitEnv(t)
-		target := filepath.Join(e.root, "dotfiles", "turncourier.toml")
-		if err := os.Mkdir(filepath.Dir(e.configFile), 0o700); err != nil {
+		target := filepath.Join(e.root, "dotfiles")
+		if err := os.Mkdir(target, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(target, e.configFile); err != nil {
+		if err := os.Symlink(target, filepath.Dir(e.configFile)); err != nil {
 			t.Fatal(err)
 		}
-		terminal := firstRunTerminal(canary())
-		code, stdout, stderr := e.run(t, t.Context(), terminal)
-		if code != 1 || stderr != "配置文件的位置已存在但无法读取（可能是悬空的符号链接）；init 不会修改它，请检查后重新运行 turncourier init。\n" {
-			t.Errorf("code=%d stderr=%q", code, stderr)
+		if code, stdout, stderr := e.run(t, t.Context(), firstRunTerminal(canary())); code != 0 {
+			t.Fatalf("init 失败: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
-		if len(terminal.linePrompts)+len(terminal.secretPrompts) != 0 || e.keychain.sets+e.keychain.adds != 0 {
-			t.Error("不应询问任何输入或写入 Keychain")
+		if _, err := os.Stat(filepath.Join(target, "turncourier.toml")); err != nil {
+			t.Errorf("链接目标中没有配置文件: %v", err)
 		}
-		if got, err := os.Readlink(e.configFile); err != nil || got != target {
-			t.Errorf("符号链接被改动: %q, %v", got, err)
-		}
-		requireNotExist(t, target, "链接目标")
-		requireNotExist(t, e.dataDir, "数据目录")
-		e.requireNoLeak(t, stdout, stderr)
 	})
 	t.Run("数据目录权限 0755", func(t *testing.T) {
 		e := newInitEnv(t)

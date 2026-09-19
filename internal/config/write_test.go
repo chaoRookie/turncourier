@@ -149,6 +149,25 @@ func TestCreateFileParentIsFile(t *testing.T) {
 	requireNoPath(t, err, root)
 }
 
+// TestCreateFileParentIsDanglingLink 验证父目录是悬空的符号链接时报错，且错误不满足 fs.ErrExist（它只表示目标已存在），
+// 不创建链接目标，错误文本不含临时目录路径。
+func TestCreateFileParentIsDanglingLink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "missing")
+	dir := filepath.Join(root, "link")
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatal(err)
+	}
+	err := CreateFile(filepath.Join(dir, "turncourier.toml"), []byte("x"))
+	if err == nil || errors.Is(err, fs.ErrExist) {
+		t.Fatalf("父目录是悬空的符号链接时 CreateFile = %v; want 不满足 fs.ErrExist 的错误", err)
+	}
+	if _, statErr := os.Lstat(target); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("链接目标被创建: %v", statErr)
+	}
+	requireNoPath(t, err, root)
+}
+
 // requireOnlyFile 断言目录中只有 name 一个条目，即没有残留的临时文件。
 func requireOnlyFile(t *testing.T, dir, name string) {
 	t.Helper()

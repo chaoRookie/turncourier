@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -98,10 +99,10 @@ func initialize(ctx context.Context, stderr io.Writer, deps InitDeps) (string, e
 	_, err = config.Load(paths, deps.Getenv)
 	switch {
 	case errors.Is(err, config.ErrNotFound):
-		// Load 跟随符号链接，os.Link 不跟随：路径本身存在（例如悬空的符号链接）时 CreateFile 永远无法创建，
-		// 在询问之前退出，免得用户每次重新运行都要再输入一遍授权码。
-		if _, err := os.Lstat(paths.ConfigFile); err == nil {
-			return "", errors.New("配置文件的位置已存在但无法读取（可能是悬空的符号链接）；init 不会修改它，请检查后重新运行 turncourier init。")
+		// Load 跟随符号链接，CreateFile 中的 MkdirAll 与 os.Link 不跟随：配置文件或它的上级目录是悬空的符号链接时
+		// CreateFile 永远无法创建，在询问之前退出，免得用户每次重新运行都要再输入一遍授权码。
+		if danglingLink(paths.ConfigFile) {
+			return "", errors.New("配置文件或它的上级目录是悬空的符号链接；init 不会修改它，请检查后重新运行 turncourier init。")
 		}
 		if rendered, err = askConfig(ctx, stderr, deps.Terminal); err != nil {
 			return "", err
@@ -159,6 +160,22 @@ func initialize(ctx context.Context, stderr io.Writer, deps InitDeps) (string, e
 	}
 	return fmt.Sprintf("配置文件：%s（%s）\n数据目录：%s\n实例 ID：%s\n授权码：%s\n令牌签名密钥：%s\n正文加密密钥：%s\n\n%s\n\n%s\n",
 		configStatus, configPlace, dataPlace, id, authStatus, tokenStatus, payloadStatus, threatNote, backupNote), nil
+}
+
+// danglingLink 报告 path 或它最近的已存在的上级是否为悬空的符号链接：自 path 起逐级向上，找到第一个 Lstat 成功的路径，
+// 它的 Stat 返回不存在即为悬空。Lstat 成功说明更上级都能解析，不必继续向上。
+func danglingLink(path string) bool {
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			_, err = os.Stat(path)
+			return errors.Is(err, fs.ErrNotExist)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false
+		}
+		path = parent
+	}
 }
 
 // askConfig 依次询问机器人地址、接收地址与白名单，逐项按 NormalizeAddress 与 Render 的规则校验，

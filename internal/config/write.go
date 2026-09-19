@@ -92,8 +92,9 @@ func quoteList(values []string) string {
 // 再用 os.Link 放到 path（已存在时返回包装 fs.ErrExist 的错误），最后删除临时文件。错误文本不含路径。
 func CreateFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
+	// 用 %v 而不是 %w：目录路径是悬空的符号链接时 MkdirAll 报 EEXIST，它不能被当成「目标已存在」。
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("cannot create config directory: %w", withoutPath(err))
+		return fmt.Errorf("cannot create config directory: %v", withoutPath(err))
 	}
 	// CreateTemp 以 0600 创建文件；无论成功与否都删除临时文件，目标文件由硬链接保留。
 	temp, err := os.CreateTemp(dir, ".turncourier-*.tmp")
