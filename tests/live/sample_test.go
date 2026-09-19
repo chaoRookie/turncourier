@@ -672,18 +672,22 @@ func TestAnalyzeSkipsProbeCopies(t *testing.T) {
 }
 
 // TestAnalyzeRedactsMalformedLabels 断言来信可控的短标签不构成脱敏旁路：畸形 encoded-word 的字符集位置、
-// Content-Type 的 charset 参数与无法解析的 Content-Type 整行都记为 other，样本中不出现其中的文字。
+// Content-Type 的 charset 参数、无法解析的 Content-Type 整行，以及 Auto-Submitted 与 Precedence 的畸形取值
+// 都记为 other，样本中不出现其中的文字。
 func TestAnalyzeRedactsMalformedLabels(t *testing.T) {
 	tokenText := testToken(t)
 	malformedWord := "=?关于合同 " + canaryPhone + " 的回复?B?" + gb18030Base64(t, "回复：[TC "+taskID+"] 探测") + "?="
 	goodWord := encodedSubject(t, "回复：[TC "+taskID+"] 探测")
 	for _, c := range []struct {
-		name         string
-		subject      string
-		contentType  string
-		wantEncoding string
-		wantType     string
-		wantCharset  string
+		name           string
+		subject        string
+		contentType    string
+		extra          []string
+		wantEncoding   string
+		wantType       string
+		wantCharset    string
+		wantSubmitted  string
+		wantPrecedence string
 	}{
 		{
 			name: "畸形 encoded-word", subject: malformedWord, contentType: `text/plain; charset="utf-8"`,
@@ -698,10 +702,19 @@ func TestAnalyzeRedactsMalformedLabels(t *testing.T) {
 			name: "无法解析的媒体类型", subject: goodWord, contentType: "关于合同 " + canaryPhone,
 			wantEncoding: "gbk/B", wantType: "other", wantCharset: "",
 		},
+		{
+			name: "畸形自动来信头", subject: goodWord, contentType: `text/plain; charset="utf-8"`,
+			extra: []string{
+				"Auto-Submitted: 客户张三的手机号 " + canaryPhone + " 合同编号 ABC",
+				"Precedence: 金丝雀 " + canaryPhone,
+			},
+			wantEncoding: "gbk/B", wantType: "text/plain", wantCharset: "utf-8",
+			wantSubmitted: "other", wantPrecedence: "other",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			raw := rawSinglePart(t, replyHeaders(t, "Subject: "+c.subject, "In-Reply-To: "+sentID),
-				c.contentType, tokenText)
+			extra := append([]string{"Subject: " + c.subject, "In-Reply-To: " + sentID}, c.extra...)
+			raw := rawSinglePart(t, replyHeaders(t, extra...), c.contentType, tokenText)
 			sample := analyze(t, raw, testState(t))
 			if sample.Subject.Encoding != c.wantEncoding {
 				t.Errorf("subject.encoding = %q，期望 %q", sample.Subject.Encoding, c.wantEncoding)
@@ -709,8 +722,31 @@ func TestAnalyzeRedactsMalformedLabels(t *testing.T) {
 			if sample.MIME[0].Type != c.wantType || sample.MIME[0].Charset != c.wantCharset {
 				t.Errorf("mime = %+v，期望类型 %q、字符集 %q", sample.MIME[0], c.wantType, c.wantCharset)
 			}
+			if sample.Auto.AutoSubmitted != c.wantSubmitted || sample.Auto.Precedence != c.wantPrecedence {
+				t.Errorf("auto = %+v，期望 auto_submitted %q、precedence %q",
+					sample.Auto, c.wantSubmitted, c.wantPrecedence)
+			}
 			if output := marshal(t, sample); strings.Contains(output, canaryPhone) {
 				t.Errorf("样本中出现了头部里的数字 %q", canaryPhone)
+			}
+		})
+	}
+}
+
+// TestAnalyzeKeepsLongMediaType 断言形状合法的长媒体类型原样保留：Word 与 Excel 的 OOXML 类型前 40 个字符相同，
+// 按短标签上限截断会让两种附件在样本中无法分辨。
+func TestAnalyzeKeepsLongMediaType(t *testing.T) {
+	tokenText := testToken(t)
+	for _, mediaType := range []string{
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	} {
+		t.Run(mediaType, func(t *testing.T) {
+			raw := rawSinglePart(t, replyHeaders(t, "Subject: "+encodedSubject(t, "回复：[TC "+taskID+"] 探测"),
+				"In-Reply-To: "+sentID), mediaType, tokenText)
+			sample := analyze(t, raw, testState(t))
+			if sample.MIME[0].Type != mediaType {
+				t.Errorf("mime[0].type = %q，期望 %q", sample.MIME[0].Type, mediaType)
 			}
 		})
 	}

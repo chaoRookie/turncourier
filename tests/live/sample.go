@@ -58,8 +58,10 @@ const (
 	maxPrefixRunes = 20
 	// maxClientRunes 是客户端标识输出的字符数上限。
 	maxClientRunes = 40
-	// maxLabelRunes 是媒体类型、字符集、传输编码等短标签输出的字符数上限。
-	maxLabelRunes = 40
+	// maxLabelRunes 是媒体类型、字符集、传输编码等短标签输出的字符数上限，取 RFC 6838 对媒体类型的上限
+	// （type 与 subtype 各至多 127 个字符，加分隔符共 255）。脱敏屏障是 safeLabel 的形状检查，这个上限只是兜底：
+	// 截到 40 个字符会让 OOXML 的 Word 与 Excel 类型在样本中无法分辨，而 L1 采集 MIME 结构正是为了 4b 的解析器。
+	maxLabelRunes = 255
 	// crockfordAlphabet 是回复令牌使用的小写 Crockford base32 字母表；令牌文本为其中的 48 个字符。
 	crockfordAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
 )
@@ -725,10 +727,11 @@ func autoSignals(h mail.Header) Auto {
 	}
 }
 
-// keyword 取头部取值中分号之前的关键字，转小写并截断，避免输出服务器附加的说明文字。
+// keyword 取头部取值中分号之前的关键字，再经 safeLabel 约束为标签形状：这两个头同样完全由来信控制，
+// 合法取值也同样是极小的一组 token，畸形邮件可以把任意文字放进去，不加约束就会绕过「不输出正文与完整主题」。
 func keyword(value string) string {
 	value, _, _ = strings.Cut(value, ";")
-	return truncateRunes(strings.ToLower(strings.TrimSpace(value)), maxClientRunes)
+	return safeLabel(value)
 }
 
 // classifyKind 判断来信类别：multipart/report 或来自 MAILER-DAEMON、postmaster 的记为 bounce；
@@ -808,8 +811,9 @@ func (r Roles) roleOf(address string) string {
 	return "other"
 }
 
-// safeLabel 把来信可控的短标签（媒体类型、字符集、传输编码、主题 encoded-word 的字符集）转小写后约束为标签形状：
-// 含空白、非 ASCII 或其他字符时一律记为 other，形状合法时截到至多 maxLabelRunes 个字符。
+// safeLabel 把来信可控的短标签（媒体类型、字符集、传输编码、主题 encoded-word 的字符集、Auto-Submitted、
+// Precedence）转小写后约束为标签形状：含空白、非 ASCII 或其他字符时一律记为 other，
+// 形状合法时截到至多 maxLabelRunes 个字符（形状检查才是脱敏屏障，截断只是兜底）。
 // 这些位置的取值都来自来信字节，畸形邮件可以把任意文字放进去；不加约束就会绕过「不输出正文、显示名与完整主题」。
 func safeLabel(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
