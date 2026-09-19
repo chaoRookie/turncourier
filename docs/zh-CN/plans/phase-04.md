@@ -524,7 +524,7 @@ MAC 输入为 `"turncourier/reply-token/v1\x00"` ‖ 版本 ‖ kid ‖ nid ‖ 
 
 **脱敏输出：** `Token` 的 `String` 与所有 `fmt` 动词（经 `Format`）输出 `[redacted reply token]`，`LogValue` 返回同一字符串；`Key` 对应输出 `[redacted token key]`。已知局限：`Token` 作为其他包中结构体的**未导出**字段时，`fmt` 无法调用其方法，会按原始字段打印；4b 的日志金丝雀测试覆盖装配后的实际路径。
 
-- [ ] **Step 1：写失败的测试。**
+- [x] **Step 1：写失败的测试。**
   - **已知答案：** 密钥为字节 `0x01…0x20`、kid 1、nid 为字节 `0x00…0x0b`、`Claims{TaskID: "0123456789", Owner: "local", ExpiresAt: time.UnixMilli(1_790_000_000_000)}`。测试中另写一份按上表逐字节拼接 MAC 输入、直接调用 `crypto/hmac` 与 `encoding/base32` 的参考实现（不调用被测函数），断言 `Issue(...).Reveal()` 与之相同；并把参考实现得到的 30 个原始字节以 `[]byte{0x01, …}` 字面量写入测试，断言 `Reveal()` 等于其编码，防止两边同时改错（不写 48 字符的文本字面量，以免被密钥扫描误报，见 Step 4）。
   - **确定性与格式：** 两次 `Issue` 结果相同；文本 48 个字符且都在字母表中；`Parse(t.Reveal())` 与 `Parse(strings.ToUpper(t.Reveal()))` 都等于 `t`。
   - **篡改穷举：** 48 个位置各换成字母表中另外 31 个字符（1488 个变体），以及 30 个原始字节的 240 个单比特翻转（翻转后重新编码），每个变体 `Parse` 失败或 `Verify` 失败，没有一个被接受。
@@ -537,12 +537,12 @@ MAC 输入为 `"turncourier/reply-token/v1\x00"` ‖ 版本 ‖ kid ‖ nid ‖ 
   - **键控摘要：** 已知答案（参考实现直接调用 `crypto/hmac`）；不同密钥结果不同；与 `sha256.Sum256(body)`、以及不带前缀的 HMAC 都不同。
   - **模糊测试：** `FuzzParse`，种子为一个合法令牌与上述错误输入；性质：不 panic；成功时输入长度为 48，`Reveal()` 等于 `strings.ToLower(输入)`。
   - **常数时间比较（源码检查，`source_test.go`）：** 用 `go/parser` 与 `go/types` 检查本包非测试文件：`Verify` 的函数体调用了 `hmac.Equal`（或 `subtle.ConstantTimeCompare`）；任何 `==`、`!=` 的操作数类型都不是字节数组；不调用 `bytes.Equal`。把标签比较改为 `==` 或 `bytes.Equal` 的临时副本必须使该测试失败。功能测试无法区分这两种写法，这一性质只由本测试钉住。
-- [ ] **Step 2：** `go test ./internal/security/token/` 编译失败。
-- [ ] **Step 3：实现。** 只用标准库；`encoding/base32.NewEncoding(字母表).WithPadding(base32.NoPadding)`；解码前逐字节检查字母表，因为标准库解码会忽略 `\r\n`。
-- [ ] **Step 4：** `go test -race ./internal/security/token/` 通过，覆盖率 ≥ 95%；`go test -run='^$' -fuzz=FuzzParse -fuzztime=30s ./internal/security/token/` 无失败（本地执行一次）；`CGO_ENABLED=0 go test ./internal/security/token/` 与 `make secrets` 通过；已知答案的密钥与 nid 按下标循环填充，测试向量遵循「测试向量与密钥扫描」的约定。
-- [ ] **Step 5：** `git add internal/security/token && git commit -m "feat(token): add signed reply token v1 with redacted formatting"`
+- [x] **Step 2：** `go test ./internal/security/token/` 编译失败。
+- [x] **Step 3：实现。** 只用标准库；`encoding/base32.NewEncoding(字母表).WithPadding(base32.NoPadding)`；解码前逐字节检查字母表，因为标准库解码会忽略 `\r\n`。
+- [x] **Step 4：** `go test -race ./internal/security/token/` 通过，覆盖率 ≥ 95%；`go test -run='^$' -fuzz=FuzzParse -fuzztime=30s ./internal/security/token/` 无失败（本地执行一次）；`CGO_ENABLED=0 go test ./internal/security/token/` 与 `make secrets` 通过；已知答案的密钥与 nid 按下标循环填充，测试向量遵循「测试向量与密钥扫描」的约定。
+- [x] **Step 5：** `git add internal/security/token && git commit -m "feat(token): add signed reply token v1 with redacted formatting"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** 先写测试，`go test ./internal/security/token/` 编译失败（`undefined: Token`、`Key`、`Claims`、`NID` 等），再实现。实现要点：`Parse` 先逐字节转小写并检查字母表，再用无填充 base32 解码，因为标准库解码会跳过换行；`ID` 与 `BodyDigest` 按契约用指针接收者，两种类型的 `String`、`Format`、`LogValue` 用值接收者，使 `Key` 按值或按指针格式化都输出脱敏文本；有效期「晚于 1970-01-01」按 Unix 毫秒值大于 0 判断（纪元本身不合法，1 毫秒合法），过期判断为 `now` 不早于 `ExpiresAt`。契约之外的一处补充：`Issue` 遇到密钥号为 0 的零值 `Key` 时返回 `ErrInvalidKey`，否则会签出 kid 为 0、永远无法解析的令牌；`Verify` 仍按契约的检查顺序，零值密钥只会得到 `ErrKeyMismatch` 或 `ErrBadMAC`。源码检查（`source_test.go`）用 `importer.ForCompiler(fset, "source", nil)` 做类型检查，没有用 `importer.Default()`：本机工具链放在模块目录之内，gc 导入器在 GOROOT 下运行 `go list -export`，会把标准库目录当作主模块中的包而失败；source 导入器在进程内读取标准库源码，与工具链位置无关，竞态检测下约 2 秒。检查比规格略严：除字节数组的 `==`、`!=` 与 `bytes.Equal` 外，含字节数组的结构体与数组（例如整个 `Token` 相比较）、由字节切片或字节数组转换得到的字符串之间的比较，以及 `bytes.Compare`、`slices.Equal`、`reflect.DeepEqual` 也会报告。测试方面：「第 10 位」按从 1 开始计数，取下标 9；解析错误另加大写 `I`、`L`、`O`、`U`；非法绑定字段另加 11 位任务 ID 与纪元时刻，并钉住合法边界（任务 ID `zyxwvtsrqp`、255 字节 owner、有效期 1 毫秒）；另钉住检查顺序（kid 先于绑定字段，绑定字段先于标签）；`NewNID` 用逐字节返回的读取器钉住 `io.ReadFull`；金丝雀用例对值与指针要求输出恰为脱敏文本，对切片、映射、含导出字段的结构体与 slog 输出要求含脱敏文本且不含禁止子串，并直接断言 `String`（fmt 优先调用 `Format`，否则 `String` 覆盖不到）。在仓库副本上做了 41 个变异，每次只改一处，涉及标签比较（`==`、`bytes.Equal`、字符串比较、整个 `Token` 比较）、字母表与大小写、长度、版本与 kid 检查、绑定字段校验的各个边界、Verify 的检查顺序、MAC 输入的每一段、两个域分隔前缀、`io.ReadFull`、零值密钥、`Reveal` 大小写、各格式化出口泄露与指针接收者，全部被测试杀死。验证：`go test -race` 通过，覆盖率 100%，`-count=5` 稳定；`FuzzParse` 本地运行 30 秒（约 456 万次执行）无失败，没有产生 testdata；`CGO_ENABLED=0 go test`、包级与全仓的 `GOOS=linux go vet`、`GOOS=windows go vet`、`make comments`、`make check`（总覆盖率 94.32%）、`make secrets` 均通过。本任务不涉及钥匙串与网络；测试只在 macOS 上运行，Linux 上的测试由 CI 运行。与 Task 1、2 相同，本任务的提交包含本清单的勾选与实施说明。
 
 ### Task 4：正文加密
 
