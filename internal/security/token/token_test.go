@@ -115,7 +115,8 @@ func accepted(k *Key, text string) bool {
 	return err == nil && Verify(k, parsed, testClaims(), testNow) == nil
 }
 
-// TestKnownAnswer 确认签发结果与独立参考实现一致，并与写入测试的 30 个原始字节一致，防止两边同时改错。
+// TestKnownAnswer 确认签发结果与独立参考实现一致，并与写入测试的 30 个原始字节一致，防止两边同时改错；
+// 另用 kid 7 比对参考实现，因为已知答案的 kid 1 恰好等于版本字节，分辨不出 MAC 输入中这两个字节的取值与位置。
 func TestKnownAnswer(t *testing.T) {
 	k, issued := fixture(t)
 	nid := testNID()
@@ -131,6 +132,10 @@ func TestKnownAnswer(t *testing.T) {
 	}
 	if k.ID() != 1 || issued.KeyID() != 1 || issued.NID() != nid {
 		t.Errorf("ID %d, KeyID %d, NID match %v", k.ID(), issued.KeyID(), issued.NID() == nid)
+	}
+	kid7, err := Issue(mustKey(t, 7, sequence(KeyLen, 1)), nid, testClaims())
+	if err != nil || kid7.Reveal() != refEncoding.EncodeToString(referenceRaw(sequence(KeyLen, 1), 7, nid[:], testClaims())) {
+		t.Errorf("kid 7 token differs from the reference implementation (err %v)", err)
 	}
 }
 
@@ -193,7 +198,7 @@ func TestTamperRejected(t *testing.T) {
 	}
 }
 
-// TestClaimsBinding 确认任务 ID、owner、有效期与密钥都参与验证，且检查顺序为密钥号、绑定字段、标签。
+// TestClaimsBinding 确认任务 ID、owner、有效期、密钥号与密钥材料都参与验证，且检查顺序为密钥号、绑定字段、标签。
 func TestClaimsBinding(t *testing.T) {
 	k, issued := fixture(t)
 	base := testClaims()
@@ -218,6 +223,11 @@ func TestClaimsBinding(t *testing.T) {
 	}
 	if err := Verify(otherID, issued, Claims{}, testNow); !errors.Is(err, ErrKeyMismatch) {
 		t.Errorf("kid 2 with invalid claims: Verify = %v, want ErrKeyMismatch first", err)
+	}
+	relabeled := issued
+	relabeled.kid = 2
+	if err := Verify(otherID, relabeled, base, testNow); !errors.Is(err, ErrBadMAC) {
+		t.Errorf("token relabeled as kid 2: Verify = %v, want ErrBadMAC", err)
 	}
 	otherMaterial := mustKey(t, 1, bytes.Repeat([]byte{0x5a}, KeyLen))
 	if err := Verify(otherMaterial, issued, base, testNow); !errors.Is(err, ErrBadMAC) {
@@ -358,7 +368,8 @@ func TestNewNID(t *testing.T) {
 }
 
 // TestRedaction 以金丝雀检查令牌与密钥的全部格式化出口：fmt 各动词、嵌套容器、slog 两种处理器与错误文本
-// 都只输出脱敏文本，不含令牌文本的任何 10 字符子串，也不含密钥材料的十六进制与 base64 文本。
+// 都只输出脱敏文本，不含令牌文本的任何 10 字符子串，也不含密钥材料的十六进制与 base64 文本；
+// %p 作用于指针、切片与映射时只输出地址。%p 作用于令牌或密钥的值会绕过 Format，是清单记录的已知局限，这里不断言。
 func TestRedaction(t *testing.T) {
 	k, issued := fixture(t)
 	text := issued.Reveal()
@@ -402,6 +413,11 @@ func TestRedaction(t *testing.T) {
 				t.Errorf("%s of %T = %q, want it to contain %q", verb, v, out, keyMarker)
 			}
 			clean(fmt.Sprintf("%s of %T", verb, v), out)
+		}
+	}
+	for _, v := range []any{&issued, k, []Token{issued}, map[string]Token{"t": issued}, &tokenHolder{T: issued}, []Key{*k}, &keyHolder{K: *k}} {
+		if out := fmt.Sprintf("%p", v); !strings.HasPrefix(out, "0x") || strings.ContainsAny(out, "{[ ") {
+			t.Errorf("%%p of %T = %q, want an address", v, out)
 		}
 	}
 	var buf bytes.Buffer

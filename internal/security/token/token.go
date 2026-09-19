@@ -181,7 +181,8 @@ func (t Token) String() string {
 	return redactedToken
 }
 
-// Format 对所有 fmt 动词输出脱敏文本，使 %x、%d、%#v 等动词也不会打印原始字段。
+// Format 对 %T、%p 之外的 fmt 动词输出脱敏文本，使 %x、%d、%#v 等动词也不会打印原始字段。
+// fmt 在调用 Format 之前处理 %p：作用于令牌值（或含令牌的结构体值）时走错误动词路径，按原始字段打印，vet 也不报。
 func (t Token) Format(f fmt.State, _ rune) {
 	io.WriteString(f, redactedToken)
 }
@@ -199,12 +200,12 @@ func (k *Key) BodyDigest(body []byte) [32]byte {
 	return [32]byte(mac.Sum(nil))
 }
 
-// String 返回脱敏文本；格式化方法用值接收者，密钥按值或按指针格式化时都会被脱敏。
+// String 返回脱敏文本；格式化方法用值接收者，密钥按值或按指针格式化时都会被脱敏（%p 作用于密钥值除外，见 Token.Format）。
 func (k Key) String() string {
 	return redactedKey
 }
 
-// Format 对所有 fmt 动词输出脱敏文本。
+// Format 对 %T、%p 之外的 fmt 动词输出脱敏文本。
 func (k Key) Format(f fmt.State, _ rune) {
 	io.WriteString(f, redactedKey)
 }
