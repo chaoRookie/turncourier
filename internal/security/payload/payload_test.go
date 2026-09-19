@@ -236,6 +236,32 @@ func TestTruncatedAndOversize(t *testing.T) {
 	}
 }
 
+// TestTaskIDAlphabet 确认由整个字母表组成的任务 ID 都能往返；i、l、o、u 及其大写、紧邻数字区间与小写字母区间两端的字符以及其他标点
+// 放在首位、第 6 位或末位时，Seal 与 Open 都返回 ErrInvalidInput。
+func TestTaskIDAlphabet(t *testing.T) {
+	k := mustKey(t, 1, sequence(KeyLen, 1))
+	plaintext := []byte("x")
+	for _, taskID := range []string{testTask, "abcdefghjk", "mnpqrstvwx", "yz01234567"} {
+		sealed := mustSeal(t, k, KindReply, taskID, 1, plaintext)
+		if opened, err := k.Open(KindReply, taskID, 1, sealed); err != nil || !bytes.Equal(opened, plaintext) {
+			t.Errorf("%s: Open = %v; want the original plaintext", taskID, err)
+		}
+	}
+	sealed := mustSeal(t, k, KindReply, testTask, 1, plaintext)
+	for _, c := range []byte("ilouILOU:/ -_`{") {
+		for _, pos := range []int{0, 5, 9} {
+			id := []byte(testTask)
+			id[pos] = c
+			if out, err := k.Seal(KindReply, string(id), 1, plaintext); err != ErrInvalidInput || out != nil {
+				t.Errorf("%q: Seal = %d bytes, %v; want nil, ErrInvalidInput", id, len(out), err)
+			}
+			if out, err := k.Open(KindReply, string(id), 1, sealed); err != ErrInvalidInput || out != nil {
+				t.Errorf("%q: Open = %d bytes, %v; want nil, ErrInvalidInput", id, len(out), err)
+			}
+		}
+	}
+}
+
 // TestInvalidInput 确认非法的用途、任务 ID 与序号使 Seal 与 Open 返回 ErrInvalidInput（Open 先于长度检查报告），
 // 空明文与超过上限的明文使 Seal 返回 ErrInvalidInput，密钥号为 0 或长度不是 32 字节使 NewKey 返回 ErrInvalidKey。
 func TestInvalidInput(t *testing.T) {
@@ -248,6 +274,11 @@ func TestInvalidInput(t *testing.T) {
 		seq    int64
 	}{
 		{"kind x", 'x', testTask, 1},
+		{"kind 0", 0, testTask, 1},
+		{"kind o", 'o', testTask, 1},
+		{"kind q", 'q', testTask, 1},
+		{"kind R", 'R', testTask, 1},
+		{"kind N", 'N', testTask, 1},
 		{"task 9 chars", KindReply, "012345678", 1},
 		{"task with u", KindReply, "012345678u", 1},
 		{"task 11 chars", KindReply, "0123456789a", 1},
