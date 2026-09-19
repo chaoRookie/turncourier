@@ -310,6 +310,14 @@ func TestInvalidInput(t *testing.T) {
 			t.Errorf("NewKey(%d, %d bytes) = %v, %v; want nil, ErrInvalidKey", tc.id, tc.n, got, err)
 		}
 	}
+	// 未经 NewKey 构造的零值密钥返回 ErrInvalidKey，而不是 panic。
+	var zero Key
+	if out, err := zero.Seal(KindReply, testTask, 1, []byte("x")); err != ErrInvalidKey || out != nil {
+		t.Errorf("zero Key: Seal = %d bytes, %v; want nil, ErrInvalidKey", len(out), err)
+	}
+	if out, err := zero.Open(KindReply, testTask, 1, sealed); err != ErrInvalidKey || out != nil {
+		t.Errorf("zero Key: Open = %d bytes, %v; want nil, ErrInvalidKey", len(out), err)
+	}
 }
 
 // TestNoLeak 确认含金丝雀的明文不会出现在任何错误文本中，密钥经 fmt 各动词、嵌套容器与 slog 两种处理器输出时

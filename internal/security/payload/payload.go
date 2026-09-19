@@ -50,7 +50,7 @@ type Key struct {
 }
 
 var (
-	// ErrInvalidKey 表示密钥号为 0 或密钥长度不是 32 字节。
+	// ErrInvalidKey 表示密钥号为 0、密钥长度不是 32 字节，或对未经 NewKey 构造的零值密钥调用 Seal、Open。
 	ErrInvalidKey = errors.New("invalid payload key")
 	// ErrInvalidInput 表示用途、任务 ID、序号或明文长度不合法。
 	ErrInvalidInput = errors.New("invalid payload binding or size")
@@ -93,8 +93,9 @@ func (k *Key) Seal(kind Kind, taskID string, seq int64, plaintext []byte) ([]byt
 	return k.aead.Seal(sealed, nil, plaintext, ad), nil
 }
 
-// Open 校验长度（Overhead+1 到 MaxPlaintext+Overhead，明文至少 1 字节）、格式字节与绑定后解密；任何失败都返回 ErrDecrypt。
-// 用途、任务 ID 或序号本身不合法时与 Seal 一致，先返回 ErrInvalidInput。
+// Open 校验长度（Overhead+1 到 MaxPlaintext+Overhead，明文至少 1 字节）、格式字节与绑定后解密。
+// 零值密钥返回 ErrInvalidKey，用途、任务 ID 或序号本身不合法时与 Seal 一致返回 ErrInvalidInput，
+// 二者都先于长度检查；长度、格式字节与认证失败一律返回 ErrDecrypt，不区分原因。
 func (k *Key) Open(kind Kind, taskID string, seq int64, sealed []byte) ([]byte, error) {
 	ad, err := k.associatedData(kind, taskID, seq)
 	if err != nil {
@@ -126,9 +127,13 @@ func (k Key) LogValue() slog.Value {
 	return slog.StringValue(redactedKey)
 }
 
-// associatedData 校验用途、任务 ID 与序号，返回关联数据：adPrefix ‖ 用途 ‖ kid ‖ 任务 ID（10 字节）‖ 序号（uint64 大端）。
+// associatedData 校验密钥已构造，以及用途、任务 ID 与序号，返回关联数据：adPrefix ‖ 用途 ‖ kid ‖ 任务 ID（10 字节）‖ 序号（uint64 大端）。
+// Seal 与 Open 都经由这里，零值密钥在此返回 ErrInvalidKey 而不是在 aead 上 panic。
 // nonce 随机生成而不由序号派生：新建数据库后序号从 1 重新计数，Keychain 中的密钥却可能仍在。
 func (k *Key) associatedData(kind Kind, taskID string, seq int64) ([]byte, error) {
+	if k.aead == nil {
+		return nil, ErrInvalidKey
+	}
 	if (kind != KindReply && kind != KindNotification) || len(taskID) != 10 || seq < 1 {
 		return nil, ErrInvalidInput
 	}

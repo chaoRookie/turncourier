@@ -415,7 +415,7 @@ func TestRedaction(t *testing.T) {
 			clean(fmt.Sprintf("%s of %T", verb, v), out)
 		}
 	}
-	for _, v := range []any{&issued, k, []Token{issued}, map[string]Token{"t": issued}, &tokenHolder{T: issued}, []Key{*k}, &keyHolder{K: *k}} {
+	for _, v := range []any{&issued, k, []Token{issued}, map[string]Token{"t": issued}, &tokenHolder{T: issued}, []Key{*k}, map[string]Key{"k": *k}, &keyHolder{K: *k}} {
 		if out := fmt.Sprintf("%p", v); !strings.HasPrefix(out, "0x") || strings.ContainsAny(out, "{[ ") {
 			t.Errorf("%%p of %T = %q, want an address", v, out)
 		}

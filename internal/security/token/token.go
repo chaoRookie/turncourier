@@ -182,7 +182,7 @@ func (t Token) String() string {
 }
 
 // Format 对 %T、%p 之外的 fmt 动词输出脱敏文本，使 %x、%d、%#v 等动词也不会打印原始字段。
-// fmt 在调用 Format 之前处理 %p：作用于令牌值（或含令牌的结构体值）时走错误动词路径，按原始字段打印，vet 也不报。
+// fmt 在调用 Format 之前处理 %p：作用于令牌值（或含令牌的结构体值、数组值）时走错误动词路径，按原始字段打印，vet 也不报。
 func (t Token) Format(f fmt.State, _ rune) {
 	io.WriteString(f, redactedToken)
 }
