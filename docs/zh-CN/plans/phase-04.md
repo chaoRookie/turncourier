@@ -1726,8 +1726,8 @@ UIDVALIDITY 变化通过在 imapmemserver 中删除并重建 Junk 文件夹模�
 
 实现要点（`watcher.go`）：
 - ① 状态种类导出为 `StatusConnected` 等常量，取值即契约注释中的名称。
-- ② 每次登录前的等待取「待定等待」与登录频率限制两者中较长者，只发出一个状态。待定等待有四种来源：连接失败后的重连退避（`backoff`）、认证失败后的 `AuthPause`（`auth_failed`）、`Password` 失败后的 `Max`（`credentials_unavailable`）；只受登录频率限制时也发出 `backoff`。登录频率限制是：距上次登录至少 `Initial`；`LoginWindow` 内已有 `MaxLogins` 次时，等到其中最早一次满窗口。登录次数在每次拨号前登记，拨号失败也计入；`Password` 失败不拨号，不计入。登录前失败（拨号、问候、能力、LOGIN 的非 NO 错误）只发出 `backoff`，`disconnected` 只在已登录的连接结束时发出。
-- ③ 重连退避在两种情况下复位：每轮补扫完 INBOX 时连接自登录起已存活 `IdleMax`（此时连接刚完成一轮补扫，证明它健康）；或者一次 `Idle` 正常结束。补扫成功本身不复位。半开连接在冻结后没有任何成功的步骤，所以冻结之后的时间不算健康。
+- ② 每次登录前的等待取「待定等待」与登录频率限制两者中较长者，只发出一个状态。待定等待有四种来源：连接失败后的重连退避（`backoff`）、认证失败后的 `AuthPause`（`auth_failed`）、`Password` 失败后的 `Max`（`credentials_unavailable`）；只受登录频率限制时也发出 `backoff`。登录频率限制是：距上次登录至少 `Initial`；`LoginWindow` 内已有 `MaxLogins` 次时，等到其中最早一次满窗口。登录次数在每次拨号返回后登记（原为拨号前，见下文「审查后修正」③），拨号失败也计入；`Password` 失败不拨号，不计入。登录前失败（拨号、问候、能力、LOGIN 的非 NO 错误）只发出 `backoff`，`disconnected` 只在已登录的连接结束时发出。
+- ③ 重连退避在两种情况下复位：每轮补扫完 INBOX 时连接自登录起已存活 `IdleMax`（此时连接刚完成一轮补扫，证明它健康）；或者一次真正发出了 IDLE 的 `Idle` 正常结束（补扫期间已收到 EXISTS、不发 IDLE 就回到补扫的情形不算，见下文「审查后修正」②）。补扫成功本身不复位。半开连接在冻结后没有任何成功的步骤，所以冻结之后的时间不算健康。
 - ④ `Idle` 返回 `ErrTimeout` 时计数加一，返回其他结果（成功或其他错误）时计数清零；计数达到 2 即本次 `Run` 改为轮询，并发出一次 `idle_disabled`。
 - ⑤ 空批次只在游标变化时交给 `Handle`，例如 UIDVALIDITY 变化后的空文件夹要持久化新游标；游标不变的空批不交付。
 - ⑥ `Cursor` 返回错误同样是本地错误，与 `Handle` 失败一样发出 `handle_failed`、在同一连接内按退避重试；契约只写了 `Handle`，这里补上 `Cursor`，已写入 `Watcher` 的注释。同连接重试的退避与重连退避是两串独立的序列，参数相同，处理成功后复位。
@@ -1742,9 +1742,9 @@ UIDVALIDITY 变化通过在 imapmemserver 中删除并重建 Junk 文件夹模�
 - `session_test.go` 按 Step 1 覆盖：`TestScanFetchesNewMessagesReadOnly`（收取、游标、只读、正文项为 `BODY.PEEK[]<0.2097153>`）；`TestCapabilities`（无 IDLE、LOGINDISABLED，另补没有 IMAP4rev1）；`TestCommandDeadlines`（问候冻结、LOGIN 后冻结、EXAMINE 与 UID SEARCH 的无标签 BAD、正文字面量传到 512 字节后冻结、IDLE 的无标签 BAD、进入 IDLE 后半开，另补 UID FETCH (RFC822.SIZE) 的无标签 BAD）；`TestExistsDuringScan`、`TestExistsHandlerNeverBlocks`、`TestScanClearsStaleSignal`、`TestIdlePush`、`TestScanUIDValidityChange`、`TestScanBatches`（120、51、50 封）、`TestScanTooLarge`（另补恰为上限的邮件）、`TestScanBatchBytes`（另补单封超过上限时仍然前进）、`TestDialAuthFailed`、`TestDialTransportSecurity`（明文、证书不受信任、主机名为 `localhost`，另补只支持 TLS 1.1 的服务器，并以对照连接确认它确实能协商出 TLS 1.1）、`TestFolders`。
 - `session_test.go` 在契约之外补了：`TestContextCancellation`、`TestServerDisconnect`、`TestScanSkipsVanishedMessages`、`TestScanCursorAtMaxUID`、`TestShutdownBoundedWait`（用测试自建的阻塞处理函数让 `client.Close` 挂住，`shutdown` 在 `IdleStop` 后返回）、`TestCloseLogsOut`、`TestTimeoutsDefaults`、`TestErrorTextHasNoServerText`。
 - `watcher_test.go` 按 Step 2 覆盖：`TestWatcherDelivers`、`TestWatcherRetriesHandleOnSameConnection`（另补处理成功后退避复位）、`TestWatcherReconnectsWithBackoff`（断开与半开后退避约为 Initial、2×Initial；IDLE 收到 EXISTS 正常结束后复位为 Initial，此时连接存活时间远小于 `IdleMax`，复位只能来自 IDLE 正常结束）、`TestWatcherIdlePhaseFaults`、`TestWatcherDisablesIdleAfterTimeouts`、`TestWatcherRecoversFromCommandBAD`（UID SEARCH，另补 LIST）、`TestWatcherExistsDuringFetch`、`TestWatcherAuthFailure`、`TestBackoffDefaults`、`TestWatcherCredentialsUnavailable`、`TestWatcherJunkFolder`、`TestWatcherCancelDuringIdle`。
-- `TestWatcherIdlePhaseFaults` 使用 `Jitter: 0.01`、`Initial` 100ms、`Max` 400ms、`MaxLogins` 4、`LoginWindow` 1.5s：断言前三个登录间隔每次至少增长 1.5 倍，任一登录间隔不低于 `Initial`，任一窗口内的登录不超过 `MaxLogins`。代理记录的是收到 LOGIN 的时刻，比 Watcher 登记的时刻晚一个握手，所以窗口比较留出 100ms 余量。
+- `TestWatcherIdlePhaseFaults` 使用 `Jitter: 0.01`、`Initial` 100ms、`Max` 400ms、`MaxLogins` 4、`LoginWindow` 1.5s：断言前三个登录间隔每次至少增长 1.5 倍，任一登录间隔不低于 `Initial`，任一窗口内的登录不超过 `MaxLogins`。代理记录的是收到 LOGIN 的时刻，比 Watcher 登记的时刻晚一个握手，所以窗口比较留出 100ms 余量。（审查后改为在拨号返回后登记、去掉余量，并补断言到达 Max 后间隔不回落，见下文「审查后修正」③⑦。）
 - `watcher_test.go` 在契约之外补了：`TestWatcherResetsBackoffAfterHealthyPeriod`（不支持 IDLE、按 Poll 补扫时存活达到 `IdleMax` 后复位）、`TestWatcherIdleTimeoutsMustBeConsecutive`、`TestWatcherPollsWithoutIdleCapability`、`TestWatcherBacksOffWhenDialFails`（退避约为 1、2、4 倍 Initial，且带抖动）、`TestWatcherHandleWaitSurvivesDisconnect`、`TestWatcherDrainsMoreBatches`、`TestWatcherRelists`（另断言游标不变的空批不交付）、`TestWatcherLoginSpacing`（`Jitter: 0.9` 时退避可能短于 Initial，登录间隔仍不低于 Initial）。
-- `source_test.go` 按 Step 3 用 `go/parser` 与 `go/types` 检查，导入器为 `importer.ForCompiler(fset, "source", nil)`，各用例共用一个实例。检查对象经类型信息确定，改名导入与点导入都绕不过；另外仍把任何点导入报告为违规。`Select` 与 `Fetch` 只能直接调用，方法值会绕过参数检查，因此报告为违规。tls.Config 的字段须恰为 `ServerName`、`RootCAs`、`MinVersion`，与 Task 10 一致。`TestSourceProblemsDetectsViolations` 用内存中的源码逐类确认检查有效，共 24 例。
+- `source_test.go` 按 Step 3 用 `go/parser` 与 `go/types` 检查，导入器为 `importer.ForCompiler(fset, "source", nil)`，各用例共用一个实例。检查对象经类型信息确定，改名导入与点导入都绕不过（更正：经嵌入字段提升的方法与经接口调用的方法原先能绕过，见下文「审查后修正」⑥）；另外仍把任何点导入报告为违规。`Select` 与 `Fetch` 只能直接调用，方法值会绕过参数检查，因此报告为违规。tls.Config 的字段须恰为 `ServerName`、`RootCAs`、`MinVersion`，与 Task 10 一致。`TestSourceProblemsDetectsViolations` 用内存中的源码逐类确认检查有效，共 24 例（审查后增至 27 例）。
 
 变异测试在仓库副本中进行，每次只改一处，共 64 个，全部被杀死：
 - 契约点名的六项：加入 `UnselectAndExpunge`、`Noop` 或 `Move` 调用，`ReadOnly` 改为 false，去掉 `Peek`，以 `imap.SeqSet` 调用 `Fetch`，都被 `TestSourceRestrictions` 杀死。
@@ -1758,7 +1758,7 @@ UIDVALIDITY 变化通过在 imapmemserver 中删除并重建 Junk 文件夹模�
   - `do` 去掉计时器、ctx 分支或 ctx 预检、`shutdown` 无限等待、`Close` 不发 LOGOUT、`MinVersion` 降为 TLS 1.0、去掉 `ServerName`（被源码检查杀死）、默认期限；
   - Watcher 的各条复位规则、最小登录间隔、IDLE 降级的次数与「连续」、同连接重试的复位、处理失败改为重连、`folder_missing` 每次都发或初值为缺失、`folder_unavailable` 改为断开、`AuthPause` 下限、重新 LIST、加倍、上限 `Max`、抖动、`Password` 失败计入登录、认证失败改用退避、凭据不可用改为等 `Initial`、空批次的交付条件（两个方向）。
 - 其中 `MaxBatch` 边界、合计上限的 `>=`、同连接重试不复位、IDLE 超时计数不清零四个变异，第一轮存活；补了 51 与 50 封的批量用例、恰等于上限的合计用例、处理成功后再失败的用例，以及 `TestWatcherIdleTimeoutsMustBeConsecutive` 后被杀死。
-- 另有一个存活变异：去掉读取正文时的 `io.LimitReader`，改为读到字面量结束。imapmemserver 遵守部分取回，字面量本就不超过 N+1 字节，结果相同；这个上界只在服务器不遵守部分取回时限制内存，功能测试观察不到，保留为纵深防御。
+- 另有一个存活变异：去掉读取正文时的 `io.LimitReader`，改为读到字面量结束。imapmemserver 遵守部分取回，字面量本就不超过 N+1 字节，原有用例的结果相同。审查指出这不是等价变异：服务器不遵守部分取回时，它按字面量大小分配内存，用分配量可以稳定地观察到。现已补测试杀死，见下文「审查后修正」⑤。
 
 验证：
 - `go test -race -count=3 ./internal/mail/imap/` 通过，覆盖率 98.0%。与 sqlite、security 各包的 `-race -count=3` 并行运行时同样通过；另外 `-race -count=8` 连续运行通过。
@@ -1767,6 +1767,26 @@ UIDVALIDITY 变化通过在 imapmemserver 中删除并重建 Junk 文件夹模�
 - `make modverify`、`make secrets`、`make security`、`make check` 通过（含中文注释检查与 staticcheck，总覆盖率 94.06%）。
 
 测试只在 macOS 上运行，Linux 上的测试由 CI 运行，本机未验证。测试只连接回环地址上的本地假服务器，不连接任何真实服务器，不涉及钥匙串。与前面各任务相同，本任务的提交包含本清单的勾选与实施说明。
+
+**审查后修正：** 变异均在仓库副本中进行，每次只改一处。
+
+① 拒绝登录后立即断开。`do` 的 select 同时等待 `fn` 的结果与 `client.Closed()`。服务器回带标签的 NO 后立即关闭连接时，imapclient 先以 NO 结束 LOGIN，随即读到 EOF、关闭 `Closed`；`fn` 所在的 goroutine 还没把结果写入通道时，`Closed` 分支就可能胜出，`Dial` 返回 `ErrClosed` 而不是 `ErrAuthFailed`，Watcher 随之按普通连接失败退避，既不暂停 `AuthPause`，也不发出 `auth_failed`。现在 `Closed` 分支先关闭会话，再至多等待 `IdleStop` 取 `fn` 的结果，按同样的规则分类：带标签的 NO/BAD 仍为 `rejectedError`，其余为 `ErrClosed`；等不到才返回 `ErrClosed`。imapclient 的读协程退出时先以错误结束全部待完成命令，再关闭 `Closed`，所以 `fn` 很快返回，这里的等待只是保险。`fn` 在连接关闭前已经成功时 `do` 返回 nil，会话已标记关闭，下一步返回 `ErrClosed`。假服务器新增故障 `faultRejectClose`：回 `<标签> NO [AUTHENTICATIONFAILED]` 后立即关闭两侧连接。`TestDialAuthFailed` 对它连续 `Dial` 100 次，每次都须返回 `ErrAuthFailed`。修正前在副本中统计，300 次中误判 113 次，`-race` 下 26 次；按后者估计，100 次全部侥幸通过的概率约为万分之一。`TestWatcherAuthFailure` 改为两个子用例，新增的一个使用这一故障，两个都断言不发出 `backoff`；单次运行不一定拦得住，只作辅证。去掉修正的变异在 `-race -count=3` 下 3 次都被 `TestDialAuthFailed` 杀死。
+
+② 补扫期间已收到 EXISTS 时的复位。`Idle` 发现通道中已有信号时不发 IDLE 就返回 `(true, nil)`，`wait` 却把它当作一次 IDLE 正常结束：复位重连退避，并把 IDLE 连续超时的计数清零。契约只允许在「收到 EXISTS，或到达 `IdleMax` 后 DONE 成功」时复位。结果是：每个连接只要在补扫期间收到过 EXISTS，只在 IDLE 阶段出现的故障就会让退避停在 `Initial`，IDLE 连续超时也永远到不了 2 次，不会降级。现在 `wait` 在调用 `Idle` 之前检查 `len(s.exists) > 0`，有信号就直接回到补扫（下一次 `Scan` 排空信号），不复位退避，也不改变计数。信号只在本 goroutine 中被取走，检查之后不会消失。检查与 `Idle` 的预检之间若恰好到达 EXISTS，`Idle` 仍会不发 IDLE 就返回，`wait` 照旧复位。补扫中到达的 EXISTS 在命令完成之前已由解码协程处理，能落进这一窗口的只有命令之外的主动推送，而服务器能主动推送说明连接健康，所以没有为此给 `Idle` 另加返回值。新增 `TestWatcherPendingExistsIsNotIdle`：没有 Junk，每个连接的第一次 UID SEARCH 响应前注入 EXISTS，IDLE 只回无标签 BAD，IDLE 规则的钩子为下一个连接重新布置注入。断言退避约为 `Initial`、2×`Initial`，两次 IDLE 超时后发出 `idle_disabled`，IDLE 恰好发出 2 次。以下三个变异都被杀死：去掉检查，检查后仍复位退避，检查后仍清零计数。
+
+③ 登录时刻的登记。原实现在拨号之前登记登录时刻，而 LOGIN 要在握手、问候与能力读取之后才发出，按生产期限最多晚约 60 秒（Dial 15 秒、Greeting 15 秒、Command 30 秒）。窗口按拨号前的时刻计算，若窗口内第一次登录较慢、第 13 次较快，真实的 13 次 LOGIN 可以落在同一小时内。现在在 `Dial` 返回后登记，成功或失败都登记，这一时刻不早于 LOGIN 发出的时刻。第 k+12 次拨号开始时距第 k 次的登记已满 `LoginWindow`，所以两次 LOGIN 也至少相距 `LoginWindow`；「两次登录至少间隔 `Initial`」同理。审查建议拨号前先登记、返回后再更新为当前时刻；拨号进行中不会计算等待，拨号前那一项用不上，所以只在返回后登记一次。假服务器新增选项 `slowHandshake`，把第一个连接的 TLS 握手推迟指定时长。新增 `TestWatcherLoginWindowUsesLoginTime`：握手推迟 400ms，LOGIN 即断开，`MaxLogins` 为 2、`LoginWindow` 为 600ms，断言代理收到的第 1 与第 3 次 LOGIN 相距不少于窗口。改回拨号前登记的变异中两者只相距约 200ms，被杀死。`TestWatcherIdlePhaseFaults` 的窗口比较去掉 100ms 余量，`TestWatcherLoginSpacing` 的间隔比较去掉 10ms 余量。
+
+④ 期限字段。原 `TestCommandDeadlines` 的期限都在 100–500ms，断言余量是期限加 1 秒，某一步换用别的期限字段仍能通过；IDLE 进行中服务器断开的情形只在 Watcher 用例中出现，同样拦不住。现在每个子用例只把被测步骤的期限设为 300ms，其余都为 5 秒（拨号 1 秒），断言耗时不超过被测期限加 500ms。覆盖的步骤与期限：问候（`Greeting`），LOGIN、EXAMINE 与 UID SEARCH（`Command`），UID FETCH (RFC822.SIZE) 与单封正文（`Fetch`），IDLE 确认（`IdleAck`）。进入 IDLE 后半开的子用例取 `IdleMax` 1 秒、`IdleStop` 100ms，断言耗时不少于 `IdleMax`、不超过两者之和加 500ms。这比契约 Step 1 的「期限加 1 秒」更严；未测的期限设长只为区分字段，不增加用时。`TestServerDisconnect` 另加一段：`IdleMax` 为 5 秒，进入 IDLE 后代理断开，`Idle` 须在 1 秒内返回 `ErrClosed`。以下变异都被杀死：IDLE 确认改用 `IdleMax`，问候改用 `Command`，DONE 改用 `IdleMax`，单封 FETCH 改用 `IdleMax+Fetch`，删去 `Idle` 等待中的 `client.Closed()` 分支，LOGIN 改用 `Greeting`，EXAMINE 或 UID SEARCH 改用 `Fetch`，UID FETCH (RFC822.SIZE) 改用 `Command`。
+
+⑤ 不遵守部分取回时的内存上界。假服务器新增故障 `faultWholeBody`：代理不转发正文 FETCH，自行回一条正文字面量为指定字节数的 `BODY[]` 响应，无视请求中的 `<0.N>`；字面量由代理分块合成，不经 imapmemserver。新增 `TestScanIgnoredPartialBoundsMemory`：`maxMessageSize` 为 1 KiB，字面量 32 MiB，断言结果为 `TooLarge`、`Raw` 为 nil，且 `Scan` 前后 `runtime.MemStats.TotalAlloc` 的增量小于 16 MiB。本机实测修正后的分配量约为 0.2 MB，`-race` 下约 3 MB；去掉 `LimitReader` 的变异分配约 157 MB，被杀死。
+
+⑥ 源码检查的接收者。`isClientMethod` 原先按选择的接收者（`selection.Recv()`）判断：经嵌入字段提升的方法，接收者是外层结构体；经接口值调用时，接收者是接口。两者都绕过了白名单与 `Select`、`Fetch` 的参数检查。现在按方法的声明接收者判断，提升的方法因此也在检查之内。接收者为接口时，若该方法与 `*imapclient.Client` 的某个方法同名同签名，也按 Client 的方法检查，因为 Client 或嵌入它的类型赋给该接口后，经接口调用发出的是同一条命令。检查落在调用处，不必追踪 Client 被赋值或转换为接口的每一处；嵌入本身也不另行报告，因为提升的方法已在检查之内。`TestSourceProblemsDetectsViolations` 增加三例：经嵌入调用 `UnselectAndExpunge`，经嵌入以 nil 选项调用 `Select`，经接口调用 `UnselectAndExpunge`。改回 `selection.Recv()` 的变异被前两例杀死，去掉接口匹配的变异被第三例杀死。反射调用仍在检查之外，本包没有导入 `reflect`。
+
+⑦ 到达 `Max` 后的退避。原 `TestWatcherIdlePhaseFaults` 只断言前三个间隔每次增长 1.5 倍，到达 `Max` 之后只检查不低于 `Initial`，拦不住「到达上限后回到 `Initial`」。现在另断言每个间隔都不低于前一个间隔与 `Max` 中较小者的 (1−`Jitter`) 倍，再减去 50ms 的调度余量。用例等待 7 次登录，得到 6 个间隔，约为 100、200、400、800、400、400ms，其中 800ms 由登录上限造成；等待上限放宽为 2 倍 `waitLimit`，为此把 `waitFor` 拆出 `waitForWithin`。审查给出的变异（2×d 超过 `Max` 时基准归零）使第 5 个间隔降到约 220ms，被杀死。「补扫成功复位」、去掉登录上限、上限的 `>=` 改为 `>` 三个原有变异仍被本用例杀死；另复查了去掉最小登录间隔（被 `TestWatcherLoginSpacing` 杀死）与 IDLE 正常结束后不复位（被 `TestWatcherReconnectsWithBackoff` 杀死）两个原有变异。
+
+⑧ 邮件数不变时的 EXISTS（未改代码）。审查实验表明：服务器若在每条 UID SEARCH 的响应中都附带 `* N EXISTS`（邮件数不变，RFC 3501 允许），每轮补扫后通道中都有信号，Watcher 就不再发 IDLE，而是不限速地连续发 EXAMINE 与 UID SEARCH（1 秒内约 8000 次）。按 Step 5，处理函数对任何 EXISTS 都留下信号，通道是唯一的状态，修改须经维护者确认，本任务不改代码。已列入 L1 规程第 4 步的记录项与「风险与后续」。
+
+修正后的验证：`go test -race -count=3 -cover ./internal/mail/imap/` 通过，覆盖率 97.5%；新增与改动的用例 `-race -count=10` 通过；与 sqlite、security 各包的 `-race -count=3` 并行运行时通过。`CGO_ENABLED=0 go test ./internal/mail/imap/`、全仓 `GOOS=windows go vet ./...` 与 `GOOS=linux go vet ./...`、`make check`（总覆盖率 94.12%）、`make secrets` 均通过。上述变异共 23 个（针对本次修正的 18 个，复查原有的 5 个），全部被杀死。测试仍只在 macOS 上运行，Linux 由 CI 运行。
 
 ### Task 12：`init` 命令
 
@@ -2076,7 +2096,7 @@ git diff --check
    - 纯文本与 HTML 的结构；
    - 字符集与传输编码；
    - 令牌是否留在引用中。
-4. 记录 IDLE 推送延迟，以及服务器多久断开连接。
+4. 记录 IDLE 推送延迟，以及服务器多久断开连接；另记录邮件数不变时，UID SEARCH 与 UID FETCH 的响应中是否仍带 `* N EXISTS`（见「风险与后续」中关于连续补扫的一条）。
 5. 可选项，须维护者另行授权：
    - 假期自动回复；
    - 退信样本；
@@ -2124,6 +2144,7 @@ L1 的结论（能力、实际投递 ID 的来源、各客户端的线程头与�
 - `Token` 作为其他包结构体的**未导出**字段时，`fmt` 会打印其原始字节；4b 以装配后的日志金丝雀测试覆盖实际路径。
 - go-smtp 的 `DialTLS` 拨号期限固定为 30 秒且不响应 ctx，进程退出时最多多等 30 秒；已确认的决策只允许 `DialTLS`，不为此改用其他拨号方式。
 - IMAP 的期限、IDLE 重建间隔与退避数值、2 MiB 正文上限都是推断，以 L1 的实测结果调整，调整写入本清单。
+- 服务器若在邮件数不变时也在 UID SEARCH 或 UID FETCH 的响应中附带 `* N EXISTS`（RFC 3501 允许），按 Task 11 Step 5，每轮补扫后都会留下信号，Watcher 不再发 IDLE，而是不限速地连续补扫。4a 按已确认的契约保留现状，L1 第 4 步记录 QQ 是否如此。若是，可以只在邮件数超过 EXAMINE 时的数目时留下信号，或给两轮补扫之间设最小间隔；这会改动 Step 5「通道是唯一状态」的约定，须经维护者确认。
 - init 不回显读入授权码的终端路径需要伪终端，没有自动测试，由 L1 准备步骤中维护者实际运行 init 验证。
 - 键控摘要对解析器输出计算，依赖解析器的确定性。4b 或以后修改引用、签名的剥离规则时，同一封信重新取回（例如 UIDVALIDITY 变化后的全量补扫）会得到不同摘要，从「重复」变成 `ErrMessageConflict` 误报。修改解析规则时须评估这一点，必要时让补扫中的冲突只作告警，或给摘要加版本（在 4b 定）。
 - 令牌验证中有两个问题留给 4b 在 L1 之后定稿：retired 密钥签发的令牌是否仍接受；有效期按本地处理时间还是 IMAP INTERNALDATE 判断。按本地处理时间，服务停机或 Keychain 不可用期间到达、过期之后才处理的合法回复会被拒绝；INTERNALDATE 由服务器写入，不是发件人提供的 Date，但它是否可信、QQ 如何设置要由 L1 确认。去重排在有效期与任务状态检查之前的初步建议见「4b 与 4a 的衔接」。

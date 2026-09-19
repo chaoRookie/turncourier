@@ -91,6 +91,9 @@ func TestSourceProblemsDetectsViolations(t *testing.T) {
 		{"Move", header + good + "func bad(c *imapclient.Client) { _ = c.Move(imap.UIDSetNum(1), \"Junk\") }\n", "Move"},
 		{"method value", header + good + "func bad(c *imapclient.Client) { f := c.Store; _ = f }\n", "Store"},
 		{"method expression", header + good + "func bad(c *imapclient.Client) { _ = (*imapclient.Client).Expunge(c) }\n", "Expunge"},
+		{"promoted method", header + good + "type wrapped struct{ *imapclient.Client }\n\nfunc bad(w wrapped) { _ = w.UnselectAndExpunge() }\n", "UnselectAndExpunge"},
+		{"promoted Select", header + good + "type wrapped struct{ *imapclient.Client }\n\nfunc bad(w wrapped) { _ = w.Select(\"INBOX\", nil) }\n", "read-only"},
+		{"interface method", header + good + "func bad(c *imapclient.Client) {\n\tvar x interface{ UnselectAndExpunge() *imapclient.Command } = c\n\t_ = x.UnselectAndExpunge()\n}\n", "UnselectAndExpunge"},
 		{"ReadOnly false", header + good + "func bad(c *imapclient.Client) { _ = c.Select(\"INBOX\", &imap.SelectOptions{ReadOnly: false}) }\n", "read-only"},
 		{"nil select options", header + good + "func bad(c *imapclient.Client) { _ = c.Select(\"INBOX\", nil) }\n", "read-only"},
 		{"select options variable", header + good + "func bad(c *imapclient.Client, o *imap.SelectOptions) { _ = c.Select(\"INBOX\", o) }\n", "read-only"},
@@ -135,9 +138,10 @@ func TestSourceProblemsDetectsViolations(t *testing.T) {
 }
 
 // sourceProblems 类型检查 files 并返回违反源码约定的位置说明（已排序）：任何点导入；imapclient 中 DialTLS 以外的函数；
-// *imapclient.Client 白名单以外的方法；Select 与 Fetch 不是直接调用；Select 的选项不是带 ReadOnly: true 的 imap.SelectOptions 字面量；
-// Fetch 的第一个参数静态类型不是 imap.UIDSet；正文或二进制数据项字面量没有 Peek: true；出现禁用标识符；
-// tls.Config 字面量不是恰好一个、不在 tlsConfig 中或字段不是恰为 ServerName、RootCAs、MinVersion；tlsConfig 以外引用了 tls.Config。
+// *imapclient.Client 白名单以外的方法（含经嵌入提升的方法与同名同签名的接口方法）；Select 与 Fetch 不是直接调用；
+// Select 的选项不是带 ReadOnly: true 的 imap.SelectOptions 字面量；Fetch 的第一个参数静态类型不是 imap.UIDSet；
+// 正文或二进制数据项字面量没有 Peek: true；出现禁用标识符；tls.Config 字面量不是恰好一个、不在 tlsConfig 中
+// 或字段不是恰为 ServerName、RootCAs、MinVersion；tlsConfig 以外引用了 tls.Config。
 func sourceProblems(fset *token.FileSet, files []*ast.File) ([]string, error) {
 	info := &types.Info{
 		Types:      map[ast.Expr]types.TypeAndValue{},
@@ -148,6 +152,11 @@ func sourceProblems(fset *token.FileSet, files []*ast.File) ([]string, error) {
 	if _, err := conf.Check(packagePath, fset, files, info); err != nil {
 		return nil, err
 	}
+	clientPkg, err := sourceImporter().Import(imapclientPath)
+	if err != nil {
+		return nil, err
+	}
+	client := types.NewMethodSet(types.NewPointer(clientPkg.Scope().Lookup("Client").Type()))
 	var problems []string
 	report := func(pos token.Pos, format string, args ...any) {
 		problems = append(problems, fmt.Sprintf("%s: %s", fset.Position(pos), fmt.Sprintf(format, args...)))
@@ -181,7 +190,7 @@ func sourceProblems(fset *token.FileSet, files []*ast.File) ([]string, error) {
 					}
 				case *ast.CallExpr:
 					sel, ok := n.Fun.(*ast.SelectorExpr)
-					if !ok || !isClientMethod(info, sel) {
+					if !ok || !isClientMethod(info, client, sel) {
 						break
 					}
 					called[sel] = true
@@ -196,7 +205,7 @@ func sourceProblems(fset *token.FileSet, files []*ast.File) ([]string, error) {
 						}
 					}
 				case *ast.SelectorExpr:
-					if !isClientMethod(info, n) {
+					if !isClientMethod(info, client, n) {
 						break
 					}
 					if !slices.Contains(allowedClientMethods, n.Sel.Name) {
@@ -233,13 +242,21 @@ func sourceProblems(fset *token.FileSet, files []*ast.File) ([]string, error) {
 	return problems, nil
 }
 
-// isClientMethod 判断选择器是否取的是接收者为 *imapclient.Client 的方法（方法值、方法调用或方法表达式）。
-func isClientMethod(info *types.Info, sel *ast.SelectorExpr) bool {
+// isClientMethod 判断选择器取的是否为 *imapclient.Client 的方法（方法值、方法调用或方法表达式）。按方法的声明接收者判断，
+// 经嵌入字段提升的方法因此也算；接口方法与 client（*imapclient.Client 的方法集）中某个方法同名同签名时同样算，
+// 因为 Client 或嵌入它的类型赋给该接口后，经接口调用发出的是同一条命令。
+func isClientMethod(info *types.Info, client *types.MethodSet, sel *ast.SelectorExpr) bool {
 	selection, ok := info.Selections[sel]
 	if !ok || selection.Kind() == types.FieldVal {
 		return false
 	}
-	return isNamed(deref(selection.Recv()), imapclientPath, "Client")
+	fn := selection.Obj().(*types.Func)
+	recv := fn.Signature().Recv().Type()
+	if isNamed(deref(recv), imapclientPath, "Client") {
+		return true
+	}
+	m := client.Lookup(nil, fn.Name())
+	return types.IsInterface(recv) && m != nil && types.Identical(m.Obj().Type(), fn.Type())
 }
 
 // isReadOnlySelect 判断表达式是否为带 ReadOnly: true 的 &imap.SelectOptions{…} 字面量。

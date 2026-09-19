@@ -123,8 +123,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 			kind, pending = StatusCredentialsUnavailable, b.Max
 			continue
 		}
-		r.logins = append(r.logins, time.Now())
 		s, err := Dial(ctx, w.Config, password)
+		// 在拨号返回后登记：此刻不早于 LOGIN 发出的时刻，按它计算的间隔与窗口不会因拨号、问候较慢而少算；拨号失败也计入。
+		r.logins = append(r.logins, time.Now())
 		switch {
 		case ctx.Err() != nil:
 			if s != nil {
@@ -158,7 +159,7 @@ type runner struct {
 	junk         bool        // 上一次 LIST 是否含 Junk，初值为存在
 	idleOff      bool        // IDLE 已连续超时 2 次，本次 Run 余下时间改为轮询
 	idleTimeouts int         // Idle 连续返回 ErrTimeout 的次数
-	logins       []time.Time // 登录（拨号）时刻，只保留最近一个 LoginWindow 内的
+	logins       []time.Time // 登录时刻（拨号返回时），只保留最近一个 LoginWindow 内的
 	reconnect    retry       // 重连退避
 	local        retry       // Cursor 与 Handle 失败后的同连接重试退避
 }
@@ -263,9 +264,14 @@ func (r *runner) drain(ctx context.Context, s *Session, folder string) error {
 
 // wait 等待新邮件：在 INBOX 上 IDLE，服务器不支持或本次 Run 已降级时等待 Poll。
 // Idle 连续 2 次超时后降级并发出一次 idle_disabled；一次 IDLE 正常结束即复位重连退避。
+// 补扫期间已收到 EXISTS 时不发送 IDLE，直接回到补扫（下一次 Scan 排空信号）；这不是一次 IDLE 正常结束，
+// 所以不复位退避，也不改变 IDLE 连续超时的计数。
 func (r *runner) wait(ctx context.Context, s *Session) error {
 	if r.idleOff || !s.caps.Has(imap.CapIdle) {
 		return s.sleep(ctx, r.t.Poll)
+	}
+	if len(s.exists) > 0 {
+		return nil
 	}
 	_, err := s.Idle(ctx)
 	if errors.Is(err, ErrTimeout) {

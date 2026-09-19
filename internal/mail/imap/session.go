@@ -261,18 +261,9 @@ func (s *Session) do(ctx context.Context, step string, d time.Duration, fn func(
 	go func() { done <- fn() }()
 	timer := time.NewTimer(d)
 	defer timer.Stop()
+	var err error
 	select {
-	case err := <-done:
-		var imapErr *imap.Error
-		switch {
-		case err == nil:
-			return nil
-		case errors.As(err, &imapErr):
-			return &rejectedError{step: step, typ: imapErr.Type}
-		default:
-			s.shutdown()
-			return fmt.Errorf("%w (%s)", ErrClosed, step)
-		}
+	case err = <-done:
 	case <-timer.C:
 		s.shutdown()
 		return fmt.Errorf("%w (%s)", ErrTimeout, step)
@@ -280,6 +271,22 @@ func (s *Session) do(ctx context.Context, step string, d time.Duration, fn func(
 		s.shutdown()
 		return fmt.Errorf("imap: %s: %w", step, ctx.Err())
 	case <-s.client.Closed():
+		// 库在关闭 Closed 之前已以错误结束全部待完成命令，fn 随即返回。服务器可能回带标签的 NO 后立即断开（例如拒绝 LOGIN），
+		// 这时两个分支同时就绪、select 随机选择，所以仍按 fn 的结果分类，认证失败才不会被当成普通断开；至多等待 IdleStop。
+		s.shutdown()
+		select {
+		case err = <-done:
+		case <-time.After(s.t.IdleStop):
+			return fmt.Errorf("%w (%s)", ErrClosed, step)
+		}
+	}
+	var imapErr *imap.Error
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &imapErr):
+		return &rejectedError{step: step, typ: imapErr.Type}
+	default:
 		s.shutdown()
 		return fmt.Errorf("%w (%s)", ErrClosed, step)
 	}

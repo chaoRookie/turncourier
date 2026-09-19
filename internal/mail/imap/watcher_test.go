@@ -332,14 +332,15 @@ func TestWatcherResetsBackoffAfterHealthyPeriod(t *testing.T) {
 }
 
 // TestWatcherIdlePhaseFaults 覆盖只在 IDLE 阶段出现的故障：每次进入 IDLE 后代理即断开而补扫每次都成功。
-// 补扫成功不复位退避，登录间隔按倍数增长直到 Max；任一 LoginWindow 内的登录不超过 MaxLogins，两次登录至少间隔 Initial。
+// 补扫成功不复位退避，登录间隔按倍数增长直到 Max，此后不回落；任一 LoginWindow 内的登录不超过 MaxLogins，两次登录至少间隔 Initial。
 func TestWatcherIdlePhaseFaults(t *testing.T) {
 	fs := newFakeServer(t, proxyOptions{})
 	fs.addRule(&rule{command: "IDLE", kind: faultDisconnect})
 	b := Backoff{Initial: 100 * time.Millisecond, Max: 400 * time.Millisecond, AuthPause: time.Second, Jitter: 0.01, MaxLogins: 4, LoginWindow: 1500 * time.Millisecond}
 	h := newHarness(t, fs, testTimeouts(), b)
 	h.start()
-	waitFor(t, "7 logins", func() bool { return fs.count("LOGIN") >= 7 })
+	// 7 次登录（6 个间隔，约 100、200、400、800、400、400ms）约需 2.5 秒，接近 waitLimit，这里放宽。
+	waitForWithin(t, "7 logins", 2*waitLimit, func() bool { return fs.count("LOGIN") >= 7 })
 	h.stop()
 
 	logins := loginTimes(fs)
@@ -347,10 +348,9 @@ func TestWatcherIdlePhaseFaults(t *testing.T) {
 	for i := 1; i < len(logins); i++ {
 		gaps = append(gaps, logins[i].Sub(logins[i-1]))
 	}
-	// 代理记录的是收到 LOGIN 的时刻，比 Watcher 登记登录的时刻晚一个握手，各次的延迟略有差异，比较时留出余量。
-	const slack = 100 * time.Millisecond
+	// Watcher 在拨号返回后登记登录时刻，它不早于代理收到 LOGIN 的时刻，所以按代理记录比较间隔与窗口不需要余量。
 	for i, gap := range gaps {
-		if gap < b.Initial-slack/5 {
+		if gap < b.Initial {
 			t.Errorf("gap %d = %v, below Initial", i, gap)
 		}
 	}
@@ -361,10 +361,16 @@ func TestWatcherIdlePhaseFaults(t *testing.T) {
 			break
 		}
 	}
+	// 每个间隔都不低于前一个间隔与 Max 中较小者（扣除抖动与 50ms 调度余量）：到达 Max 之后退避不回落到 Initial。
+	for i := 1; i < len(gaps); i++ {
+		if floor := time.Duration(float64(min(gaps[i-1], b.Max))*(1-b.Jitter)) - 50*time.Millisecond; gaps[i] < floor {
+			t.Errorf("login gap %d = %v, below %v after reaching it; gaps %v", i, gaps[i], floor, gaps)
+		}
+	}
 	for i := range logins {
 		n := 0
 		for _, at := range logins[i:] {
-			if at.Sub(logins[i]) < b.LoginWindow-slack {
+			if at.Sub(logins[i]) < b.LoginWindow {
 				n++
 			}
 		}
@@ -374,6 +380,48 @@ func TestWatcherIdlePhaseFaults(t *testing.T) {
 	}
 	if n := fs.count("UID SEARCH"); n < 7 {
 		t.Errorf("UID SEARCH count = %d; every round should have scanned", n)
+	}
+}
+
+// TestWatcherLoginWindowUsesLoginTime 覆盖登录频率上限按 LOGIN 发出的时刻计算：第一个连接的握手很慢，LOGIN 远晚于拨号开始，
+// 任一 LoginWindow 内代理收到的 LOGIN 仍不超过 MaxLogins。若按拨号开始的时刻计算，窗口会提前结束，第三次 LOGIN 落在窗口内。
+func TestWatcherLoginWindowUsesLoginTime(t *testing.T) {
+	fs := newFakeServer(t, proxyOptions{slowHandshake: 400 * time.Millisecond})
+	fs.addRule(&rule{command: "LOGIN", kind: faultDisconnect})
+	b := Backoff{Initial: 50 * time.Millisecond, Max: 50 * time.Millisecond, AuthPause: time.Second, Jitter: 0.01, MaxLogins: 2, LoginWindow: 600 * time.Millisecond}
+	h := newHarness(t, fs, testTimeouts(), b)
+	h.start()
+	waitFor(t, "3 logins", func() bool { return fs.count("LOGIN") >= 3 })
+	h.stop()
+	logins := loginTimes(fs)
+	if d := logins[2].Sub(logins[0]); d < b.LoginWindow {
+		t.Errorf("3 logins within %v, want at most %d in any %v", d, b.MaxLogins, b.LoginWindow)
+	}
+}
+
+// TestWatcherPendingExistsIsNotIdle 覆盖补扫期间收到的 EXISTS：Watcher 不发送 IDLE 就回到补扫，这不是一次 IDLE 正常结束，
+// 既不复位重连退避，也不打断 IDLE 连续超时的计数。每个连接的 UID SEARCH 响应前都注入一条 EXISTS，IDLE 只回无标签 BAD：
+// 退避依次约为 Initial、2×Initial，两次 IDLE 超时后发出 idle_disabled。
+func TestWatcherPendingExistsIsNotIdle(t *testing.T) {
+	fs := newFakeServer(t, proxyOptions{noJunk: true})
+	inject := &rule{command: "UID SEARCH", kind: faultInject, exists: []uint32{7}, limit: 1}
+	fs.addRule(inject)
+	fs.addRule(&rule{command: "IDLE", kind: faultBAD, hook: func() {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+		inject.used = 0 // 下一个连接的第一次 UID SEARCH 再注入一次
+	}})
+	b := testBackoff()
+	h := newHarness(t, fs, testTimeouts(), b)
+	h.start()
+	h.waitStatus(StatusIdleDisabled, 1)
+	h.waitStatus(StatusBackoff, 2)
+	h.stop()
+	backoffs := h.statusesOf(StatusBackoff)
+	assertNear(t, backoffs[0].Delay, b.Initial, "first backoff")
+	assertNear(t, backoffs[1].Delay, 2*b.Initial, "second backoff")
+	if n := fs.count("IDLE"); n != 2 {
+		t.Errorf("IDLE count = %d, want 2", n)
 	}
 }
 
@@ -555,29 +603,43 @@ func TestWatcherExistsDuringFetch(t *testing.T) {
 	}
 }
 
-// TestWatcherAuthFailure 覆盖认证失败：发出 auth_failed，Delay 等于 AuthPause，暂停期间没有新的 LOGIN。
+// TestWatcherAuthFailure 覆盖认证失败：发出 auth_failed，Delay 等于 AuthPause，暂停期间没有新的 LOGIN，也不按普通断开退避。
+// 服务器回 NO 后立即断开时同样如此。
 func TestWatcherAuthFailure(t *testing.T) {
-	fs := newFakeServer(t, proxyOptions{})
-	b := testBackoff()
-	h := newHarness(t, fs, testTimeouts(), b)
-	wrong := strings.Repeat("qx", 8)
-	h.w.Password = func(context.Context) (string, error) { return wrong, nil }
-	h.start()
-	h.waitStatus(StatusAuthFailed, 1)
-	time.Sleep(b.AuthPause - 150*time.Millisecond)
-	if n := fs.count("LOGIN"); n != 1 {
-		t.Errorf("LOGIN count during AuthPause = %d, want 1", n)
-	}
-	h.waitStatus(StatusAuthFailed, 2)
-	h.stop()
-	for _, s := range h.statusesOf(StatusAuthFailed) {
-		if s.Delay != b.AuthPause {
-			t.Errorf("auth_failed delay = %v, want %v", s.Delay, b.AuthPause)
-		}
-	}
-	logins := loginTimes(fs)
-	if len(logins) < 2 || logins[1].Sub(logins[0]) < b.AuthPause {
-		t.Errorf("logins %v are closer than AuthPause", logins)
+	for _, tc := range []struct {
+		name  string
+		close bool // 服务器回 NO 后立即关闭连接
+	}{{"rejected", false}, {"rejected then closed", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeServer(t, proxyOptions{})
+			if tc.close {
+				fs.addRule(&rule{command: "LOGIN", kind: faultRejectClose})
+			}
+			b := testBackoff()
+			h := newHarness(t, fs, testTimeouts(), b)
+			wrong := strings.Repeat("qx", 8)
+			h.w.Password = func(context.Context) (string, error) { return wrong, nil }
+			h.start()
+			h.waitStatus(StatusAuthFailed, 1)
+			time.Sleep(b.AuthPause - 150*time.Millisecond)
+			if n := fs.count("LOGIN"); n != 1 {
+				t.Errorf("LOGIN count during AuthPause = %d, want 1", n)
+			}
+			h.waitStatus(StatusAuthFailed, 2)
+			h.stop()
+			for _, s := range h.statusesOf(StatusAuthFailed) {
+				if s.Delay != b.AuthPause {
+					t.Errorf("auth_failed delay = %v, want %v", s.Delay, b.AuthPause)
+				}
+			}
+			if n := len(h.statusesOf(StatusBackoff)); n != 0 {
+				t.Errorf("backoff statuses = %d; a rejected LOGIN must pause, not back off", n)
+			}
+			logins := loginTimes(fs)
+			if len(logins) < 2 || logins[1].Sub(logins[0]) < b.AuthPause {
+				t.Errorf("logins %v are closer than AuthPause", logins)
+			}
+		})
 	}
 }
 
@@ -722,7 +784,7 @@ func TestWatcherLoginSpacing(t *testing.T) {
 	h.stop()
 	logins := loginTimes(fs)
 	for i := 1; i < len(logins); i++ {
-		if gap := logins[i].Sub(logins[i-1]); gap < b.Initial-10*time.Millisecond {
+		if gap := logins[i].Sub(logins[i-1]); gap < b.Initial {
 			t.Errorf("gap between logins %d and %d = %v, below Initial %v", i-1, i, gap, b.Initial)
 		}
 	}

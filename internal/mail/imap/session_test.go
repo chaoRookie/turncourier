@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +34,15 @@ func testTimeouts() Timeouts {
 		IdleStop: 300 * time.Millisecond,
 		Poll:     200 * time.Millisecond,
 	}
+}
+
+// deadlineTimeouts 返回期限用例的期限：除拨号（1 秒）外都为 5 秒，再由 set 把被测步骤的期限改短。
+// 步骤若换用了其他期限字段，耗时会明显超出被测期限，用例因此能发现。
+func deadlineTimeouts(set func(*Timeouts)) Timeouts {
+	tm := Timeouts{Dial: time.Second, Greeting: 5 * time.Second, Command: 5 * time.Second, Fetch: 5 * time.Second,
+		IdleAck: 5 * time.Second, IdleMax: 5 * time.Second, IdleStop: 5 * time.Second, Poll: 5 * time.Second}
+	set(&tm)
+	return tm
 }
 
 // dial 以测试密码登录假服务器；用例结束时关闭会话。
@@ -215,46 +225,54 @@ func TestCapabilities(t *testing.T) {
 }
 
 // TestCommandDeadlines 覆盖每条命令的期限：问候冻结、LOGIN 后冻结、EXAMINE 与 UID SEARCH 的无标签 BAD、
-// 正文字面量传到一半冻结、IDLE 的无标签 BAD 与进入 IDLE 后半开。每个用例都返回 ErrTimeout，耗时不超过对应期限加 1 秒，
-// 此后会话的调用都返回 ErrClosed。
+// 正文字面量传到一半冻结、IDLE 的无标签 BAD 与进入 IDLE 后半开。每个用例只把被测步骤的期限设短、其余都为 5 秒，
+// 断言返回 ErrTimeout、耗时不超过被测期限加 500ms（步骤换用其他期限字段即超出），此后会话的调用都返回 ErrClosed。
 func TestCommandDeadlines(t *testing.T) {
-	tm := testTimeouts()
+	const short, slack = 300 * time.Millisecond, 500 * time.Millisecond
 	t.Run("greeting", func(t *testing.T) {
 		fs := newFakeServer(t, proxyOptions{freezeGreeting: true})
+		tm := deadlineTimeouts(func(x *Timeouts) { x.Greeting = short })
 		start := time.Now()
 		if _, err := Dial(context.Background(), fs.config(tm), testPassword); !errors.Is(err, ErrTimeout) {
 			t.Fatalf("Dial = %v, want ErrTimeout", err)
 		}
-		assertWithin(t, start, tm.Greeting+time.Second, "Dial with a frozen greeting")
+		assertWithin(t, start, short+slack, "Dial with a frozen greeting")
 		waitFor(t, "the client to close the connection", func() bool { return fs.openConns() == 0 })
 	})
 	t.Run("login", func(t *testing.T) {
 		fs := newFakeServer(t, proxyOptions{})
 		fs.addRule(&rule{command: "LOGIN", kind: faultFreeze})
+		tm := deadlineTimeouts(func(x *Timeouts) { x.Command = short })
 		start := time.Now()
 		if _, err := Dial(context.Background(), fs.config(tm), testPassword); !errors.Is(err, ErrTimeout) {
 			t.Fatalf("Dial = %v, want ErrTimeout", err)
 		}
-		assertWithin(t, start, tm.Command+time.Second, "Dial with a frozen LOGIN")
+		assertWithin(t, start, short+slack, "Dial with a frozen LOGIN")
 		waitFor(t, "the client to close the connection", func() bool { return fs.openConns() == 0 })
 	})
+	command := deadlineTimeouts(func(x *Timeouts) { x.Command = short })
+	fetch := deadlineTimeouts(func(x *Timeouts) { x.Fetch = short })
+	idleAck := deadlineTimeouts(func(x *Timeouts) { x.IdleAck = short })
+	// IdleStop 远短于 IdleMax：DONE 若换用 IdleMax，耗时约为 2 倍 IdleMax，超出上限。
+	idleEnd := deadlineTimeouts(func(x *Timeouts) { x.IdleMax, x.IdleStop = time.Second, 100*time.Millisecond })
 	for _, tc := range []struct {
 		name  string
 		rule  rule
+		tm    Timeouts
 		limit time.Duration
 		idle  bool
 	}{
-		{"examine untagged BAD", rule{command: "EXAMINE", kind: faultBAD}, tm.Command, false},
-		{"uid search untagged BAD", rule{command: "UID SEARCH", kind: faultBAD}, tm.Command, false},
-		{"size fetch untagged BAD", rule{command: "UID FETCH", contains: "RFC822.SIZE", kind: faultBAD}, tm.Fetch, false},
-		{"body literal stalls halfway", rule{command: "UID FETCH", contains: "BODY.PEEK", kind: faultFreezeAfter, bytes: 512}, tm.Fetch, false},
-		{"idle untagged BAD", rule{command: "IDLE", kind: faultBAD}, tm.IdleAck, true},
-		{"half-open during idle", rule{command: "IDLE", kind: faultFreezeAfter, bytes: len(idleContinuation)}, tm.IdleMax + tm.IdleStop, true},
+		{"examine untagged BAD", rule{command: "EXAMINE", kind: faultBAD}, command, short, false},
+		{"uid search untagged BAD", rule{command: "UID SEARCH", kind: faultBAD}, command, short, false},
+		{"size fetch untagged BAD", rule{command: "UID FETCH", contains: "RFC822.SIZE", kind: faultBAD}, fetch, short, false},
+		{"body literal stalls halfway", rule{command: "UID FETCH", contains: "BODY.PEEK", kind: faultFreezeAfter, bytes: 512}, fetch, short, false},
+		{"idle untagged BAD", rule{command: "IDLE", kind: faultBAD}, idleAck, short, true},
+		{"half-open during idle", rule{command: "IDLE", kind: faultFreezeAfter, bytes: len(idleContinuation)}, idleEnd, idleEnd.IdleMax + idleEnd.IdleStop, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newFakeServer(t, proxyOptions{})
 			fs.appendMessage(FolderInbox, testMessage(1, 4096))
-			s := dial(t, fs, tm)
+			s := dial(t, fs, tc.tm)
 			if tc.idle {
 				scan(t, s, FolderInbox, Cursor{})
 			}
@@ -270,8 +288,8 @@ func TestCommandDeadlines(t *testing.T) {
 			if !errors.Is(err, ErrTimeout) {
 				t.Fatalf("err = %v, want ErrTimeout", err)
 			}
-			assertWithin(t, start, tc.limit+time.Second, tc.name)
-			if tc.idle && tc.rule.kind == faultFreezeAfter && time.Since(start) < tm.IdleMax {
+			assertWithin(t, start, tc.limit+slack, tc.name)
+			if tc.idle && tc.rule.kind == faultFreezeAfter && time.Since(start) < tc.tm.IdleMax {
 				t.Errorf("Idle returned after %v, before IdleMax", time.Since(start))
 			}
 			assertClosed(t, fs, s)
@@ -322,7 +340,7 @@ func TestContextCancellation(t *testing.T) {
 	assertClosed(t, fs2, s2)
 }
 
-// TestServerDisconnect 覆盖服务器断开：下一次调用返回 ErrClosed。
+// TestServerDisconnect 覆盖服务器断开：下一次调用返回 ErrClosed；IDLE 进行中断开时 Idle 在 1 秒内返回 ErrClosed，不等到 IdleMax。
 func TestServerDisconnect(t *testing.T) {
 	fs := newFakeServer(t, proxyOptions{})
 	s := dial(t, fs, testTimeouts())
@@ -332,6 +350,26 @@ func TestServerDisconnect(t *testing.T) {
 		t.Fatalf("Scan after disconnect = %v, want ErrClosed", err)
 	}
 	assertClosed(t, fs, s)
+
+	fs2 := newFakeServer(t, proxyOptions{})
+	tm := testTimeouts()
+	tm.IdleMax = 5 * time.Second
+	s2 := dial(t, fs2, tm)
+	scan(t, s2, FolderInbox, Cursor{})
+	go func() {
+		deadline := time.Now().Add(waitLimit)
+		for fs2.count("IDLE") == 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(50 * time.Millisecond) // 等客户端收到继续响应、进入等待
+		fs2.disconnectAll()
+	}()
+	start := time.Now()
+	if _, err := s2.Idle(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Idle when the server disconnects = %v, want ErrClosed", err)
+	}
+	assertWithin(t, start, time.Second, "Idle when the server disconnects")
+	assertClosed(t, fs2, s2)
 }
 
 // TestExistsDuringScan 覆盖补扫中到达的 EXISTS：分别在 UID SEARCH 与 UID FETCH 的响应前注入，Scan 正常完成，
@@ -543,6 +581,29 @@ func TestScanTooLarge(t *testing.T) {
 	}
 }
 
+// TestScanIgnoredPartialBoundsMemory 覆盖服务器不遵守部分取回：正文 FETCH 回来 32 MiB 的字面量时结果为 TooLarge、Raw 为 nil，
+// 且 Scan 期间的内存分配远小于字面量，证明正文至多读取 maxMessageSize+1 字节，其余部分读出丢弃。
+func TestScanIgnoredPartialBoundsMemory(t *testing.T) {
+	setVar(t, &maxMessageSize, 1024)
+	const literal = 32 << 20
+	fs := newFakeServer(t, proxyOptions{})
+	fs.appendMessage(FolderInbox, testMessage(1, 100))
+	tm := testTimeouts()
+	tm.Fetch = 5 * time.Second // 32 MiB 要经 TLS 读出丢弃，-race 下也留足时间
+	s := dial(t, fs, tm)
+	fs.addRule(&rule{command: "UID FETCH", contains: "BODY.PEEK", kind: faultWholeBody, bytes: literal})
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	b := scan(t, s, FolderInbox, Cursor{})
+	runtime.ReadMemStats(&after)
+	if len(b.Messages) != 1 || !b.Messages[0].TooLarge || b.Messages[0].Raw != nil || b.Next.LastUID != 1 {
+		t.Fatalf("batch = %+v, want one TooLarge message without Raw", b)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc >= literal/2 {
+		t.Errorf("Scan allocated %d bytes for a %d-byte literal; the body read is not bounded", alloc, literal)
+	}
+}
+
 // TestScanBatchBytes 覆盖正文合计上限：已取回正文加下一封的大小超过上限时本批提前结束并置 More，下一批从未交付的第一封开始；
 // 恰好等于上限时仍在本批内。
 func TestScanBatchBytes(t *testing.T) {
@@ -592,7 +653,8 @@ func TestScanSkipsVanishedMessages(t *testing.T) {
 	}
 }
 
-// TestDialAuthFailed 覆盖认证失败：返回 ErrAuthFailed，错误文本不含密码。
+// TestDialAuthFailed 覆盖认证失败：返回 ErrAuthFailed，错误文本不含密码。服务器回 NO 后立即断开时同样返回 ErrAuthFailed：
+// 命令结束与连接关闭几乎同时发生，不能按先后误判为普通断开，所以重复多次以覆盖两种先后。
 func TestDialAuthFailed(t *testing.T) {
 	fs := newFakeServer(t, proxyOptions{})
 	wrong := strings.Repeat("qx", 8)
@@ -604,6 +666,13 @@ func TestDialAuthFailed(t *testing.T) {
 		t.Errorf("error text %q contains a password", err)
 	}
 	waitFor(t, "the client to close the connection", func() bool { return fs.openConns() == 0 })
+
+	fs.addRule(&rule{command: "LOGIN", kind: faultRejectClose})
+	for i := range 100 {
+		if _, err := Dial(context.Background(), fs.config(testTimeouts()), wrong); !errors.Is(err, ErrAuthFailed) {
+			t.Fatalf("Dial %d against a server that closes after NO = %v, want ErrAuthFailed", i, err)
+		}
+	}
 }
 
 // TestDialTransportSecurity 覆盖传输安全：明文入口、证书不受信任、主机名不在证书中与只支持旧版 TLS 的服务器都在发送命令前失败。
