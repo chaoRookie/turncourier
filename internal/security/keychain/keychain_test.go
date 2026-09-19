@@ -523,13 +523,15 @@ func TestTimeout(t *testing.T) {
 	}
 
 	// 写入照常完成、读回挂起；1 秒的期限给写入留足时间，使期限落在读回中。
+	// 只看本次 Set 产生的调用，避免前面超时循环留下的读取让断言空过。
 	f.security.timeout = time.Second
+	logged := len(f.calls(t))
 	err = f.security.Set(context.Background(), account, strings.Repeat("aB3", 4))
 	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrReadBackMismatch) || !strings.HasPrefix(err.Error(), "keychain set timed out") {
 		t.Errorf("read-back timeout: %v", err)
 	}
-	if calls := f.calls(t); calls[len(calls)-1].Args[0] != "find-generic-password" {
-		t.Error("deadline did not expire during the read-back")
+	if calls := f.calls(t)[logged:]; len(calls) != 2 || !slices.Equal(calls[0].Args, []string{"-i"}) || calls[1].Args[0] != "find-generic-password" {
+		t.Errorf("deadline did not expire during the read-back: %d calls", len(calls))
 	}
 
 	// 存在性检查照常完成、写入挂起；1 秒的期限给存在性检查留足时间，使期限落在写入中。
