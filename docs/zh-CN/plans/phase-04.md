@@ -690,13 +690,13 @@ func NextOutbox(from OutboxState, event OutboxEvent) (OutboxState, error)
 | UNCERTAIN → ABANDONED | 本地核对后决定不再发送，或核对为未投递时任务已关闭 |
 | PENDING → ABANDONED | 任务关闭（与关闭任务的同一事务）；领取前发现令牌将在 10 分钟内过期（`expired`）或任务已关闭（兜底）；人工放弃 |
 
-- [ ] **Step 1：写失败的测试。** 与 Phase 3 Task 2 相同的方法：测试文件中另写一份期望矩阵，穷举 5 个状态 × 5 个事件；覆盖未知状态、两个终态对所有事件非法、每个已知状态收到未知事件 `"bogus"` 时返回 `ErrInvalidOutboxTransition` 且错误文本含状态名与 `bogus`、`Valid` 的已知与未知输入（`""`、`"pending"`、回复队列的 `"QUEUED"`）。两张转移表互不共用：`NextOutbox(OutboxState("QUEUED"), OutboxClaim)` 与 `Next(State("PENDING"), Claim)` 都返回各自的非法转移错误。
-- [ ] **Step 2：** `go test ./internal/queue/` 编译失败。
-- [ ] **Step 3：** 按契约实现。
-- [ ] **Step 4：** `go test -race -cover ./internal/queue/` 通过且覆盖率 100%。
-- [ ] **Step 5：** `git commit -m "feat(queue): add outbox state machine for notifications"`
+- [x] **Step 1：写失败的测试。** 与 Phase 3 Task 2 相同的方法：测试文件中另写一份期望矩阵，穷举 5 个状态 × 5 个事件；覆盖未知状态、两个终态对所有事件非法、每个已知状态收到未知事件 `"bogus"` 时返回 `ErrInvalidOutboxTransition` 且错误文本含状态名与 `bogus`、`Valid` 的已知与未知输入（`""`、`"pending"`、回复队列的 `"QUEUED"`）。两张转移表互不共用：`NextOutbox(OutboxState("QUEUED"), OutboxClaim)` 与 `Next(State("PENDING"), Claim)` 都返回各自的非法转移错误。
+- [x] **Step 2：** `go test ./internal/queue/` 编译失败。
+- [x] **Step 3：** 按契约实现。
+- [x] **Step 4：** `go test -race -cover ./internal/queue/` 通过且覆盖率 100%。
+- [x] **Step 5：** `git commit -m "feat(queue): add outbox state machine for notifications"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** 先写测试，`go test ./internal/queue/` 编译失败（`undefined: OutboxState`、`OutboxPending`、`OutboxEvent`、`OutboxClaim` 等），再按契约实现。实现与回复队列的 `state.go` 同构：`Valid` 查 `outboxTransitions` 的键，`NextOutbox` 查两级映射，查不到时返回空状态与 `fmt.Errorf("%w: %s --%s-->", ErrInvalidOutboxTransition, from, event)`，未知状态按非法转移处理；回复队列的 `state.go` 未改动。测试在 `outbox_test.go` 中另写一份期望矩阵，穷举 5 个状态 × 5 个事件，非法组合还断言返回的状态为空；此外覆盖：状态与事件的持久化字符串值（Task 6 的表约束依赖它们）、未知状态 `""`、`"pending"`、`"BOGUS"`、每个已知状态收到 `"bogus"` 时错误文本含状态名与 `bogus`、两个终态对全部事件非法、`Valid` 对 5 个已知状态为真而对 `""`、`"pending"`、`"QUEUED"` 为假。「两张转移表互不共用」一项断言：`NextOutbox(OutboxState("QUEUED"), OutboxClaim)` 包装 `ErrInvalidOutboxTransition` 且不包装 `ErrInvalidTransition`；`Next(State("PENDING"), Claim)` 包装 `ErrInvalidTransition` 且不包装 `ErrInvalidOutboxTransition`；`State("PENDING").Valid()` 为假。新测试的辅助函数取名 `assertInvalidOutbox`，回复队列一侧复用已有的 `assertInvalid`。在仓库副本上做了 56 个变异，每次只改一处，涉及：转移表中每条转移的删除与目标改错、各状态上多出规格之外的转移（含终态上增加转移）、删去终态行、表中多出 `""`、`"pending"`、`"QUEUED"` 行；10 个状态与事件的字符串值；`Valid` 恒真、只判非空、改查回复队列的表、两表任一命中即真、先转大写再查；`NextOutbox` 查不到时退回回复队列的表、先转大写再查、错误改包装 `ErrInvalidTransition`、同时包装两个哨兵、哨兵直接取为 `ErrInvalidTransition`、`%w` 改为 `%v`、错误文本缺状态名或事件名、出错时返回原状态。全部被测试杀死（其中 3 个初次施加时因未使用或缺少导入而编译失败，补齐导入后重跑，均被杀死）。验证：`go test -race -cover ./internal/queue/` 通过，覆盖率 100%；`CGO_ENABLED=0 go test ./internal/queue/`、全仓 `GOOS=linux go vet` 与 `GOOS=windows go vet`、`make check`（含中文注释检查与 staticcheck，总覆盖率 94.52%）、`make secrets` 均通过。本任务不涉及钥匙串、网络与机密形状的测试向量。与 Task 1–4 相同，本任务的提交包含本清单的勾选与实施说明。
 
 ### Task 6：迁移 0002（含入站记录的文件夹列）、secure_delete 与实例、密钥元数据
 
