@@ -125,7 +125,7 @@ func (s *Store) AdvanceCursor(ctx context.Context, account, folder string, c Cur
 }
 
 // RecordRejection 写入被拒来信；同一 (account, folder, uid_validity, uid) 已有记录时返回原记录 ID 与 duplicate=true，不覆盖，
-// 也不再检查任务。原因码不在列表中、字段长度或空白不符时在开始事务前报错，错误文本不回显地址与 Message-ID；
+// 也不再检查任务。原因码不在列表中、字段长度或空白不符、含 NUL 或非法 UTF-8 时在开始事务前报错，错误文本不回显地址与 Message-ID；
 // TaskID 不存在时返回 ErrNotFound。received_at 取存储时钟的当前时间。
 func (s *Store) RecordRejection(ctx context.Context, r Rejection) (id int64, duplicate bool, err error) {
 	if err := r.validate(); err != nil {
@@ -163,8 +163,9 @@ func (s *Store) RecordRejection(ctx context.Context, r Rejection) (id int64, dup
 }
 
 // Rejections 按 (received_at, id) 升序返回 received_at 晚于 since 的被拒来信（按毫秒比较，恰在 since 的不返回），
-// 至多 limit 条（1–1000），越界时在查询前报错。原因码按原样返回，不按本版本的列表校验：它只用于展示，
-// 较新版本增补的原因码仍可读出。
+// 至多 limit 条（1–1000），越界时在查询前报错。它只适合查看某一时刻之后的前 limit 条，不能用来逐页读完：
+// 同一毫秒可能有多条记录，以上一页最后一条的 ReceivedAt 作为下一页的 since 会漏掉与它同一毫秒的其余记录。
+// 原因码按原样返回，不按本版本的列表校验：它只用于展示，较新版本增补的原因码仍可读出。
 func (s *Store) Rejections(ctx context.Context, since time.Time, limit int) ([]Rejection, error) {
 	if limit < 1 || limit > maxRejectionsLimit {
 		return nil, errors.New("invalid rejections query: limit must be 1-1000")
@@ -195,7 +196,8 @@ func (s *Store) Rejections(ctx context.Context, since time.Time, limit int) ([]R
 }
 
 // validate 在事务开始前检查原因码与各字段，规则与表约束一致；MessageID、Sender 与 TaskID 可为空，
-// Sender 是规范化后的地址，不含空白。长度按 Unicode 字符计，含 NUL 一律拒绝。错误文本不含地址与 Message-ID。
+// Sender 是规范化后的地址，不含空白。MessageID 与 Sender 须为合法 UTF-8 且不含 NUL，长度按 Unicode 字符计，
+// 理由同 checkMailbox。错误文本不含地址与 Message-ID。
 func (r Rejection) validate() error {
 	if err := checkMailbox(r.Account, r.Folder); err != nil {
 		return fmt.Errorf("invalid rejection: %w", err)
@@ -210,15 +212,16 @@ func (r Rejection) validate() error {
 		return errors.New("invalid rejection: message id must be empty or 3-998 characters")
 	case r.Sender != "" && (senderLen < 3 || senderLen > 254 || strings.ContainsFunc(r.Sender, unicode.IsSpace)):
 		return errors.New("invalid rejection: sender must be empty or 3-254 characters without whitespace")
-	case strings.ContainsRune(r.MessageID, 0) || strings.ContainsRune(r.Sender, 0):
-		return errors.New("invalid rejection: message id and sender must not contain NUL")
+	case !utf8.ValidString(r.MessageID) || !utf8.ValidString(r.Sender) || strings.ContainsRune(r.MessageID, 0) || strings.ContainsRune(r.Sender, 0):
+		return errors.New("invalid rejection: message id and sender must be valid UTF-8 without NUL")
 	}
 	return nil
 }
 
-// checkMailbox 检查账户与文件夹，规则与 InboundReply.validate 相同：账户为 3–254 个字符且不含空白，文件夹为 1–255 个字符、
-// 可以含空格；长度按 Unicode 字符计，与表约束中 SQLite 的 length() 一致，而 length() 遇到 NUL 即停止计数，因此含 NUL 一律拒绝。
-// 错误文本不含取值。
+// checkMailbox 检查账户与文件夹：账户为 3–254 个字符且不含空白，文件夹为 1–255 个字符、可以含空格，长度按 Unicode 字符计。
+// 两者还须为合法 UTF-8 且不含 NUL：只有这样按字符计的长度才与表约束中 SQLite 的 length() 一致（length() 遇到 NUL 即停止计数，
+// 遇到非法 UTF-8 时可能把多个字节计为一个字符），否则 Go 端判为合规的取值会在执行 SQL 后才被 CHECK 约束拒绝。
+// 与 InboundReply.validate 相比只多出合法 UTF-8 的要求，其余规则相同。错误文本不含取值。
 func checkMailbox(account, folder string) error {
 	accountLen, folderLen := utf8.RuneCountInString(account), utf8.RuneCountInString(folder)
 	switch {
@@ -226,8 +229,8 @@ func checkMailbox(account, folder string) error {
 		return errors.New("account must be 3-254 characters without whitespace")
 	case folderLen < 1 || folderLen > 255:
 		return errors.New("folder must be 1-255 characters")
-	case strings.ContainsRune(account, 0) || strings.ContainsRune(folder, 0):
-		return errors.New("account and folder must not contain NUL")
+	case !utf8.ValidString(account) || !utf8.ValidString(folder) || strings.ContainsRune(account, 0) || strings.ContainsRune(folder, 0):
+		return errors.New("account and folder must be valid UTF-8 without NUL")
 	}
 	return nil
 }

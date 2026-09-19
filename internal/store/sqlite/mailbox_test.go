@@ -115,8 +115,9 @@ func TestCursorFoldersIndependent(t *testing.T) {
 	}
 }
 
-// TestCursorValidation 验证账户为空、过短、过长或含空白，文件夹为空、256 个字符或含 NUL，UIDVALIDITY 为 0 时，
-// AdvanceCursor 在开始事务前报错（上下文已取消仍返回校验错误）且不写入；FetchCursor 对同样的账户与文件夹报错。
+// TestCursorValidation 验证账户为空、过短、过长或含空白，文件夹为空、256 个字符或含 NUL，账户或文件夹含非法 UTF-8，
+// UIDVALIDITY 为 0 时，AdvanceCursor 在开始事务前报错（上下文已取消仍返回校验错误）且不写入；FetchCursor 对同样的账户与文件夹报错。
+// 非法 UTF-8 的账户 "\xc0\x80\xc0\x80" 按 Go 计为 4 个字符、按 SQLite 的 length() 计为 2 个，须由 Go 端拒绝而不是留给 CHECK 约束。
 // 文件夹含空格、恰为 255 个字符（含非 ASCII 字符，按字符计）时可以写入与读取。
 func TestCursorValidation(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
@@ -137,6 +138,8 @@ func TestCursorValidation(t *testing.T) {
 		{"文件夹为空", botAccount, "", valid},
 		{"文件夹为 256 个字符", botAccount, strings.Repeat("f", 256), valid},
 		{"文件夹含 NUL", botAccount, "IN\x00BOX", valid},
+		{"账户含非法 UTF-8", "\xc0\x80\xc0\x80", "INBOX", valid},
+		{"文件夹含非法 UTF-8", botAccount, "IN\xffBOX", valid},
 		{"UIDVALIDITY 为 0", botAccount, "INBOX", Cursor{UIDValidity: 0, LastUID: 1}},
 	}
 	for _, tt := range tests {
@@ -269,8 +272,8 @@ func TestRecordRejectionUnknownTask(t *testing.T) {
 	}
 }
 
-// TestRecordRejectionValidation 验证原因码不在列表中、各字段长度、空白、NUL 或取值范围不符时，RecordRejection 在开始事务前
-// 报错（上下文已取消仍返回校验错误）且不写入，错误文本不含地址与 Message-ID；边界值可以写入。
+// TestRecordRejectionValidation 验证原因码不在列表中、各字段长度、空白、NUL、非法 UTF-8 或取值范围不符时，RecordRejection
+// 在开始事务前报错（上下文已取消仍返回校验错误）且不写入，错误文本不含地址与 Message-ID；边界值可以写入。
 func TestRecordRejectionValidation(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -295,10 +298,12 @@ func TestRecordRejectionValidation(t *testing.T) {
 		{"Message-ID 为 2 个非 ASCII 字符", func(r *Rejection) { r.MessageID = "<é" }},
 		{"Message-ID 超过 998 个字符", func(r *Rejection) { r.MessageID = "<" + strings.Repeat("a", 997) + ">" }},
 		{"Message-ID 含 NUL", func(r *Rejection) { r.MessageID = "<a\x00b@example.invalid>" }},
+		{"Message-ID 含非法 UTF-8", func(r *Rejection) { r.MessageID = "\xc0\x80\xc0\x80" }},
 		{"发件人为 2 个字符", func(r *Rejection) { r.Sender = "u@" }},
 		{"发件人超过 254 个字符", func(r *Rejection) { r.Sender = strings.Repeat("u", 243) + "@example.com" }},
 		{"发件人含空格", func(r *Rejection) { r.Sender = "user @example.invalid" }},
 		{"发件人含 NUL", func(r *Rejection) { r.Sender = "user\x00@example.invalid" }},
+		{"发件人含非法 UTF-8", func(r *Rejection) { r.Sender = "\xc0\x80\xc0\x80" }},
 		{"任务不存在时仍先校验字段", func(r *Rejection) { r.TaskID, r.UID = "0000000000", 0 }},
 	}
 	for _, tt := range tests {
