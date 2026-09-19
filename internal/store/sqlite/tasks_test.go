@@ -13,16 +13,18 @@ import (
 	"github.com/chaoRookie/turncourier/internal/task"
 )
 
-// openTaskStore 打开使用可调时钟与给定随机源的存储；random 为 nil 时使用 crypto/rand。
-// 返回的指针指向注入时钟的当前读数，测试修改它来推进时间；时钟位于 UTC+8，用来验证存储统一换算为 UTC。
+// openTaskStore 打开使用可调时钟、给定随机源与 kid 1 测试正文密钥的存储，并登记 (token, 1) 与 (payload, 1)；
+// random 为 nil 时使用 crypto/rand。返回的指针指向注入时钟的当前读数，测试修改它来推进时间；时钟位于 UTC+8，
+// 用来验证存储统一换算为 UTC。
 func openTaskStore(t *testing.T, random io.Reader) (*Store, *time.Time) {
 	t.Helper()
 	now := time.Date(2026, 9, 18, 16, 30, 0, 123_000_000, time.FixedZone("UTC+8", 8*60*60))
-	store, err := Open(t.Context(), dataDir(t), Options{Now: func() time.Time { return now }, Random: random})
+	store, err := Open(t.Context(), dataDir(t), Options{Now: func() time.Time { return now }, Random: random, PayloadKey: newTestPayloadKey(t, 1)})
 	if err != nil {
 		t.Fatalf("Open 返回错误: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
+	registerTestKeys(t, store)
 	return store, &now
 }
 

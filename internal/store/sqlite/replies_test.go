@@ -1,17 +1,21 @@
 // Package sqlite 的入站回复测试用临时目录中的真实 SQLite 数据库验证去重、冲突、拒绝原因、字段校验、原子性，
-// 以及 fail 与 close 对排队回复的拒绝、其他事件不改动排队回复。
+// fail 与 close 对排队回复的拒绝、其他事件不改动排队回复，以及正文的加密入队、校验、正文密钥检查与磁盘残留。
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chaoRookie/turncourier/internal/queue"
+	"github.com/chaoRookie/turncourier/internal/security/payload"
+	"github.com/chaoRookie/turncourier/internal/security/token"
 	"github.com/chaoRookie/turncourier/internal/task"
 )
 
@@ -19,23 +23,39 @@ import (
 const botAccount = "bot@example.invalid"
 
 var (
-	// digestA 是合成正文 A 的 SHA-256 摘要。
-	digestA = sha256.Sum256([]byte("synthetic reply A"))
-	// digestB 是合成正文 B 的 SHA-256 摘要。
-	digestB = sha256.Sum256([]byte("synthetic reply B"))
+	// digestA 是合成正文 A 的键控摘要。
+	digestA = bodyDigest([]byte("synthetic reply A"))
+	// digestB 是合成正文 B 的键控摘要。
+	digestB = bodyDigest([]byte("synthetic reply B"))
 )
 
-// inbound 返回任务 taskID 的一条合成入站回复：INBOX、uv=7、uid=1、<a@example.invalid>、摘要 A；测试按需修改字段。
+// bodyDigest 用 kid 1 的固定测试令牌密钥计算 body 的键控摘要（token.Key.BodyDigest），与 4b 入站流水线的算法相同；
+// 密钥字节在运行时由 bytes.Repeat 构造，源码中没有密钥字面量。kid 1、32 字节的密钥不会构造失败，失败时 panic。
+func bodyDigest(body []byte) [32]byte {
+	key, err := token.NewKey(1, bytes.Repeat([]byte{0xc3}, token.KeyLen))
+	if err != nil {
+		panic(err)
+	}
+	return key.BodyDigest(body)
+}
+
+// withBody 返回正文换为 body、摘要换为其键控摘要的 in。
+func withBody(in InboundReply, body string) InboundReply {
+	in.Body = []byte(body)
+	in.BodyDigest = bodyDigest(in.Body)
+	return in
+}
+
+// inbound 返回任务 taskID 的一条合成入站回复：INBOX、uv=7、uid=1、<a@example.invalid>、正文 A 及其摘要；测试按需修改字段。
 func inbound(taskID string) InboundReply {
-	return InboundReply{
+	return withBody(InboundReply{
 		TaskID:      taskID,
 		Account:     botAccount,
 		Folder:      "INBOX",
 		UIDValidity: 7,
 		UID:         1,
 		MessageID:   "<a@example.invalid>",
-		BodySHA256:  digestA,
-	}
+	}, "synthetic reply A")
 }
 
 // recordReply 记录入站回复，失败时终止测试。
@@ -109,8 +129,8 @@ func TestRecordReplyDeduplication(t *testing.T) {
 		name   string
 		modify func(*InboundReply)
 	}{
-		{"同 uv/uid、同 Message-ID、摘要 B", func(in *InboundReply) { in.BodySHA256 = digestB }},
-		{"新 uid、同 Message-ID、摘要 B", func(in *InboundReply) { in.UID, in.BodySHA256 = 3, digestB }},
+		{"同 uv/uid、同 Message-ID、摘要 B", func(in *InboundReply) { in.BodyDigest = digestB }},
+		{"新 uid、同 Message-ID、摘要 B", func(in *InboundReply) { in.UID, in.BodyDigest = 3, digestB }},
 		{"同 uv/uid、不同 Message-ID", func(in *InboundReply) { in.MessageID = "<b@example.invalid>" }},
 		{"同一邮件指向另一任务", func(in *InboundReply) { in.TaskID = other.ID }},
 	}
@@ -280,7 +300,7 @@ func TestRecordReplySameUIDInDifferentFolders(t *testing.T) {
 	running := startTask(t, store)
 	first := recordReply(t, store, inbound(running.ID))
 	junk := inbound(running.ID)
-	junk.Folder, junk.MessageID, junk.BodySHA256 = "Junk", "<b@example.invalid>", digestB
+	junk.Folder, junk.MessageID, junk.BodyDigest = "Junk", "<b@example.invalid>", digestB
 	second, err := store.RecordReply(t.Context(), junk)
 	if err != nil || second.Duplicate || second.Reply.State != queue.Queued || second.Reply.Seq == first.Reply.Seq {
 		t.Errorf("Junk 中同一 UID 的另一封邮件: RecordReply = %+v, %v; want 新入队且序号不同于 %d", second, err, first.Reply.Seq)
@@ -305,7 +325,7 @@ func TestRecordReplySameMessageInTwoFolders(t *testing.T) {
 		t.Errorf("Junk 中的副本: RecordReply = %+v, %v; want 原回复且 Duplicate=true", got, err)
 	}
 	requireRows(t, store, 1, 1)
-	junk.BodySHA256 = digestB
+	junk.BodyDigest = digestB
 	if got, err := store.RecordReply(t.Context(), junk); !errors.Is(err, ErrMessageConflict) {
 		t.Errorf("Junk 中同一 Message-ID 摘要不同: RecordReply = %+v, %v; want ErrMessageConflict", got, err)
 	}
@@ -372,7 +392,7 @@ func TestFailAndCloseRejectQueuedReplies(t *testing.T) {
 		var replies []Reply
 		for range n {
 			uid++
-			in := inbound(taskID)
+			in := withBody(inbound(taskID), fmt.Sprintf("synthetic reply %d", uid))
 			in.UID = uid
 			in.MessageID = fmt.Sprintf("<%d@example.invalid>", uid)
 			replies = append(replies, recordReply(t, store, in).Reply)
@@ -486,4 +506,250 @@ func TestNonTerminalEventsKeepQueuedReplies(t *testing.T) {
 		"delivery_confirmed DELIVERY_UNCERTAIN->RUNNING",
 		"turn_completed RUNNING->COMPLETED",
 	)
+}
+
+// replyCanary 是合成回复正文中的金丝雀文本，用来断言正文不以明文落盘、不出现在错误文本中。
+const replyCanary = "REPLY-CANARY"
+
+// replyPayloadOf 返回回复 seq 的正文行中的 key_id 与密文；没有正文行时终止测试。
+func replyPayloadOf(t *testing.T, s *Store, seq int64) (int, []byte) {
+	t.Helper()
+	var keyID int
+	var sealed []byte
+	if err := s.db.QueryRowContext(t.Context(), "SELECT key_id, sealed FROM reply_payloads WHERE seq = ?", seq).Scan(&keyID, &sealed); err != nil {
+		t.Fatalf("读取回复 %d 的正文行失败: %v", seq, err)
+	}
+	return keyID, sealed
+}
+
+// replyPayloadCount 返回回复 seq 的正文行数：QUEUED、DISPATCHING 与 UNCERTAIN 时为 1，进入 ACKNOWLEDGED 或 REJECTED 后为 0。
+func replyPayloadCount(t *testing.T, s *Store, seq int64) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRowContext(t.Context(), "SELECT count(*) FROM reply_payloads WHERE seq = ?", seq).Scan(&n); err != nil {
+		t.Fatalf("统计回复 %d 的正文行失败: %v", seq, err)
+	}
+	return n
+}
+
+// TestRecordReplyEncryptsBody 验证新邮件入队时正文只以密文落盘：reply_payloads 有一行，key_id 为正文密钥的 kid，
+// 密文不含金丝雀，用 (KindReply, 任务, 序号) 能还原正文；inbound_messages.body_sha256 等于传入的键控摘要，而不是正文的 SHA-256。
+func TestRecordReplyEncryptsBody(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	running := startTask(t, store)
+	in := withBody(inbound(running.ID), "synthetic reply "+replyCanary)
+	got := recordReply(t, store, in)
+	if got.Duplicate || got.Reply.State != queue.Queued {
+		t.Fatalf("RecordReply = %+v; want 新入队 QUEUED", got)
+	}
+	if n := countRows(t, store.db, "reply_payloads"); n != 1 {
+		t.Errorf("reply_payloads 行数 = %d; want 1", n)
+	}
+	keyID, sealed := replyPayloadOf(t, store, got.Reply.Seq)
+	if keyID != 1 || len(sealed) != len(in.Body)+payload.Overhead {
+		t.Errorf("正文行 key_id = %d、密文 %d 字节; want 1、%d 字节", keyID, len(sealed), len(in.Body)+payload.Overhead)
+	}
+	if bytes.Contains(sealed, []byte(replyCanary)) {
+		t.Error("密文含正文金丝雀")
+	}
+	if opened, err := newTestPayloadKey(t, 1).Open(payload.KindReply, running.ID, got.Reply.Seq, sealed); err != nil || !bytes.Equal(opened, in.Body) {
+		t.Errorf("payload.Open(KindReply, %s, %d) = %q, %v; want 原正文", running.ID, got.Reply.Seq, opened, err)
+	}
+	var digest []byte
+	if err := store.db.QueryRowContext(t.Context(),
+		"SELECT i.body_sha256 FROM inbound_messages i JOIN replies r ON r.inbound_id = i.id WHERE r.seq = ?", got.Reply.Seq).Scan(&digest); err != nil {
+		t.Fatalf("读取 body_sha256 失败: %v", err)
+	}
+	if !bytes.Equal(digest, in.BodyDigest[:]) {
+		t.Errorf("body_sha256 = %x; want 传入的键控摘要 %x", digest, in.BodyDigest)
+	}
+	if plain := sha256.Sum256(in.Body); bytes.Equal(digest, plain[:]) {
+		t.Error("body_sha256 等于正文的 SHA-256; want 键控摘要")
+	}
+}
+
+// TestRecordReplyUsesCurrentPayloadKey 验证正文行记录加密所用密钥的 kid：payload 的 active 密钥换为 kid 2 后，
+// 新回复的正文行 key_id 为 2，并能用 kid 2 的密钥派发出原正文。
+func TestRecordReplyUsesCurrentPayloadKey(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	for _, query := range []string{
+		"UPDATE crypto_keys SET state = 'retired' WHERE purpose = 'payload'",
+		"INSERT INTO crypto_keys (purpose, kid, state, key_check, created_at, updated_at) SELECT 'payload', 2, 'active', key_check, 0, 0 FROM crypto_keys WHERE purpose = 'payload'",
+	} {
+		if _, err := store.db.ExecContext(t.Context(), query); err != nil {
+			t.Fatalf("%s 失败: %v", query, err)
+		}
+	}
+	store.payloadKey = newTestPayloadKey(t, 2)
+	completed := applyEvents(t, store, startTask(t, store), task.TurnCompleted)
+	in := withBody(inbound(completed.ID), "synthetic reply for kid 2")
+	queued := recordReply(t, store, in).Reply
+	if keyID, _ := replyPayloadOf(t, store, queued.Seq); keyID != 2 {
+		t.Errorf("正文行 key_id = %d; want 2", keyID)
+	}
+	if reply, _, body, err := store.ClaimNextReply(t.Context(), completed.ID); err != nil || reply.Seq != queued.Seq || !bytes.Equal(body, in.Body) {
+		t.Errorf("ClaimNextReply = %+v, %q, %v; want 回复 %d 与原正文", reply, body, err, queued.Seq)
+	}
+}
+
+// TestRecordReplyWritesNoPayloadForRejectedOrDuplicate 验证只有入队为 QUEUED 的新邮件写正文：任务 CLOSED 时记为
+// REJECTED(task_closed) 且没有正文行；同一邮件再次记录返回 Duplicate，不增加也不改写正文行。
+func TestRecordReplyWritesNoPayloadForRejectedOrDuplicate(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	closed := applyEvents(t, store, startTask(t, store), task.Close)
+	rejected := recordReply(t, store, inbound(closed.ID))
+	if rejected.Reply.State != queue.Rejected || rejected.Reply.RejectReason != "task_closed" {
+		t.Fatalf("CLOSED 任务: RecordReply = %+v; want REJECTED(task_closed)", rejected)
+	}
+	if n := countRows(t, store.db, "reply_payloads"); n != 0 {
+		t.Errorf("REJECTED 之后 reply_payloads 行数 = %d; want 0", n)
+	}
+
+	running := startTask(t, store)
+	in := withBody(inbound(running.ID), "synthetic reply to be repeated")
+	in.UID, in.MessageID = 2, "<b@example.invalid>"
+	first := recordReply(t, store, in)
+	payloads := dumpRows(t, store.db, "SELECT seq, key_id, hex(sealed) FROM reply_payloads ORDER BY seq")
+	if again := recordReply(t, store, in); !again.Duplicate || again.Reply != first.Reply {
+		t.Fatalf("再次记录 = %+v; want 原回复且 Duplicate=true", again)
+	}
+	if after := dumpRows(t, store.db, "SELECT seq, key_id, hex(sealed) FROM reply_payloads ORDER BY seq"); len(after) != 1 || !slices.Equal(after, payloads) {
+		t.Errorf("重复记录后正文行 = %q; want 不变的 1 行 %q", after, payloads)
+	}
+}
+
+// TestRecordReplyBodyValidation 验证正文在开始事务前校验：为空、超过 payload.MaxPlaintext 或不是合法 UTF-8 时返回含
+// "invalid inbound reply" 的错误（上下文已取消时同样如此），错误文本不含正文，不写入任何行；1 字节、多字节 UTF-8 与恰为上限的正文可以入队，
+// 上限正文的密文恰为表约束允许的最大长度。
+func TestRecordReplyBodyValidation(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	running := startTask(t, store)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, tt := range []struct {
+		name string
+		body []byte
+	}{
+		{"Body 为 nil", nil},
+		{"Body 为空", []byte{}},
+		{"Body 超过上限", bytes.Repeat([]byte("a"), payload.MaxPlaintext+1)},
+		{"Body 不是合法 UTF-8", []byte(replyCanary + "\xff")},
+		{"Body 含截断的多字节字符", []byte(replyCanary + "\xe4\xb8")},
+	} {
+		in := inbound(running.ID)
+		in.Body = tt.body
+		got, err := store.RecordReply(ctx, in)
+		if err == nil || !strings.Contains(err.Error(), "invalid inbound reply") || errors.Is(err, context.Canceled) {
+			t.Errorf("%s: RecordReply = %+v, %v; want 含 \"invalid inbound reply\" 的错误而不是 context.Canceled", tt.name, got, err)
+		}
+		if err != nil && strings.Contains(err.Error(), replyCanary) {
+			t.Errorf("%s: 错误文本含正文: %v", tt.name, err)
+		}
+	}
+	requireRows(t, store, 0, 0)
+
+	for i, body := range [][]byte{[]byte("x"), []byte("中文回复"), bytes.Repeat([]byte("a"), payload.MaxPlaintext)} {
+		in := withBody(inbound(running.ID), string(body))
+		in.UID, in.MessageID = uint32(i+1), fmt.Sprintf("<boundary-%d@example.invalid>", i)
+		got := recordReply(t, store, in)
+		if got.Duplicate || got.Reply.State != queue.Queued {
+			t.Errorf("%d 字节正文: RecordReply = %+v; want 新入队", len(body), got)
+		}
+		if _, sealed := replyPayloadOf(t, store, got.Reply.Seq); len(sealed) != len(body)+payload.Overhead {
+			t.Errorf("%d 字节正文的密文 = %d 字节; want %d", len(body), len(sealed), len(body)+payload.Overhead)
+		}
+	}
+}
+
+// TestRecordReplyRequiresPayloadKey 验证没有可用的正文密钥时不记录回复：PayloadKey 为 nil 时在开始事务前返回
+// ErrPayloadKeyUnavailable（上下文已取消时同样如此）；正文密钥的 kid 未登记或已不是 active 时在事务内返回同一错误。
+// 三种情况对新邮件与已记录过的同一邮件都成立，且不写入任何行。
+func TestRecordReplyRequiresPayloadKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		canceled bool
+		setup    func(t *testing.T, s *Store)
+	}{
+		{"没有正文密钥", true, func(t *testing.T, s *Store) { s.payloadKey = nil }},
+		{"kid 未登记", false, func(t *testing.T, s *Store) { s.payloadKey = newTestPayloadKey(t, 2) }},
+		{"kid 已不是 active", false, func(t *testing.T, s *Store) {
+			if _, err := s.db.ExecContext(t.Context(), "UPDATE crypto_keys SET state = 'retired' WHERE purpose = 'payload'"); err != nil {
+				t.Fatalf("修改密钥状态失败: %v", err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, _ := openTaskStore(t, nil)
+			running := startTask(t, store)
+			recorded := inbound(running.ID)
+			recordReply(t, store, recorded)
+			fresh := withBody(inbound(running.ID), "synthetic reply without key")
+			fresh.UID, fresh.MessageID = 2, "<b@example.invalid>"
+			tt.setup(t, store)
+			ctx := t.Context()
+			if tt.canceled {
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = canceled
+			}
+			for name, in := range map[string]InboundReply{"新邮件": fresh, "已记录的邮件": recorded} {
+				if got, err := store.RecordReply(ctx, in); !errors.Is(err, ErrPayloadKeyUnavailable) {
+					t.Errorf("%s: RecordReply = %+v, %v; want ErrPayloadKeyUnavailable", name, got, err)
+				}
+			}
+			requireRows(t, store, 1, 1)
+			if n := countRows(t, store.db, "reply_payloads"); n != 1 {
+				t.Errorf("reply_payloads 行数 = %d; want 1", n)
+			}
+		})
+	}
+}
+
+// TestRecordReplyPayloadAtomic 用测试内创建的触发器让正文行写入失败，验证入站记录与回复随事务一起回滚；
+// 删除触发器后同一邮件可以正常入队并写入正文。
+func TestRecordReplyPayloadAtomic(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	running := startTask(t, store)
+	if _, err := store.db.ExecContext(t.Context(),
+		"CREATE TRIGGER boom BEFORE INSERT ON reply_payloads BEGIN SELECT RAISE(ABORT, 'boom'); END;"); err != nil {
+		t.Fatalf("创建触发器失败: %v", err)
+	}
+	if got, err := store.RecordReply(t.Context(), inbound(running.ID)); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("RecordReply = %+v, %v; want 触发器错误", got, err)
+	}
+	requireRows(t, store, 0, 0)
+
+	if _, err := store.db.ExecContext(t.Context(), "DROP TRIGGER boom"); err != nil {
+		t.Fatalf("删除触发器失败: %v", err)
+	}
+	if got := recordReply(t, store, inbound(running.ID)); got.Duplicate || got.Reply.State != queue.Queued || replyPayloadCount(t, store, got.Reply.Seq) != 1 {
+		t.Errorf("删除触发器后: RecordReply = %+v; want 新入队并写入正文", got)
+	}
+	requireRows(t, store, 1, 1)
+}
+
+// TestReplyPayloadResidue 以带金丝雀的正文完成「入队 → 派发 → 确认」，之后数据库文件与 WAL 文件中都找不到密文的任何
+// 32 字节片段，也找不到明文金丝雀；正文取 64 字节与 64 KiB 两种大小（与 Task 7 的通知残留测试相同）。
+func TestReplyPayloadResidue(t *testing.T) {
+	for _, size := range residueSizes {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			store, _ := openTaskStore(t, nil)
+			completed := applyEvents(t, store, startTask(t, store), task.TurnCompleted)
+			body := bytes.Repeat([]byte(replyCanary+" "), size/len(replyCanary)+1)[:size]
+			queued := recordReply(t, store, withBody(inbound(completed.ID), string(body))).Reply
+			_, sealed := replyPayloadOf(t, store, queued.Seq)
+			reply, _, got, err := store.ClaimNextReply(t.Context(), completed.ID)
+			if err != nil || reply.Seq != queued.Seq || !bytes.Equal(got, body) {
+				t.Fatalf("ClaimNextReply = %+v, %d 字节, %v; want 回复 %d 与原正文", reply, len(got), err, queued.Seq)
+			}
+			if _, _, err := store.AcknowledgeReply(t.Context(), reply.Seq); err != nil {
+				t.Fatalf("AcknowledgeReply 返回错误: %v", err)
+			}
+			if n := replyPayloadCount(t, store, reply.Seq); n != 0 {
+				t.Fatalf("确认后正文行数 = %d; want 0", n)
+			}
+			assertAbsentOnDisk(t, storeDir(t, store), sealed, []byte(replyCanary))
+		})
+	}
 }

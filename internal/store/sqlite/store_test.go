@@ -16,10 +16,11 @@ import (
 	"time"
 )
 
-// openStore 在 dir 中打开存储并在测试结束时关闭；重复关闭的错误被忽略。
+// openStore 以 kid 1 的测试正文密钥在 dir 中打开存储并在测试结束时关闭；重复关闭的错误被忽略。
+// 它不登记密钥：同一目录可能被打开多次，而密钥元数据属于数据库，需要记录回复的用例自行调用 registerTestKeys。
 func openStore(t *testing.T, dir string) *Store {
 	t.Helper()
-	store, err := Open(t.Context(), dir, Options{})
+	store, err := Open(t.Context(), dir, Options{PayloadKey: newTestPayloadKey(t, 1)})
 	if err != nil {
 		t.Fatalf("Open 返回错误: %v", err)
 	}

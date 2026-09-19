@@ -104,7 +104,7 @@ func TestEnsureInstanceConcurrently(t *testing.T) {
 // 同一用途再次登记（同一或另一 kid）返回 ErrKeyExists 且校验值不变；未登记的 kid 与用途返回 ErrNotFound；
 // 两种用途互不影响。
 func TestRegisterKey(t *testing.T) {
-	store, _ := openTaskStore(t, nil)
+	store := openStore(t, dataDir(t))
 	ctx := t.Context()
 	check := [8]byte{0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87}
 	other := [8]byte{0x87, 0x76, 0x65, 0x54, 0x43, 0x32, 0x21, 0x10}
@@ -158,7 +158,7 @@ func TestRegisterKey(t *testing.T) {
 func TestRegisterKeyNonActive(t *testing.T) {
 	for _, state := range []KeyState{KeyRetired, KeyDestroyed} {
 		t.Run(string(state), func(t *testing.T) {
-			store, _ := openTaskStore(t, nil)
+			store := openStore(t, dataDir(t))
 			ctx := t.Context()
 			if _, err := store.db.ExecContext(ctx,
 				"INSERT INTO crypto_keys (purpose, kid, state, key_check, created_at, updated_at) VALUES (?, 1, ?, ?, 0, 0)",
@@ -184,7 +184,7 @@ func TestRegisterKeyNonActive(t *testing.T) {
 // TestRegisterKeyValidation 验证 kid 为 0 或用途未知时，RegisterKey 在开始事务前报错且不写入：
 // 上下文已取消时仍返回参数错误，而不是 context.Canceled。
 func TestRegisterKeyValidation(t *testing.T) {
-	store, _ := openTaskStore(t, nil)
+	store := openStore(t, dataDir(t))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	check := [8]byte{0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87}

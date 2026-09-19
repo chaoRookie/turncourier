@@ -621,12 +621,13 @@ func TestMigrateUpgradesVersion1Data(t *testing.T) {
 		t.Errorf("同一任务第二条 DISPATCHING: err = %v; want 违反 replies_one_in_flight", err)
 	}
 
-	in := InboundReply{TaskID: tasks[0], Account: botAccount, Folder: "INBOX", UIDValidity: 7, UID: queued.uid, MessageID: queued.messageID}
-	copy(in.BodySHA256[:], queued.digest)
+	registerTestKeys(t, store)
+	in := InboundReply{TaskID: tasks[0], Account: botAccount, Folder: "INBOX", UIDValidity: 7, UID: queued.uid, MessageID: queued.messageID, Body: []byte("synthetic reply A")}
+	copy(in.BodyDigest[:], queued.digest)
 	if got, err := store.RecordReply(t.Context(), in); err != nil || !got.Duplicate || got.Reply != mustGetReply(t, store, queued.seq) {
 		t.Errorf("以 INBOX 重复记录旧行: RecordReply = %+v, %v; want 原回复 %d 且 Duplicate=true", got, err, queued.seq)
 	}
-	in.UID, in.MessageID, in.BodySHA256 = 200, "<after-upgrade@example.invalid>", digestB
+	in.UID, in.MessageID, in.Body, in.BodyDigest = 200, "<after-upgrade@example.invalid>", []byte("synthetic reply B"), digestB
 	if got := recordReply(t, store, in); got.Duplicate || got.Reply.Seq <= replySeq {
 		t.Errorf("升级后新回复 = %+v; want 新入队且序号大于升级前的序列 %d", got, replySeq)
 	}
@@ -667,6 +668,7 @@ func TestMigrateUpgradesVersion1WithoutRows(t *testing.T) {
 			if after := dumpRows(t, store.db, query); !slices.Equal(after, before) {
 				t.Errorf("升级后 sqlite_sequence = %q; want %q", after, before)
 			}
+			registerTestKeys(t, store)
 			got := recordReply(t, store, inbound("0000000001"))
 			var inboundID int64
 			if err := store.db.QueryRowContext(t.Context(), "SELECT inbound_id FROM replies WHERE seq = ?", got.Reply.Seq).Scan(&inboundID); err != nil {

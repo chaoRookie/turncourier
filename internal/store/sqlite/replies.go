@@ -1,5 +1,5 @@
-// Package sqlite 在事务中完成入站回复的去重入队、派发、确认与崩溃后的在途回复恢复；只保存元数据与正文摘要，不保存正文，
-// 也从不自动重新派发回复。
+// Package sqlite 在事务中完成入站回复的去重入队、派发、确认与崩溃后的在途回复恢复；待派发的正文只以密文落盘，
+// 在分配序号的同一事务中加密、派发时在同一事务中解密，回复进入终态时由触发器删除；从不自动重新派发回复。
 package sqlite
 
 import (
@@ -15,18 +15,20 @@ import (
 	"unicode/utf8"
 
 	"github.com/chaoRookie/turncourier/internal/queue"
+	"github.com/chaoRookie/turncourier/internal/security/payload"
 	"github.com/chaoRookie/turncourier/internal/task"
 )
 
-// InboundReply 是已通过发件人、线程与令牌校验的入站回复元数据；不含正文。
+// InboundReply 是已通过发件人、线程与令牌校验的入站回复。Body 只以密文落盘。
 type InboundReply struct {
 	TaskID      string
 	Account     string // 调用方已用 config.NormalizeAddress 规范化的机器人邮箱地址
 	Folder      string // 取回该邮件的文件夹，4b 传入 imap.Batch.Folder；1–255 个字符（按字符计，与表约束一致），不含 NUL，可以含空格
 	UIDValidity uint32
 	UID         uint32
-	MessageID   string // 与邮件头一致的原样字符串
-	BodySHA256  [32]byte
+	MessageID   string   // 与邮件头一致的原样字符串
+	BodyDigest  [32]byte // token.Key.BodyDigest(Body)，写入 body_sha256 列（原字段名 BodySHA256）
+	Body        []byte   // 解析出的新正文，1 字节到 payload.MaxPlaintext，须为合法 UTF-8
 }
 
 // Reply 是回复队列项的持久化快照；Seq 即本地入队顺序。
@@ -82,10 +84,17 @@ type knownInbound struct {
 // 任务处于 AcceptsReplies 为 true 的状态时入队为 QUEUED；否则记录为 REJECTED，原因为 task_not_accepting、task_failed 或 task_closed。
 // 同一账户、同一文件夹中 (UIDVALIDITY, UID) 已有记录，或同一账户中 Message-ID 已有记录时，Message-ID、正文摘要与任务
 // 都一致才算重复，返回原回复且不写入；任一不一致返回 ErrMessageConflict。按 Message-ID 的查找不含文件夹，
-// 同一封信在 INBOX 与 Junk 各有一份时判为重复。重复邮件不按任务的当前状态重新判定。
+// 同一封信在 INBOX 与 Junk 各有一份时判为重复。重复邮件不按任务的当前状态重新判定。摘要只做字节比较，存储层不知道令牌密钥，
+// 不校验摘要与正文是否对应。
+// 开始事务前校验 Body 并确认 PayloadKey 非空；事务内确认正文密钥的 kid 已登记为 active，二者不满足时返回
+// ErrPayloadKeyUnavailable，对重复邮件与将被拒绝的邮件同样如此（Keychain 读取失败时不处理回复）。入队为 QUEUED 时，
+// 插入 replies 取得 seq 后用 (KindReply, TaskID, seq) 加密 Body 并插入 reply_payloads；记为 REJECTED 或命中重复时不写正文。
 func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult, error) {
 	if err := in.validate(); err != nil {
 		return RecordResult{}, err
+	}
+	if s.payloadKey == nil {
+		return RecordResult{}, fmt.Errorf("%w: no payload key was loaded", ErrPayloadKeyUnavailable)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -94,6 +103,10 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 	// 提交成功后 Rollback 只返回 sql.ErrTxDone，可以安全忽略。
 	defer tx.Rollback()
 	current, err := getTask(ctx, tx, in.TaskID)
+	if err != nil {
+		return RecordResult{}, err
+	}
+	key, err := s.activePayloadKey(ctx, tx)
 	if err != nil {
 		return RecordResult{}, err
 	}
@@ -106,7 +119,7 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 		return RecordResult{}, err
 	}
 	for _, known := range []*knownInbound{byUID, byMessageID} {
-		if known != nil && (known.messageID != in.MessageID || !bytes.Equal(known.digest, in.BodySHA256[:]) || known.taskID != in.TaskID) {
+		if known != nil && (known.messageID != in.MessageID || !bytes.Equal(known.digest, in.BodyDigest[:]) || known.taskID != in.TaskID) {
 			return RecordResult{}, fmt.Errorf("%w: uid %d/%d or its message id is already recorded with a different message id, digest or task", ErrMessageConflict, in.UIDValidity, in.UID)
 		}
 	}
@@ -128,13 +141,22 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 	var inboundID, seq int64
 	if err := tx.QueryRowContext(ctx,
 		"INSERT INTO inbound_messages (account, folder, uid_validity, uid, message_id, body_sha256, task_id, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
-		in.Account, in.Folder, in.UIDValidity, in.UID, in.MessageID, in.BodySHA256[:], in.TaskID, now).Scan(&inboundID); err != nil {
+		in.Account, in.Folder, in.UIDValidity, in.UID, in.MessageID, in.BodyDigest[:], in.TaskID, now).Scan(&inboundID); err != nil {
 		return RecordResult{}, fmt.Errorf("cannot record inbound message: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx,
 		"INSERT INTO replies (inbound_id, task_id, state, reject_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING seq",
 		inboundID, in.TaskID, string(state), reason, now, now).Scan(&seq); err != nil {
 		return RecordResult{}, fmt.Errorf("cannot enqueue reply: %w", err)
+	}
+	if state == queue.Queued {
+		sealed, err := key.Seal(payload.KindReply, in.TaskID, seq, in.Body)
+		if err != nil {
+			return RecordResult{}, fmt.Errorf("cannot seal reply: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO reply_payloads (seq, key_id, sealed) VALUES (?, ?, ?)", seq, key.ID(), sealed); err != nil {
+			return RecordResult{}, fmt.Errorf("cannot store reply body: %w", err)
+		}
 	}
 	reply, err := getReply(ctx, tx, seq)
 	if err != nil {
@@ -149,6 +171,7 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 // validate 在事务开始前检查与表约束对应的长度、空白与取值范围；存储层不导入 config，地址规范化由调用方负责。
 // 长度按 Unicode 字符计，与表约束中 SQLite 的 length() 一致；length() 遇到 NUL 即停止计数，因此含 NUL 的值一律拒绝。
 // IMAP 文件夹名可以含空格（例如 Sent Messages），因此 Folder 不按空白拒绝；取值由调用方决定，存储层不限定。
+// Body 按字节计长度，须为 1 字节到 payload.MaxPlaintext 的合法 UTF-8；错误文本不含正文。
 func (in InboundReply) validate() error {
 	accountLen, messageIDLen := utf8.RuneCountInString(in.Account), utf8.RuneCountInString(in.MessageID)
 	folderLen := utf8.RuneCountInString(in.Folder)
@@ -163,6 +186,8 @@ func (in InboundReply) validate() error {
 		return errors.New("invalid inbound reply: message id must be 3-998 characters")
 	case strings.ContainsRune(in.Account, 0) || strings.ContainsRune(in.Folder, 0) || strings.ContainsRune(in.MessageID, 0):
 		return errors.New("invalid inbound reply: account, folder and message id must not contain NUL")
+	case len(in.Body) == 0 || len(in.Body) > payload.MaxPlaintext || !utf8.Valid(in.Body):
+		return errors.New("invalid inbound reply: body must be 1 byte to 1 MiB of valid UTF-8")
 	}
 	return nil
 }
@@ -183,62 +208,98 @@ func findInbound(ctx context.Context, tx *sql.Tx, where string, args ...any) (*k
 }
 
 // ClaimNextReply 在一个事务中把任务的最早 QUEUED 回复改为 DISPATCHING，
-// 记录派发前的任务状态，并执行 reply_dispatched 使任务进入 RUNNING。
+// 记录派发前的任务状态，并执行 reply_dispatched 使任务进入 RUNNING，同时返回解密后的正文。
 // 任务不存在时返回 ErrNotFound；任务不处于 CanDispatchReply 为 true 的状态、已有 DISPATCHING 或 UNCERTAIN 回复，
 // 或没有 QUEUED 回复时返回 ErrNoDispatchableReply。IMMEDIATE 事务使多个进程的并发派发串行执行，至多一个成功。
-func (s *Store) ClaimNextReply(ctx context.Context, taskID string) (Reply, Task, error) {
+// 解密在同一事务中、改动任何数据之前进行：正文行缺失返回 ErrPayloadMissing，没有密钥或 kid 不符返回 ErrPayloadKeyUnavailable，
+// 密文无法解密返回包装 payload.ErrDecrypt 的错误；三种情况都不领取，回复停在队首，需要人工处理。
+func (s *Store) ClaimNextReply(ctx context.Context, taskID string) (Reply, Task, []byte, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Reply{}, Task{}, fmt.Errorf("cannot begin transaction: %w", err)
+		return Reply{}, Task{}, nil, fmt.Errorf("cannot begin transaction: %w", err)
 	}
 	// 提交成功后 Rollback 只返回 sql.ErrTxDone，可以安全忽略。
 	defer tx.Rollback()
 	current, err := getTask(ctx, tx, taskID)
 	if err != nil {
-		return Reply{}, Task{}, err
+		return Reply{}, Task{}, nil, err
 	}
 	if !task.CanDispatchReply(current.State) {
-		return Reply{}, Task{}, fmt.Errorf("%w: task %q is %s", ErrNoDispatchableReply, taskID, current.State)
+		return Reply{}, Task{}, nil, fmt.Errorf("%w: task %q is %s", ErrNoDispatchableReply, taskID, current.State)
 	}
 	// 任务可派发时仍可能有在途回复（例如 Agent 已结束回合而回复尚未确认），必须先核对它，不能派发下一条。
 	var inFlight int
 	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM replies WHERE task_id = ? AND state IN (?, ?)",
 		taskID, string(queue.Dispatching), string(queue.Uncertain)).Scan(&inFlight); err != nil {
-		return Reply{}, Task{}, fmt.Errorf("cannot read replies: %w", err)
+		return Reply{}, Task{}, nil, fmt.Errorf("cannot read replies: %w", err)
 	}
 	if inFlight > 0 {
-		return Reply{}, Task{}, fmt.Errorf("%w: task %q has a reply in flight", ErrNoDispatchableReply, taskID)
+		return Reply{}, Task{}, nil, fmt.Errorf("%w: task %q has a reply in flight", ErrNoDispatchableReply, taskID)
 	}
 	var seq int64
 	err = tx.QueryRowContext(ctx, "SELECT seq FROM replies WHERE task_id = ? AND state = ? ORDER BY seq LIMIT 1",
 		taskID, string(queue.Queued)).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Reply{}, Task{}, fmt.Errorf("%w: task %q has no queued reply", ErrNoDispatchableReply, taskID)
+		return Reply{}, Task{}, nil, fmt.Errorf("%w: task %q has no queued reply", ErrNoDispatchableReply, taskID)
 	}
 	if err != nil {
-		return Reply{}, Task{}, fmt.Errorf("cannot read replies: %w", err)
+		return Reply{}, Task{}, nil, fmt.Errorf("cannot read replies: %w", err)
 	}
 	queued, err := getReply(ctx, tx, seq)
 	if err != nil {
-		return Reply{}, Task{}, err
+		return Reply{}, Task{}, nil, err
+	}
+	body, err := s.openReplyPayload(ctx, tx, queued)
+	if err != nil {
+		return Reply{}, Task{}, nil, err
 	}
 	next, err := nextReply(queued, queue.Queued, queue.Claim)
 	if err != nil {
-		return Reply{}, Task{}, err
+		return Reply{}, Task{}, nil, err
 	}
 	next.ResumeState = current.State
 	running, err := task.Next(current.State, task.ReplyDispatched)
 	if err != nil {
-		return Reply{}, Task{}, err
+		return Reply{}, Task{}, nil, err
 	}
 	now := s.now().UnixMilli()
 	if err := updateReply(ctx, tx, queued, next, now); err != nil {
-		return Reply{}, Task{}, err
+		return Reply{}, Task{}, nil, err
 	}
 	if err := writeTaskTransition(ctx, tx, current, task.ReplyDispatched, running, "", now); err != nil {
-		return Reply{}, Task{}, err
+		return Reply{}, Task{}, nil, err
 	}
-	return commitReply(ctx, tx, seq)
+	reply, dispatched, err := commitReply(ctx, tx, seq)
+	if err != nil {
+		return Reply{}, Task{}, nil, err
+	}
+	return reply, dispatched, body, nil
+}
+
+// openReplyPayload 在事务 tx 中读出并解密回复 r 的正文：正文行缺失返回 ErrPayloadMissing；没有正文密钥、密文的 key_id 与当前密钥
+// 不符或该 kid 未登记为 active 返回 ErrPayloadKeyUnavailable；无法解密返回包装 payload.ErrDecrypt 的错误。错误文本不含正文与密文。
+func (s *Store) openReplyPayload(ctx context.Context, tx *sql.Tx, r Reply) ([]byte, error) {
+	var keyID uint8
+	var sealed []byte
+	err := tx.QueryRowContext(ctx, "SELECT key_id, sealed FROM reply_payloads WHERE seq = ?", r.Seq).Scan(&keyID, &sealed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("reply %d: %w", r.Seq, ErrPayloadMissing)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cannot read reply body: %w", err)
+	}
+	key, err := s.activePayloadKey(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if keyID != key.ID() {
+		return nil, fmt.Errorf("%w: reply %d is sealed with key %d, not %d", ErrPayloadKeyUnavailable, r.Seq, keyID, key.ID())
+	}
+	body, err := key.Open(payload.KindReply, r.TaskID, r.Seq, sealed)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open reply %d: %w", r.Seq, err)
+	}
+	return body, nil
 }
 
 // AcknowledgeReply 在 Agent 确认收到后把 DISPATCHING 回复改为 ACKNOWLEDGED；任务状态不变。
@@ -334,7 +395,9 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error) {
 }
 
 // changeReply 在一个事务中读取回复及其任务，交给 change 经状态机计算并写入变化，提交后返回二者的最新快照。
-// 回复不存在时返回 ErrNotFound；change 返回错误时事务回滚，数据保持不变。
+// 回复不存在时返回 ErrNotFound；change 返回错误时事务回滚，数据保持不变。各操作只接受非终态的来源状态，成功后回复若处于
+// ACKNOWLEDGED 或 REJECTED，即是本次进入的终态，正文已由触发器删除，提交后执行检查点
+// （AcknowledgeReply、ResolveUncertainReply、RequeueUnsentReply 都可能如此）。
 func (s *Store) changeReply(ctx context.Context, seq int64, change func(ctx context.Context, tx *sql.Tx, r Reply, t Task, now int64) error) (Reply, Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -353,7 +416,14 @@ func (s *Store) changeReply(ctx context.Context, seq int64, change func(ctx cont
 	if err := change(ctx, tx, reply, current, s.now().UnixMilli()); err != nil {
 		return Reply{}, Task{}, err
 	}
-	return commitReply(ctx, tx, seq)
+	updated, after, err := commitReply(ctx, tx, seq)
+	if err != nil {
+		return Reply{}, Task{}, err
+	}
+	if updated.State == queue.Acknowledged || updated.State == queue.Rejected {
+		truncateWAL(ctx, s.db)
+	}
+	return updated, after, nil
 }
 
 // commitReply 重新读取回复及其任务的最新快照，然后提交事务 tx。

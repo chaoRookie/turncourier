@@ -96,6 +96,10 @@ func TestSchemaConstraints(t *testing.T) {
 	running := startTask(t, store)
 	queued := recordReply(t, store, inbound(running.ID)).Reply.Seq
 	pending := insertNotification(t, store.db, running.ID, 100)
+	// 记录回复需要已登记的密钥，并会为 QUEUED 回复写入正文；清空这两张表，使下面的直接插入从空表开始。
+	for _, table := range []string{"crypto_keys", "reply_payloads"} {
+		requireExec(t, store.db, "清空 "+table, "", "DELETE FROM "+table)
+	}
 
 	const (
 		checkFailed   = "CHECK constraint failed"
@@ -190,6 +194,8 @@ func TestPayloadTriggers(t *testing.T) {
 
 	replies := enqueueReplies(t, store, running.ID, 2)
 	acknowledged, rejected := replies[0].Seq, replies[1].Seq
+	// 记录回复时已写入正文；先删除，再由下面的直接插入验证触发器。
+	requireExec(t, db, "删除入队时写入的正文", "", "DELETE FROM reply_payloads")
 	for _, seq := range []int64{acknowledged, rejected} {
 		requireExec(t, db, "为 QUEUED 回复写入正文", "", "INSERT INTO reply_payloads (seq, key_id, sealed) VALUES (?, 1, ?)", seq, sealed)
 	}
