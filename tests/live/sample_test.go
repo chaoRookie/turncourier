@@ -162,6 +162,19 @@ func qqHTMLBody(tokenText string) string {
 		"<div>" + tokenText + "</div></body></html>"
 }
 
+// rawSinglePart 组装一封只有一个部件的合成邮件：Content-Type 与正文都原样写出，用于构造畸形头与只有 HTML 的来信。
+func rawSinglePart(t *testing.T, headers []string, contentType, body string) []byte {
+	t.Helper()
+	var b strings.Builder
+	for _, header := range headers {
+		b.WriteString(header + "\r\n")
+	}
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: " + contentType + "\r\n\r\n")
+	b.WriteString(body + "\r\n")
+	return []byte(b.String())
+}
+
 // analyze 调用被测的 Analyze 并要求样本被接受。
 func analyze(t *testing.T, raw []byte, st live.State) live.Sample {
 	t.Helper()
@@ -215,6 +228,11 @@ func TestAnalyzeRedactsAutoReply(t *testing.T) {
 	}
 	if !slicesContains(sample.Plain.Separators, "qq_a_zh") {
 		t.Errorf("separators = %v，期望含 qq_a_zh", sample.Plain.Separators)
+	}
+	// 骨架按 qqPlainBody 的已知结构逐项对照：连续的同类合并，头块中的每一行单独保留。
+	wantSkeleton := []string{"text", "blank", "sep", "header", "header", "header", "header", "blank", "quote_text", "blank", "quote_text"}
+	if strings.Join(sample.Plain.Skeleton, ",") != strings.Join(wantSkeleton, ",") {
+		t.Errorf("skeleton = %v，期望 %v", sample.Plain.Skeleton, wantSkeleton)
 	}
 	if sample.HTML.Tokens != 1 || !slicesContains(sample.HTML.Markers, "qq_div_style") {
 		t.Errorf("html = %+v，期望 1 个令牌且含 qq_div_style", sample.HTML)
@@ -571,6 +589,8 @@ func TestStateAndSamples(t *testing.T) {
 	}
 	st := testState(t)
 	st.Cursors = map[string]live.Cursor{"INBOX": {UIDValidity: 3, LastUID: 9}}
+	// 第二封没有 DATA 候选：清单要求这时 delivered_data 仍写成空数组。
+	st.Mails = append(st.Mails, live.Mail{ProbeID: probeID, TaskID: taskID, MessageID: stranger, DeliveredData: []string{}})
 	if err := live.SaveState(dir, st); err != nil {
 		t.Fatalf("写入状态失败: %v", err)
 	}
@@ -578,8 +598,15 @@ func TestStateAndSamples(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读回状态失败: %v", err)
 	}
-	if len(got.Mails) != 1 || got.Mails[0].MessageID != oursID || got.Cursors["INBOX"].LastUID != 9 {
+	if len(got.Mails) != 2 || got.Mails[0].MessageID != oursID || got.Cursors["INBOX"].LastUID != 9 {
 		t.Errorf("读回的状态 = %+v，与写入的不一致", got)
+	}
+	text, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatalf("读取状态文件失败: %v", err)
+	}
+	if !strings.Contains(string(text), `"delivered_data": []`) {
+		t.Errorf("state.json 中没有候选时应写成空数组")
 	}
 	for _, name := range []string{"state.json", "samples.jsonl"} {
 		if name == "samples.jsonl" {
@@ -629,6 +656,129 @@ func TestAnalyzeSkipsProbeCopies(t *testing.T) {
 	}, canarySentence, "<html><body>"+canarySentence+"</body></html>")
 	if _, ok, err := live.Analyze(unrelated, st, testRoles()); err != nil || ok {
 		t.Errorf("无关来信不应输出样本: ok=%v err=%v", ok, err)
+	}
+	// 线程头里带着 tencent_…@qq.com 形式的 ID，但它不等于任何已记录的来源：other_tencent 不算已知来源。
+	tencentThread := rawMessage(t, []string{
+		"From: <" + canaryAddress + ">",
+		"To: <bot@example.invalid>",
+		"Subject: " + encodedSubject(t, "无关来信"),
+		"Message-Id: " + stranger,
+		"In-Reply-To: " + unknownID,
+		"References: " + unknownID,
+	}, canarySentence, "<html><body>"+canarySentence+"</body></html>")
+	if _, ok, err := live.Analyze(tencentThread, st, testRoles()); err != nil || ok {
+		t.Errorf("线程头只含未知腾讯 ID 的来信不应输出样本: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestAnalyzeRedactsMalformedLabels 断言来信可控的短标签不构成脱敏旁路：畸形 encoded-word 的字符集位置、
+// Content-Type 的 charset 参数与无法解析的 Content-Type 整行都记为 other，样本中不出现其中的文字。
+func TestAnalyzeRedactsMalformedLabels(t *testing.T) {
+	tokenText := testToken(t)
+	malformedWord := "=?关于合同 " + canaryPhone + " 的回复?B?" + gb18030Base64(t, "回复：[TC "+taskID+"] 探测") + "?="
+	goodWord := encodedSubject(t, "回复：[TC "+taskID+"] 探测")
+	for _, c := range []struct {
+		name         string
+		subject      string
+		contentType  string
+		wantEncoding string
+		wantType     string
+		wantCharset  string
+	}{
+		{
+			name: "畸形 encoded-word", subject: malformedWord, contentType: `text/plain; charset="utf-8"`,
+			wantEncoding: "other/B", wantType: "text/plain", wantCharset: "utf-8",
+		},
+		{
+			name: "畸形字符集参数", subject: goodWord,
+			contentType:  `text/plain; charset="客户手机号 ` + canaryPhone + ` 很长很长的标签"`,
+			wantEncoding: "gbk/B", wantType: "text/plain", wantCharset: "other",
+		},
+		{
+			name: "无法解析的媒体类型", subject: goodWord, contentType: "关于合同 " + canaryPhone,
+			wantEncoding: "gbk/B", wantType: "other", wantCharset: "",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := rawSinglePart(t, replyHeaders(t, "Subject: "+c.subject, "In-Reply-To: "+sentID),
+				c.contentType, tokenText)
+			sample := analyze(t, raw, testState(t))
+			if sample.Subject.Encoding != c.wantEncoding {
+				t.Errorf("subject.encoding = %q，期望 %q", sample.Subject.Encoding, c.wantEncoding)
+			}
+			if sample.MIME[0].Type != c.wantType || sample.MIME[0].Charset != c.wantCharset {
+				t.Errorf("mime = %+v，期望类型 %q、字符集 %q", sample.MIME[0], c.wantType, c.wantCharset)
+			}
+			if output := marshal(t, sample); strings.Contains(output, canaryPhone) {
+				t.Errorf("样本中出现了头部里的数字 %q", canaryPhone)
+			}
+		})
+	}
+}
+
+// TestAnalyzePlainTokens 断言令牌行前缀的兜底脱敏与令牌边界：前缀不是纯引用标记时记为 other，
+// 纯引用标记原样输出，长于 48 的连续字母表字符串不算令牌。
+func TestAnalyzePlainTokens(t *testing.T) {
+	tokenText := testToken(t)
+	for _, c := range []struct {
+		name       string
+		plain      string
+		wantTokens int
+		wantPrefix string
+	}{
+		{name: "正文与令牌同行", plain: canarySentence + " " + tokenText, wantTokens: 1, wantPrefix: "other"},
+		{name: "引用前缀", plain: "> " + tokenText, wantTokens: 1, wantPrefix: "> "},
+		{name: "超长连续串", plain: strings.Repeat("a", 49) + "\n" + tokenText, wantTokens: 1, wantPrefix: ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := rawMessage(t, replyHeaders(t, "Subject: "+encodedSubject(t, "回复：[TC "+taskID+"] 探测")),
+				c.plain, "<html><body>x</body></html>")
+			sample := analyze(t, raw, testState(t))
+			if sample.Plain.Tokens != c.wantTokens || sample.Plain.TokenLinePrefix != c.wantPrefix {
+				t.Errorf("tokens = %d、token_line_prefix = %q，期望 %d 与 %q",
+					sample.Plain.Tokens, sample.Plain.TokenLinePrefix, c.wantTokens, c.wantPrefix)
+			}
+			if output := marshal(t, sample); strings.Contains(output, canarySentence) {
+				t.Errorf("样本中出现了令牌同一行上的正文")
+			}
+		})
+	}
+}
+
+// TestAnalyzeTruncatesLongValues 断言清单规定的两个上限：客户端标识截断到 40 个字符，主题前缀至多 20 个字符。
+func TestAnalyzeTruncatesLongValues(t *testing.T) {
+	tokenText := testToken(t)
+	raw := rawMessage(t, []string{
+		"From: <" + canaryAddress + ">",
+		"To: <bot@example.invalid>",
+		"Message-Id: " + replySelfI,
+		"X-Mailer: " + strings.Repeat("超长客户端X", 12),
+		"Subject: " + encodedSubject(t, strings.Repeat("Re:", 20)+"[TC "+taskID+"] 探测"),
+		"In-Reply-To: " + sentID,
+	}, qqPlainBody(tokenText), qqHTMLBody(tokenText))
+	sample := analyze(t, raw, testState(t))
+	if n := len([]rune(sample.Client)); n != 40 {
+		t.Errorf("client 字符数 = %d，期望 40：%q", n, sample.Client)
+	}
+	want := strings.Repeat("Re:", 20)[:20]
+	if sample.Subject.Prefix == nil || *sample.Subject.Prefix != want {
+		t.Errorf("subject.prefix = %+v，期望 %q", sample.Subject.Prefix, want)
+	}
+}
+
+// TestAnalyzeAcceptsHTMLOnlyToken 断言令牌只留在 HTML 引用中的回复同样被接受：HTML 也是正文，
+// 而 D1 指出 QQ App 与 Foxmail 的回复可能既没有线程头，主题也被改写。
+func TestAnalyzeAcceptsHTMLOnlyToken(t *testing.T) {
+	tokenText := testToken(t)
+	raw := rawSinglePart(t, []string{
+		"From: <" + canaryAddress + ">",
+		"To: <bot@example.invalid>",
+		"Message-Id: " + replySelfI,
+		"Subject: " + encodedSubject(t, "无关主题"),
+	}, `text/html; charset="utf-8"`, "<html><body><blockquote>"+tokenText+"</blockquote></body></html>")
+	sample := analyze(t, raw, testState(t))
+	if sample.HTML.Tokens != 1 || !sample.HTML.Blockquote {
+		t.Errorf("html = %+v，期望 1 个令牌且 blockquote 为 true", sample.HTML)
 	}
 }
 

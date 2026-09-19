@@ -218,7 +218,12 @@ func sendOne(t *testing.T, state *live.State, key *token.Key, index, total int, 
 	if sendErr != nil {
 		result.Status, result.Error = "failed", sendErr.Error()
 		if errors.Is(sendErr, smtp.ErrUncertain) {
+			// 已进入提交阶段但没有得到响应，邮件可能已投递：先把我方 ID、探测 ID、任务 ID 与令牌记入 state.json，
+			// 否则对方回复这封邮件时 TestL1Replies 认不出它，样本也就丢失。没有 DATA 响应，候选为空数组。
 			result.Status = "uncertain"
+			mail.DeliveredData = []string{}
+			state.Mails = append(state.Mails, mail)
+			saveState(t, *state)
 		}
 		record(t, "send", result)
 		t.Fatalf("发送失败：%v", sendErr)
@@ -591,7 +596,8 @@ func finishSelfSend(t *testing.T, sent <-chan selfSendResult, firstPush time.Tim
 }
 
 // idleFetchCheck 是 FETCH 检查会话：新建连接，Examine 后以预检的游标 Scan 一次（取回自发邮件，不输出其内容），
-// 再 Examine，随后以 10 秒期限调用 Idle，按预检的规则判定并单独记录。预检未能进行时以零游标全量补扫，照常执行。
+// 再 Examine，随后以 10 秒期限调用 Idle，按预检的规则判定并单独记录。
+// 预检未能进行时改用本会话 Examine 得到的 UIDNEXT 构造只取回最新一封的游标，取不到 UIDNEXT 时记为未知并跳过补扫。
 func idleFetchCheck(t *testing.T, cursor live.Cursor, hasCursor bool) idleCheckRecord {
 	t.Helper()
 	ctx, cancel := probeTimeout(5 * time.Minute)
@@ -603,7 +609,13 @@ func idleFetchCheck(t *testing.T, cursor live.Cursor, hasCursor bool) idleCheckR
 		return idleCheckRecord{Result: "unknown", Error: err.Error()}
 	}
 	if !hasCursor {
-		cursor = live.Cursor{}
+		// 不退化为零游标：那会从真实收件箱取回至多 MaxBatch 封无关邮件的完整正文。
+		// UIDNEXT−2 只让 Scan 取回 UID 最大的那一封，也就是刚刚发出的自发邮件。
+		if before.UIDNext < 2 {
+			return idleCheckRecord{Result: "unknown", UIDNextMissing: before.UIDNext == 0,
+				Error: "预检未能进行，本会话也没有可用的 UIDNEXT，跳过补扫"}
+		}
+		cursor = live.Cursor{UIDValidity: before.UIDValidity, LastUID: before.UIDNext - 2}
 	}
 	if _, err := session.Scan(ctx, imap.FolderInbox, imap.Cursor(cursor)); err != nil {
 		return idleCheckRecord{Result: "unknown", Error: err.Error()}

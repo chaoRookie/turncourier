@@ -58,6 +58,8 @@ const (
 	maxPrefixRunes = 20
 	// maxClientRunes 是客户端标识输出的字符数上限。
 	maxClientRunes = 40
+	// maxLabelRunes 是媒体类型、字符集、传输编码等短标签输出的字符数上限。
+	maxLabelRunes = 40
 	// crockfordAlphabet 是回复令牌使用的小写 Crockford base32 字母表；令牌文本为其中的 48 个字符。
 	crockfordAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
 )
@@ -79,6 +81,7 @@ type State struct {
 
 // Mail 是一封已发出的探测邮件：我方 ID、一次性令牌，以及 QQ 为它分配的各来源 ID。
 // 令牌由测试进程内随机生成、用后即弃的密钥签发，不能用于任何真实验证。
+// DeliveredData 不带 omitempty：没有候选时它必须写成空数组，以便与「这封邮件没记录过 DATA 候选」区分。
 type Mail struct {
 	ProbeID       string   `json:"probe_id"`
 	TaskID        string   `json:"task_id"`
@@ -86,7 +89,7 @@ type Mail struct {
 	Token         string   `json:"token"`
 	DeliveredSent string   `json:"delivered_sent,omitempty"`
 	DeliveredCC   string   `json:"delivered_cc,omitempty"`
-	DeliveredData []string `json:"delivered_data,omitempty"`
+	DeliveredData []string `json:"delivered_data"`
 }
 
 // Cursor 是某个文件夹的补扫游标，与 imap.Cursor 字段相同。
@@ -230,6 +233,8 @@ var (
 	headerLinePattern = regexp.MustCompile(`^(发件人|发送时间|发件时间|收件人|抄送|主题|日期|时间|From|Sent|Date|To|Cc|Subject|Reply-To)[\s\x{00A0}]*[:：]`)
 	// fromLinePattern 匹配引用头块的首行，用来识别没有分隔线的 Foxmail 头块。
 	fromLinePattern = regexp.MustCompile(`^(发件人|From)[\s\x{00A0}]*[:：]`)
+	// labelPattern 匹配可以原样输出的短标签：只含 ASCII 字母、数字与 . _ + / -，且至少有一个字母。
+	labelPattern = regexp.MustCompile(`^[a-z0-9._+/-]*[a-z][a-z0-9._+/-]*$`)
 )
 
 // separatorPatterns 是分隔线与引用头行的正则表；类别名是 L1 的观测对象，实际对应哪个客户端由 L1 的结果确定。
@@ -303,8 +308,8 @@ func Analyze(raw []byte, st State, roles Roles) (Sample, bool, error) {
 	decoded, _ := h.Subject()
 	subject := subjectInfo(decoded, h.Get("Subject"), st.Mails)
 	plain := analyzePlain(b.plain, st.Mails)
-	htmlTokens, _, _ := findTokens(b.html, st.Mails)
-	if !referencesProbe(ids, decoded, plain, st.Mails) {
+	htmlTokens, htmlMatched, _ := findTokens(b.html, st.Mails)
+	if !referencesProbe(ids, decoded, plain.TokenMatchesSent || htmlMatched, st.Mails) {
 		return Sample{}, false, nil
 	}
 
@@ -350,8 +355,9 @@ func isProbeCopy(id string, mails []Mail) bool {
 	return false
 }
 
-// referencesProbe 判断来信是否引用了探测邮件：线程头含已记录的任一 ID、主题含合成任务 ID，或正文含探测令牌。
-func referencesProbe(ids []string, subject string, plain Plain, mails []Mail) bool {
+// referencesProbe 判断来信是否引用了探测邮件：线程头含已记录的任一 ID、主题含合成任务 ID，
+// 或正文含探测令牌（tokenMatched 由纯文本与 HTML 两处正文一并得出，HTML 同样是正文）。
+func referencesProbe(ids []string, subject string, tokenMatched bool, mails []Mail) bool {
 	for _, id := range ids {
 		if known(id, mails) {
 			return true
@@ -362,7 +368,7 @@ func referencesProbe(ids []string, subject string, plain Plain, mails []Mail) bo
 			return true
 		}
 	}
-	return plain.TokenMatchesSent
+	return tokenMatched
 }
 
 // known 判断 ID 是否等于任一已记录的来源。
@@ -528,9 +534,10 @@ func onlyReplyPrefixes(text string) bool {
 }
 
 // encodingOf 记录主题的编码方式：第一个 encoded-word 的字符集与 B/Q，没有 encoded-word 时记为 plain 或 8bit。
+// 字符集位置经 safeLabel 约束：畸形 encoded-word 的这一位置可以是主题中的任意文字，原样输出会绕过脱敏。
 func encodingOf(rawValue string) string {
 	if match := encodedWordPattern.FindStringSubmatch(rawValue); match != nil {
-		return strings.ToLower(match[1]) + "/" + strings.ToUpper(match[2])
+		return safeLabel(match[1]) + "/" + strings.ToUpper(match[2])
 	}
 	for i := range len(rawValue) {
 		if rawValue[i] > 0x7e {
@@ -542,11 +549,12 @@ func encodingOf(rawValue string) string {
 
 // describePart 递归描述一个 MIME 部件并把首个纯文本与 HTML 正文写入 b；depth 与部件数有上限，避免畸形邮件耗尽栈或输出。
 func describePart(e *message.Entity, b *bodies, depth int) Part {
+	// 三项取值都来自来信可控的字节（Content-Type 解析失败时媒体类型就是整行原文），一律经 safeLabel 约束。
 	mediaType, params, _ := e.Header.ContentType()
 	part := Part{
-		Type:     strings.ToLower(mediaType),
-		Charset:  strings.ToLower(params["charset"]),
-		Transfer: strings.ToLower(strings.TrimSpace(e.Header.Get("Content-Transfer-Encoding"))),
+		Type:     safeLabel(mediaType),
+		Charset:  safeLabel(params["charset"]),
+		Transfer: safeLabel(e.Header.Get("Content-Transfer-Encoding")),
 	}
 	if reader := e.MultipartReader(); reader != nil && depth < maxDepth {
 		part.Charset, part.Transfer = "", ""
@@ -798,6 +806,17 @@ func (r Roles) roleOf(address string) string {
 		}
 	}
 	return "other"
+}
+
+// safeLabel 把来信可控的短标签（媒体类型、字符集、传输编码、主题 encoded-word 的字符集）转小写后约束为标签形状：
+// 含空白、非 ASCII 或其他字符时一律记为 other，形状合法时截到至多 maxLabelRunes 个字符。
+// 这些位置的取值都来自来信字节，畸形邮件可以把任意文字放进去；不加约束就会绕过「不输出正文、显示名与完整主题」。
+func safeLabel(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value != "" && !labelPattern.MatchString(value) {
+		return "other"
+	}
+	return truncateRunes(value, maxLabelRunes)
 }
 
 // truncateRunes 把文本截到至多 n 个字符，不会截断在 UTF-8 字符中间。
