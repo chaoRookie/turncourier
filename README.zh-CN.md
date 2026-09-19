@@ -129,6 +129,7 @@ CI：
 - [设计文档](docs/zh-CN/design.md)：已批准的范围、架构、安全边界和目标目录树
 - [Phase 2 实施计划](docs/zh-CN/plans/phase-02.md)
 - [Phase 3 实施清单](docs/zh-CN/plans/phase-03.md)：配置、存储与状态机
+- [Phase 4 实施清单](docs/zh-CN/plans/phase-04.md)：邮件闭环（决策稿）
 - [Phase 0–1 验证报告](docs/zh-CN/research/phase-01.md)
 - [架构概要](docs/en/architecture.md)（英文）
 - [研究探针说明](experiments/phase01/README.md)
@@ -211,7 +212,8 @@ turncourier/
 │       ├── development.md           # 开发指南
 │       ├── plans/                   # 阶段实施清单
 │       │   ├── phase-02.md          # Phase 2：工程骨架
-│       │   └── phase-03.md          # Phase 3：配置、存储与状态机
+│       │   ├── phase-03.md          # Phase 3：配置、存储与状态机
+│       │   └── phase-04.md          # Phase 4：邮件闭环（决策稿）
 │       └── research/phase-01.md     # Phase 0–1 验证结果与限制
 ├── experiments/phase01/             # 研究探针，不是产品代码
 │   ├── README.md                    # 探针运行方式
