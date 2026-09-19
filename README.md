@@ -129,6 +129,7 @@ CI:
 - [Design](docs/zh-CN/design.md) (Chinese): approved scope, architecture, security boundaries and target tree
 - [Phase 2 plan](docs/zh-CN/plans/phase-02.md) (Chinese)
 - [Phase 3 plan](docs/zh-CN/plans/phase-03.md) (Chinese): configuration, storage and state machines
+- [Phase 4 plan](docs/zh-CN/plans/phase-04.md) (Chinese, decisions confirmed, 4a task contracts reviewed): mail loop
 - [Phase 0–1 research report](docs/zh-CN/research/phase-01.md) (Chinese)
 - [Architecture](docs/en/architecture.md)
 - [Research probes](experiments/phase01/README.md) (Chinese)
@@ -211,7 +212,8 @@ turncourier/
 │       ├── development.md           # Development guide
 │       ├── plans/                   # Phase checklists
 │       │   ├── phase-02.md          # Phase 2: engineering skeleton
-│       │   └── phase-03.md          # Phase 3: config, storage, state machines
+│       │   ├── phase-03.md          # Phase 3: config, storage, state machines
+│       │   └── phase-04.md          # Phase 4: mail loop (4a contracts reviewed)
 │       └── research/phase-01.md     # Phase 0–1 findings and limits
 ├── experiments/phase01/             # Research probes, not product code
 │   ├── README.md                    # How to run the probes
