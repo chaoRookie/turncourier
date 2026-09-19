@@ -41,6 +41,10 @@ func ResolvePaths(getenv func(string) string, userConfigDir func() (string, erro
 		if err != nil {
 			return Paths{}, fmt.Errorf("cannot determine the user config directory: %w", err)
 		}
+		// HOME 为相对路径时用户配置目录也是相对路径，会随工作目录变化；错误文本不含该值。
+		if !filepath.IsAbs(dir) {
+			return Paths{}, errors.New("the user config directory must be an absolute path")
+		}
 		configFile = filepath.Join(dir, appDirName, configFileName)
 	}
 	dataDir := getenv(dataDirEnv)

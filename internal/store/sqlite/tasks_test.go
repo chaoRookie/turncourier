@@ -1,4 +1,4 @@
-// Package sqlite 的任务持久化测试用临时目录中的真实 SQLite 数据库验证创建、启动、事件、版本冲突与事件记录。
+// Package sqlite 的任务持久化测试用临时目录中的真实 SQLite 数据库验证创建、启动、事件、版本冲突、失败回滚与事件记录。
 package sqlite
 
 import (
@@ -369,6 +369,73 @@ func TestApplyTaskEventErrors(t *testing.T) {
 		t.Errorf("过期版本且非法转移: 错误 = %v; want ErrVersionConflict", err)
 	}
 	requireUnchanged(t, store, running, 1)
+}
+
+// TestTaskEventsRollBackOnFailure 用测试内创建的触发器让 StartTask 与 ApplyTaskEvent（普通事件、close、fail）中的某一步写入失败，
+// 或让带版本条件的任务更新不影响任何行，验证方法返回错误且整个事务回滚：任务、回复与事件记录都保持操作前的样子。
+// 普通事件、close 与 fail 的场景都带有两条排队回复；只有 close 与 fail 会拒绝排队回复，因此只对它们注入回复更新失败。
+func TestTaskEventsRollBackOnFailure(t *testing.T) {
+	faults := []struct {
+		name      string
+		trigger   string
+		want      string
+		onReplies bool
+	}{
+		{"任务更新失败", "BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'boom'); END", "boom", false},
+		{"任务更新未命中", "BEFORE UPDATE ON tasks BEGIN SELECT RAISE(IGNORE); END", "changed during update", false},
+		{"事件写入失败", "BEFORE INSERT ON task_events BEGIN SELECT RAISE(ABORT, 'boom'); END", "boom", false},
+		{"回复拒绝失败", "BEFORE UPDATE ON replies BEGIN SELECT RAISE(ABORT, 'boom'); END", "boom", true},
+	}
+	// applyEvent 返回的准备函数启动任务、记录两条排队回复，再给出对该任务执行 event 的操作。
+	applyEvent := func(event task.Event) func(t *testing.T, s *Store) (string, func() error) {
+		return func(t *testing.T, s *Store) (string, func() error) {
+			running := startTask(t, s)
+			enqueueReplies(t, s, running.ID, 2)
+			return running.ID, func() error {
+				_, err := s.ApplyTaskEvent(t.Context(), running.ID, running.Version, event)
+				return err
+			}
+		}
+	}
+	// 每个操作的准备函数构造场景，返回任务 ID 与待执行的操作；rejects 表示该操作会拒绝排队回复。
+	operations := []struct {
+		name    string
+		rejects bool
+		prepare func(t *testing.T, s *Store) (string, func() error)
+	}{
+		{"StartTask", false, func(t *testing.T, s *Store) (string, func() error) {
+			created := createTask(t, s)
+			return created.ID, func() error {
+				_, err := s.StartTask(t.Context(), created.ID, created.Version, "thread-synthetic-0001")
+				return err
+			}
+		}},
+		{"ApplyTaskEvent(turn_completed)", false, applyEvent(task.TurnCompleted)},
+		{"ApplyTaskEvent(close)", true, applyEvent(task.Close)},
+		{"ApplyTaskEvent(fail)", true, applyEvent(task.Fail)},
+	}
+	for _, op := range operations {
+		for _, fault := range faults {
+			if fault.onReplies && !op.rejects {
+				continue
+			}
+			t.Run(op.name+"/"+fault.name, func(t *testing.T) {
+				store, _ := openTaskStore(t, nil)
+				taskID, run := op.prepare(t, store)
+				if _, err := store.db.ExecContext(t.Context(), "CREATE TRIGGER fault "+fault.trigger); err != nil {
+					t.Fatalf("创建触发器失败: %v", err)
+				}
+				replies, before, events := allReplies(t, store), mustGetTask(t, store, taskID), countRows(t, store.db, "task_events")
+				if err := run(); err == nil || !strings.Contains(err.Error(), fault.want) {
+					t.Errorf("err = %v; want 含 %q 的错误", err, fault.want)
+				}
+				if after := allReplies(t, store); !slices.Equal(after, replies) {
+					t.Errorf("回复队列未回滚: %+v; want %+v", after, replies)
+				}
+				requireUnchanged(t, store, before, events)
+			})
+		}
+	}
 }
 
 // TestTaskEvents 验证 CREATED→RUNNING→COMPLETED→CLOSED 依次记录事件、前后状态与时间，按 seq 升序，

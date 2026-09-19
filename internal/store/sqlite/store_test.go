@@ -3,12 +3,15 @@ package sqlite
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -132,6 +135,128 @@ func TestOpenBeginsImmediateTransactions(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "database is locked") {
 		t.Errorf("第二个连接的错误 = %v; want SQLITE_BUSY（database is locked）", err)
+	}
+}
+
+// TestOpenConcurrentlyOnNewDirectory 模拟多个进程首次同时打开同一个尚不存在的数据目录：每轮 4 个存储实例同时 Open，
+// 全部成功且读到的 user_version 都是 1；循环 30 轮。空文件从回滚日志模式转为 WAL 时的锁升级冲突不经 busy_timeout 等待，
+// 直接返回 SQLITE_BUSY，须由 Open 重试吸收；迁移在事务内重新读取 user_version，不会被第二个实例重复执行而报表已存在。
+func TestOpenConcurrentlyOnNewDirectory(t *testing.T) {
+	const rounds, openers = 30, 4
+	for round := range rounds {
+		dir := dataDir(t)
+		start := make(chan struct{})
+		opened := make(chan *Store, openers)
+		var wg sync.WaitGroup
+		for range openers {
+			wg.Go(func() {
+				<-start
+				store, err := Open(t.Context(), dir, Options{})
+				if err != nil {
+					t.Errorf("第 %d 轮: Open 返回错误: %v", round, err)
+					return
+				}
+				opened <- store
+				if version, err := store.SchemaVersion(t.Context()); err != nil || version != 1 {
+					t.Errorf("第 %d 轮: SchemaVersion = %d, %v; want 1, nil", round, version, err)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		close(opened)
+		for store := range opened {
+			store.Close()
+		}
+	}
+}
+
+// busyError 返回一个真实的 SQLITE_BUSY 错误：存储持有 IMMEDIATE 事务时，另一个不做忙等待的连接开始写事务。
+func busyError(t *testing.T) error {
+	t.Helper()
+	dir := dataDir(t)
+	store := openStore(t, dir)
+	tx, err := store.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx 返回错误: %v", err)
+	}
+	defer tx.Rollback()
+	other, err := sql.Open("sqlite", "file:"+uriEscaper.Replace(filepath.Join(dir, databaseFileName))+"?_txlock=immediate")
+	if err != nil {
+		t.Fatalf("打开第二个连接失败: %v", err)
+	}
+	defer other.Close()
+	otherTx, err := other.BeginTx(t.Context(), nil)
+	if err == nil {
+		otherTx.Rollback()
+		t.Fatal("第二个连接不应能开始 IMMEDIATE 事务")
+	}
+	return err
+}
+
+// TestRetryWhileBusy 验证打开数据库时的重试只针对 SQLITE_BUSY：忙后成功时返回 nil，其他错误不重试，
+// 持续忙时超过期限返回 SQLITE_BUSY 错误，等待期间上下文结束时返回 ctx.Err()。
+func TestRetryWhileBusy(t *testing.T) {
+	busy := busyError(t)
+	if !isBusy(busy) || isBusy(nil) || isBusy(errors.New("database is locked")) {
+		t.Fatalf("isBusy 判定错误: 真实 SQLITE_BUSY %v 应为 true，nil 与同文本的普通错误应为 false", busy)
+	}
+	// run 以给定的上下文与期限调用 retryWhileBusy，op 由 result 给出第 n 次调用（从 1 起）的结果，返回调用次数与错误。
+	run := func(ctx context.Context, timeout time.Duration, result func(ctx context.Context, n int) error) (int, error) {
+		calls := 0
+		err := retryWhileBusy(ctx, timeout, func(ctx context.Context) error {
+			calls++
+			return result(ctx, calls)
+		})
+		return calls, err
+	}
+
+	calls, err := run(t.Context(), time.Minute, func(_ context.Context, n int) error {
+		if n <= 2 {
+			return busy
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Errorf("忙两次后成功: err = %v, 调用 %d 次; want nil, 3 次", err, calls)
+	}
+
+	other := errors.New("boom")
+	if calls, err := run(t.Context(), time.Minute, func(context.Context, int) error { return other }); err != other || calls != 1 {
+		t.Errorf("其他错误: err = %v, 调用 %d 次; want boom, 1 次", err, calls)
+	}
+
+	// 上下文另设 5 秒期限，使忽略 timeout 的实现以 context.DeadlineExceeded 失败而不是一直重试。
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	began := time.Now()
+	calls, err = run(ctx, 50*time.Millisecond, func(context.Context, int) error { return busy })
+	if elapsed := time.Since(began); !isBusy(err) || calls < 2 || elapsed < 50*time.Millisecond || elapsed > 2*time.Second {
+		t.Errorf("持续忙: err = %v, 调用 %d 次, 用时 %v; want SQLITE_BUSY、多次调用、用时约 50ms", err, calls, elapsed)
+	}
+
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	calls, err = run(ctx, time.Minute, func(context.Context, int) error {
+		cancel()
+		return busy
+	})
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Errorf("上下文结束: err = %v, 调用 %d 次; want context.Canceled, 1 次", err, calls)
+	}
+}
+
+// TestOpenDatabaseFileName 以字面量钉住 Open 在数据目录中创建的数据库文件名；
+// config 包按同一文件名计算 Paths.Database，改名须两处同步，集成测试据此核对两者一致。
+func TestOpenDatabaseFileName(t *testing.T) {
+	dir := dataDir(t)
+	openStore(t, dir)
+	info, err := os.Stat(filepath.Join(dir, "turncourier.db"))
+	if err != nil {
+		t.Fatalf("Open 未创建 turncourier.db: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Errorf("turncourier.db 的类型 = %v; want 常规文件", info.Mode().Type())
 	}
 }
 

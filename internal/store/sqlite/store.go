@@ -14,8 +14,9 @@ import (
 	"strings"
 	"time"
 
-	// 注册纯 Go 实现的 "sqlite" 驱动，构建不依赖 CGO。
-	_ "modernc.org/sqlite"
+	// 导入时注册纯 Go 实现的 "sqlite" 驱动，构建不依赖 CGO；错误类型与结果码用于识别 SQLITE_BUSY。
+	moderncsqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Store 是可并发使用的 SQLite 存储；进程内所有操作串行经过单个连接。
@@ -37,6 +38,10 @@ const (
 	// connectionParams 设置外键、WAL、FULL 同步与 5 秒忙等待，并让事务以 BEGIN IMMEDIATE 开始：
 	// 事务一开始就取得写锁，避免先读后写的事务在升级写锁时绕过忙等待直接返回 SQLITE_BUSY。
 	connectionParams = "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	// openBusyTimeout 是打开数据库时重试 SQLITE_BUSY 的期限，与 connectionParams 中的 busy_timeout 一致。
+	openBusyTimeout = 5 * time.Second
+	// busyRetryInterval 是两次重试之间的间隔。
+	busyRetryInterval = 10 * time.Millisecond
 )
 
 // uriEscaper 转义 SQLite URI 路径中有特殊含义的字符：% 引出转义序列，? 开始参数，# 开始片段。
@@ -101,17 +106,42 @@ func prepareFiles(dataDir, path string) error {
 }
 
 // openDB 以固定连接参数打开 path 处的数据库，限制为单个连接并用 PingContext 触发实际打开。
+// 多个进程首次同时打开新数据库时，空文件从回滚日志模式转为 WAL 的锁升级冲突不经 busy_timeout 等待，
+// 直接返回 SQLITE_BUSY，因此打开在 openBusyTimeout 内遇到 SQLITE_BUSY 时重试。
 func openDB(ctx context.Context, path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+uriEscaper.Replace(path)+connectionParams)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	if err := db.PingContext(ctx); err != nil {
+	if err := retryWhileBusy(ctx, openBusyTimeout, db.PingContext); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("cannot open database: %w", err)
 	}
 	return db, nil
+}
+
+// retryWhileBusy 调用 op，返回 SQLITE_BUSY 时每隔 busyRetryInterval 重试，直到 op 成功、返回其他错误或超过 timeout；
+// ctx 在等待期间结束时返回 ctx.Err()。
+func retryWhileBusy(ctx context.Context, timeout time.Duration, op func(context.Context) error) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := op(ctx)
+		if !isBusy(err) || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(busyRetryInterval):
+		}
+	}
+}
+
+// isBusy 报告 err 是否为 SQLite 的 SQLITE_BUSY；扩展结果码的低 8 位是主结果码。
+func isBusy(err error) bool {
+	var sqliteErr *moderncsqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 // Close 关闭数据库连接。

@@ -39,7 +39,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, checker d
 	case "help", "version", "doctor":
 		// 已实现命令继续校验参数；命令名错误优先于参数错误报告。
 	case "init", "run", "tasks", "logs", "service":
-		fmt.Fprintf(stderr, "%s 尚未实现；Phase 2 仅提供 help、version、doctor。\n", command)
+		fmt.Fprintf(stderr, "%s 尚未实现；当前仅提供 help、version、doctor。\n", command)
 		return 2
 	default:
 		fmt.Fprintf(stderr, "未知命令 %q；运行 turncourier help 查看用法。\n", command)
@@ -54,7 +54,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, checker d
 	case "help":
 		help := Help{
 			Name:        "turncourier",
-			Description: "Phase 2 工程骨架：当前没有邮件收发、任务执行或后台服务能力。",
+			Description: "pre-alpha：当前没有邮件收发、任务执行或后台服务能力。",
 			Commands:    []string{"help [--json]", "version [--json]", "doctor [--json]"},
 			Planned:     []string{"init", "run", "tasks", "logs", "service"},
 		}

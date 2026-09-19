@@ -757,8 +757,8 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
 - Create: `tests/integration/lifecycle_test.go`
 - Modify: `Makefile`（`fmt`、`fmt-check` 目录加入 `tests`）
 
-- [ ] **Step 1：** 修改 Makefile 目录列表；`make fmt-check` 通过。
-- [ ] **Step 2：写测试。** 包名 `integration_test`，文件开头写中文包注释。`TestReplyLifecycle`：
+- [x] **Step 1：** 修改 Makefile 目录列表；`make fmt-check` 通过。
+- [x] **Step 2：写测试。** 包名 `integration_test`，文件开头写中文包注释。`TestReplyLifecycle`：
   1. 把 `configs/turncourier.example.toml` 复制到临时目录并设为 0600；设置 `TURNCOURIER_CONFIG` 与 `TURNCOURIER_DATA_DIR`（均在临时目录内）；`config.ResolvePaths` + `config.Load` 成功；
   2. `sqlite.Open(ctx, cfg.Paths.DataDir, sqlite.Options{})`；创建 codex 任务，`StartTask` 会话 ID `thread-synthetic-0001`，执行 `turn_completed`；
   3. 以 `cfg.Mailbox.Address` 为账户，用 `sha256.Sum256` 计算合成正文 `"first synthetic reply"` 与 `"second synthetic reply"` 的摘要，记录两条回复；
@@ -766,27 +766,33 @@ func (s *Store) RecoverInFlight(ctx context.Context) ([]Reply, error)
   5. 派发得到第 2 条 → `AcknowledgeReply` → `close`；
   6. 再次记录第 1 条回复为 `Duplicate=true`；记录第 3 条新回复为 REJECTED(`task_closed`)；
   7. 断言完整任务事件序列：`start, turn_completed, reply_dispatched, delivery_unknown, delivery_confirmed, turn_completed, reply_dispatched, close`。
-- [ ] **Step 3：** `go test -race ./tests/...` 通过；`make comments` 通过（确认测试专用包的中文包注释被识别）。
-- [ ] **Step 4：** `git commit -m "test: cover config, store and state machine lifecycle end to end"`
+- [x] **Step 3：** `go test -race ./tests/...` 通过；`make comments` 通过（确认测试专用包的中文包注释被识别）。
+- [x] **Step 4：** `git commit -m "test: cover config, store and state machine lifecycle end to end"`
+
+**实施说明：** `tests` 目录在 Step 2 之前不存在，`gofmt -l` 对缺失目录报 `lstat tests: no such file or directory` 并以非零码退出，因此 Step 1 改完 Makefile 后 `make fmt-check` 失败，建立测试文件后才通过；在临时副本中放入未格式化的测试文件，新目录列表下 `make fmt-check` 失败、旧列表下通过。Step 2 第 7 点的事件序列与 Task 8–9 已合入的实现一致（`RecoverInFlight` 处理的是已为 UNCERTAIN 的回复，不产生事件；`AcknowledgeReply` 不产生任务事件），无需调整。清单之外的两处补充：用 `t.Setenv` 清空 `TURNCOURIER_NOTIFY_EVENTS`，避免开发者环境影响加载；断言 `cfg.Paths.DataDir` 等于环境变量给出的目录。数据目录是临时目录下尚不存在、由 `sqlite.Open` 以 0700 创建的子目录。本任务只加测试，存储实现已在 Task 6–9 合入，测试首次运行即通过；在临时副本中对存储层做 5 个变异（派发改为倒序、`RecoverInFlight` 返回空列表、核对已送达时不执行 delivery_confirmed、关闭任务的拒绝原因改为 `task_failed`、确认改为标记不确定）均被本测试拦截，去掉包注释后 `make comments` 执行的 `go run ./tools/commentcheck .` 报「包 integration_test 缺少中文包级文档」。
 
 ### Task 11：命令行文案与文档同步
 
 **Files:**
 - Modify: `internal/cli/cli.go`、`internal/cli/cli_test.go`、`cmd/turncourier/main_test.go`、`README.md`、`README.zh-CN.md`、`docs/en/architecture.md`、`docs/zh-CN/development.md`、`docs/zh-CN/design.md`、`CONTRIBUTING.md`、`CHANGELOG.md`、`AGENTS.md`
 
-- [ ] **Step 1：** 帮助描述由「Phase 2 工程骨架：…」改为「pre-alpha：当前没有邮件收发、任务执行或后台服务能力。」，规划命令的提示去掉阶段号；相应测试断言改为检查 `pre-alpha`。`go test ./cmd/... ./internal/cli/` 通过。
-- [ ] **Step 2：** README 中英文同步：状态说明（配置、存储、状态机已实现但尚未接入命令）、代码规则中的依赖说明、实际文件树（新增 `configs/`、`internal/task`、`internal/queue`、`internal/config`、`internal/store/sqlite`、`tests/integration`、`docs/zh-CN/plans/phase-03.md`），并用 `git ls-files --cached --others --exclude-standard | sort` 核对；两个 README 的 make 目标表格增加 `make modverify` 行，`make check` 行（`README.md`、`README.zh-CN.md` 各一处）改为 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint`。
-- [ ] **Step 3：** `docs/en/architecture.md`：当前范围、包与依赖方向（`store/sqlite → task, queue`；`config`、`task`、`queue` 互不依赖，也不依赖存储）、持久化与恢复语义、依赖列表；「Quality gates and CI」一节开头列举 `make check` 子目标的句子补上 `modverify`，并加一条说明 `go mod verify` 校验 `go.sum` 哈希。
-- [ ] **Step 4：** `docs/zh-CN/development.md`：依赖政策与许可证记录、`modverify`（「常用 make 目标」表格新增 `make modverify` 行，并把 `make check` 行的子目标链补上 `modverify`）、配置文件与数据目录位置、SQLite 测试约定（临时目录、真实数据库、触发器注入故障）、集成测试目录、模糊测试的本地运行方式。
-- [ ] **Step 5：** `CONTRIBUTING.md` 依赖规则改为「新增依赖须在实施清单或 issue 中说明理由与许可证」，并把英文与中文两处「提交前检查」表格的 `make check` 行补上 `modverify`；`CHANGELOG.md` 在 `[Unreleased]` 增加 Phase 3 条目；`AGENTS.md` 当前范围改为「已实现配置、存储与状态机，尚未接入邮件与 Agent」；`design.md` 状态行更新。
-- [ ] **Step 6：** `git diff --check` 通过；在全部文档中检索本机路径与个人信息无结果；下面的断言无输出，确认没有文档漏掉 `check` 链的新子目标：
+- [x] **Step 1：** 帮助描述由「Phase 2 工程骨架：…」改为「pre-alpha：当前没有邮件收发、任务执行或后台服务能力。」，规划命令的提示去掉阶段号；相应测试断言改为检查 `pre-alpha`。`go test ./cmd/... ./internal/cli/` 通过。
+- [x] **Step 2：** README 中英文同步：状态说明（配置、存储、状态机已实现但尚未接入命令）、代码规则中的依赖说明、实际文件树（新增 `configs/`、`internal/task`、`internal/queue`、`internal/config`、`internal/store/sqlite`、`tests/integration`、`docs/zh-CN/plans/phase-03.md`），并用 `git ls-files --cached --others --exclude-standard | sort` 核对；两个 README 的 make 目标表格增加 `make modverify` 行，`make check` 行（`README.md`、`README.zh-CN.md` 各一处）改为 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint`。
+- [x] **Step 3：** `docs/en/architecture.md`：当前范围、包与依赖方向（`store/sqlite → task, queue`；`config`、`task`、`queue` 互不依赖，也不依赖存储）、持久化与恢复语义、依赖列表；「Quality gates and CI」一节开头列举 `make check` 子目标的句子补上 `modverify`，并加一条说明 `go mod verify` 校验 `go.sum` 哈希。
+- [x] **Step 4：** `docs/zh-CN/development.md`：依赖政策与许可证记录、`modverify`（「常用 make 目标」表格新增 `make modverify` 行，并把 `make check` 行的子目标链补上 `modverify`）、配置文件与数据目录位置、SQLite 测试约定（临时目录、真实数据库、触发器注入故障）、集成测试目录、模糊测试的本地运行方式。
+- [x] **Step 5：** `CONTRIBUTING.md` 依赖规则改为「新增依赖须在实施清单或 issue 中说明理由与许可证」，并把英文与中文两处「提交前检查」表格的 `make check` 行补上 `modverify`；`CHANGELOG.md` 在 `[Unreleased]` 增加 Phase 3 条目；`AGENTS.md` 当前范围改为「已实现配置、存储与状态机，尚未接入邮件与 Agent」；`design.md` 状态行更新。
+- [x] **Step 6：** `git diff --check` 通过；在全部文档中检索本机路径与个人信息无结果；下面的断言无输出，确认没有文档漏掉 `check` 链的新子目标：
 
 ```sh
 # 同时出现 fmt-check 与 lint 的行就是在枚举 check 链，这些行都必须含 modverify。
 grep -rn fmt-check README.md README.zh-CN.md CONTRIBUTING.md \
   docs/en/architecture.md docs/zh-CN/development.md | grep lint | grep -v modverify
 ```
-- [ ] **Step 7：** `git commit -m "docs: document phase 3 configuration, storage and state machines"`
+- [x] **Step 7：** `git commit -m "docs: document phase 3 configuration, storage and state machines"`
+
+**实施说明：** Step 1 的测试除把帮助描述断言改为 `pre-alpha` 外，还断言规划命令与其他用法错误的提示不含 `Phase`，钉住「去掉阶段号」；改动前 `TestRun`、`TestHelpJSON` 与 `TestUsageFailures` 的 5 个规划命令子用例失败，改动后通过。清单之外的同步（均为让既有文字与实现一致，不涉及新功能）：Task 10 已把 `tests` 加入 `fmt`、`fmt-check` 的目录列表，但各步骤未点名描述这两个目标的文档，因此两个 README 的 make 目标表格、`CONTRIBUTING.md` 中英文两处、`development.md` 与 `architecture.md` 的目录列表一并补上 `tests`；`CONTRIBUTING.md` 中英文「项目阶段与范围」原写配置与 SQLite 存储不存在、当前清单为 phase-02，`design.md` 末段写「当前执行工程骨架」，`architecture.md`「Planned architecture」开头写本节均未实现，README「安全与隐私」写当前代码不读取配置，均改为与本阶段实际状态一致；`development.md`「常用 make 目标」的「是否联网」列中 `vet`、`test`、`check` 改为首次下载模块依赖时需要联网（在临时副本中用空模块缓存加 `GOPROXY=off` 验证：`go build ./cmd/turncourier` 与 `go run ./tools/commentcheck .` 可离线完成，`go vet` 与 `go mod verify` 需要下载模块）；`CHANGELOG.md` 在 Phase 3 条目之外新增 `### Changed` 一节，记录依赖规则、`fmt` 目录与帮助文案的变化。README 两份文件树按 `git ls-files --cached --others --exclude-standard` 逐项核对，结构一致，新增 `go.sum` 与 `internal/store/sqlite` 的全部测试文件。`go build` 后 `go version -m` 只列出本模块，确认产品二进制未链接两个新依赖。
+
+**审查后修正：** ① Step 1 原测试只断言帮助描述含 `pre-alpha`，描述里重新出现阶段号（如「pre-alpha（Phase 3）：…」）时仍全部通过；现在 `TestHelpJSON` 断言描述等于 Step 1 给出的原文，`TestHelp` 的 4 个帮助入口断言输出含该原文且不含 `Phase`。在临时副本中，上述变异与「文本帮助的规划命令行加上 Phase 4」两处变异在旧测试下通过、新测试下失败。② `SECURITY.md` 不在本任务 Files 列表中，但其「Scope／报告范围」仍称当前代码只是 CLI 骨架，「Boundaries／规划设计中的边界」仍称配置与 SQLite 存储未实现，并让人把相关意见提交为公开的功能建议；现中英文同步改为：报告范围包括尚未接入命令的 `internal/config`、`internal/store/sqlite`、`internal/task`、`internal/queue`，并举例绕过配置与数据目录权限检查、重复入队或自动重发不确定回复；边界一节只把邮件、Agent、Keychain 与后台服务列为未实现，现有代码（含配置与存储包）的问题须走私密漏洞报告。③ 原说明中的离线验证没有覆盖 `lint`：在临时副本中以空模块缓存加 `GOPROXY=off` 运行 `staticcheck ./...`，退出码 1，报 `internal/config/config.go` 与 `internal/store/sqlite/store.go` 的 `module lookup disabled by GOPROXY=off`，因此 `development.md` 的 `make lint` 行改为「首次安装或首次下载模块依赖时」，`CONTRIBUTING.md` 中英文「开发环境」补充首次下载 Go 模块依赖也需要联网。④ 「只有 `main` 分支」在 Phase 3 开发期间不成立（远端同时存在 `feat/phase-03-storage`），因此 `CONTRIBUTING.md` 中英文、两个 README 的状态段与安全段、`architecture.md`「Current scope」、`development.md`「候选构建」共 8 处改为不随分支增删失效的说法：「默认分支为 `main`」，README 安全段改为请在 `main` 最新提交上复现，与 `SECURITY.md` 一致；清单与 Task 12 无需为此增加删除远端分支的步骤。修正后在 Phase 1–2 清单之外的 Markdown 中 `git grep`「只有 `main`」「only `main`」无结果；「skeleton」「工程骨架」的剩余命中（`AGENTS.md` 的 Phase 2 授权、`CHANGELOG.md` 的 Phase 2 条目、README 文件树中 `phase-02.md` 的注释、`design.md` 与 `architecture.md` 的状态行和开发顺序）都指 Phase 2 本身，不是对当前代码的描述。⑤ 复查发现 `SECURITY.md` 新增的权限检查示例没有写平台限定，而 `fileperm_other.go` 与 `perm_other.go` 在非 Unix 平台直接放行；中英文改为只有「拒绝凭据类键」跨平台，配置文件属主与写权限、数据目录与数据库权限检查限定「在 Unix 上」，与 `architecture.md`、`development.md` 的写法一致。
 
 ### Task 12：全量验证、审查与合并
 
@@ -806,6 +812,38 @@ go version -m dist/turncourier
 
   期望：`make check` 通过且总覆盖率 ≥ 80%；gitleaks 与 govulncheck 无发现；actionlint 通过；`go version -m dist/turncourier` 的输出中没有 `modernc.org/sqlite` 与 `BurntSushi/toml`（本阶段命令行未接入新包，产品二进制不应变化）。
 - [ ] **Step 2：审查。** 按 Phase 2 的做法，对状态机、配置校验、存储事务与恢复、测试有效性做独立审查；确认的问题修复后以变异测试证明测试能拦截回归。
+
+  **审查后修正：** 配置（`internal/config`）部分。变异均在临时副本中逐项施加，每次只改一处。
+  - CFG-1（major）：BurntSushi/toml v1.6.0 精确匹配失败时用 `strings.EqualFold` 把键匹配到字段并记为已解码，`ADDRESS`、`Allowed_Senders`、`[MAILBOX]` 不出现在 `Undecoded()` 中而被静默采用；同一字段写两个大小写变体时，采用哪个取值由 map 遍历顺序决定。现改为遍历 `MetaData.Keys()`，把每个键路径逐段区分大小写地与 `knownKeys` 白名单（13 条，已与 `rawConfig` 的 `toml` 标签逐一核对）比对，不用 `Key.String()` 比较；不在白名单中的键交给 `keyProblems`，凭据类键仍给 Keychain 提示，表数组重复列出的同一路径只报一次。键名有误时 `Load` 只返回键名错误、不再校验取值，否则错误文本会随采用的变体变化。D1 表格中「可通过 `MetaData.Undecoded()` 精确拒绝未知键」与 Task 5 Step 4 的实现说明保留原文，以本条为准；`development.md` 与 `architecture.md` 的依赖表和配置文件说明已改（键名区分大小写）。新测试 `TestLoadRejectsCaseVariantKeys` 在旧代码上失败（三种变体都加载成功）；`TestLoadRejectsDuplicateCaseVariants` 在旧代码上连跑 6 次全部失败，1 次为「Load 应当返回错误」（采用了合法值），5 次只报 `mailbox.address: invalid email address`（采用了变体的值）。变异：改回 `Undecoded()`、白名单改用 `EqualFold` 比较，两个测试都失败；去掉「键名有误时提前返回」，重复变体测试在第 3 次加载时报错误文本不一致；去掉去重，`TestLoadRejectsUnknownKey` 新增的表数组用例报同一键出现 2 次。
+  - CFG-2 / TE-3（major）：新增 `fileperm_unix_test.go`（`//go:build unix`），`TestCheckFileOwner` 用只实现 `fs.FileInfo` 的替身覆盖：属主是其他用户、`Sys` 不是 `*syscall.Stat_t`、组可写、其他用户可写都被拒绝并断言拒绝原因，本人所有且 0600 通过。旧代码的这些行为本来正确，测试在旧代码上通过；变异「删掉 UID 比较」「`Sys` 类型不符时返回 nil」分别使对应用例失败。
+  - CFG-3（minor）：`decodeFile` 改为先以 `O_RDONLY|openFlags` 打开（`openFlags` 在 `fileperm_unix.go` 为 `syscall.O_NONBLOCK`，在 `fileperm_other.go` 为 0），再由 `checkOpenedFile` 对已打开的文件 `Stat`，检查常规文件、大小与属主；`readConfigData` 用 `io.ReadAll(io.LimitReader(r, maxConfigBytes+1))` 读取，读到超过上界即报 too large；最后 `toml.Decode(string(data), &raw)`。新测试：`TestLoadRejectsFIFO`（5 秒超时保护）；`TestCheckOpenedFileUsesDescriptor`（打开 0622 文件后把路径换成 0600 文件，仍按已打开的文件拒绝）；`TestReadConfigDataRejectsOversize`（超过上界的普通文件被拒绝，恰好 1 MiB 通过）。后两者引用的函数在旧代码上不存在，编译失败；FIFO 用例在旧代码上通过，因为旧代码先 `os.Stat` 就拒绝了 FIFO，阻塞只会在 Stat 与 Open 之间路径被替换时发生。变异：`openFlags` 改为 0，FIFO 用例 5 秒超时失败；去掉长度检查，读到 1048577 字节且无错误；检查改为 `os.Stat(file.Name())`，描述符用例失败。
+  - CFG-4（minor）：TOML 词法错误用 `%q` 回显出错位置的原文，未加引号的 `authorization_code = abcdefghijklmnop` 会让凭据进入错误文本。现用 `errors.As` 取 `toml.ParseError`：`LastKey` 是凭据类键时只返回「line N: <键> must not be set: 凭据将由 init 写入 Keychain」，否则只返回行号、列号、`invalid TOML` 与 `LastKey`（非空时）。类型错误（如 `imap_port = "abc"`）经核对只含键名与类型、不回显取值，保持原样并用例钉住。新测试 `TestLoadParseErrorsHideValues` 在旧代码上两个未加引号的用例失败（错误文本含原值）；变异「不转换、原样返回」与「去掉凭据分支」都使其失败。
+  - CFG-5（nit）：`Load` 注释、包注释、`architecture.md` 的 `internal/config` 一行与 `CHANGELOG.md` 改为：文件、TOML 语法或类型错误单独返回；未知键与凭据类键合并返回，且不再校验取值（见 CFG-1）；解码成功后的校验错误通过 `errors.Join` 一次返回。除 CFG-1 带来的变化外不改行为。
+  - CFG-6（minor）：未设置 `TURNCOURIER_CONFIG` 时，`userConfigDir()` 返回相对路径（HOME 为相对路径）即报「the user config directory must be an absolute path」，错误文本不含路径值。`TestResolvePathsErrors` 新增的用例在旧代码上失败（得到相对路径的 Paths）；去掉该检查的变异使其失败。
+  - CFG-7（nit）：`isCredentialKey` 改为按键路径逐段转小写后比较。`TestLoadRejectsCredentialKeys` 新增的 `PASSWORD`、`Secret` 在旧代码上只报 unknown key、缺少 Keychain 提示；去掉 `strings.ToLower` 的变异使其失败。
+  - TE-4（minor）：`TestLoadReadsOnlyNotifyEventsEnv` 用记录键名的 getenv 替身，对 `TURNCOURIER_ALLOWED_SENDERS`、`TURNCOURIER_TOKEN_TTL`、`TURNCOURIER_MAILBOX_ADDRESS` 等 6 个变量返回攻击值，断言只读取了 `TURNCOURIER_NOTIFY_EVENTS`，结果与不设环境变量时相同。旧代码上通过；变异「额外读取 `TURNCOURIER_TOKEN_TTL` 并覆盖」使其失败。
+  - TE-5（minor）：`TestLoadFileProblems` 增加「父级是普通文件」用例（CFG-3 之后由打开返回 ENOTDIR），Unix 上增加 `TestLoadUnreadableParent`（父目录 0000，root 下跳过），都断言错误不含路径且不是 `ErrNotFound`。旧代码上通过；变异「`withoutPath` 原样返回」使两个用例都报错误文本含临时目录路径。
+  - TE-7（nit）：`TestLoadDefaults` 修改返回的 `Events` 后重新加载，断言默认值不变。旧代码上通过；变异「直接返回 `defaultNotifyEvents`」使其失败。
+  - README 中英文目录树补上 `fileperm_unix_test.go`。修正后 `make check`（总覆盖率 93.0%，`internal/config` 98.2%）、`GOOS=windows go vet ./...`、`GOOS=linux go vet ./...`、`CGO_ENABLED=0 go test -count=1 ./...`、`git diff --check` 均通过，`go test -race -count=20 ./internal/config/` 通过。
+
+  **审查后修正：** 存储（`internal/store/sqlite`）、状态机（`internal/task`、`internal/queue`）与集成测试部分。变异均在临时副本中逐项施加，每次只改一处；「其余测试」指去掉该项新测试后，同一包与 `tests/integration` 的全部用例。
+  - TE-1（major）：没有测试在有排队回复时执行 fail、close 以外的事件，把 `approval_requested` 等加进 `rejectReasons` 的变异能通过全部测试。新增 `TestNonTerminalEventsKeepQueuedReplies`（`replies_test.go`）：RUNNING 任务记录 3 条回复后依次执行 approval_requested、approval_resolved、input_requested，再经派发、标记不确定、核对为未送达、派发时即确认未发出、核对为已送达产生 reply_dispatched、delivery_unknown、reply_unsent（两条路径）、delivery_confirmed，最后 turn_completed；每一步都在推进过的时钟下执行，之后排在队首之后的 2 条回复与入队时的快照完全一致（QUEUED、`RejectReason` 为空、`UpdatedAt` 不变），最后核对完整事件序列。start 不在其中：CREATED 任务收到的回复直接记为 REJECTED，启动前不会有排队回复。旧代码的行为本来正确，测试在旧代码上通过。变异：`rejectReasons` 分别加入 approval_requested、approval_resolved、input_requested，新测试失败而其余测试全部通过（证实原缺口）；加入 turn_completed 时新测试与既有的 `TestClaimNextReplyFIFO` 等同时失败。
+  - TE-2（minor）：新增 `TestTaskEventsRollBackOnFailure`（`tasks_test.go`），仿照 `TestReplyOperationsRollBackOnFailure`：`StartTask` 与 `ApplyTaskEvent` 的 turn_completed、close、fail 各自在任务更新失败（`RAISE(ABORT)`）、任务更新不命中（`RAISE(IGNORE)`，报 `changed during update`）、事件写入失败时，以及 close、fail 在拒绝排队回复失败时，共 14 个子用例，断言返回含触发器信息的错误，且任务快照、全部回复与 `task_events` 行数都与操作前一致；三个事件场景都带 2 条排队回复。测试在旧代码上通过。变异：`applyEvent` 丢弃 `writeTaskTransition` 的错误，12 个子用例失败（回复拒绝失败的 2 个不经过该调用）；丢弃拒绝排队回复的错误，close 与 fail 的回复拒绝失败 2 个子用例失败；两个变异下其余测试全部通过。
+  - TE-6（minor）：`lifecycle_test.go` 打开存储后断言 `os.Stat(cfg.Paths.Database)` 成功且是常规文件；`store_test.go` 新增 `TestOpenDatabaseFileName`，以字面量 `"turncourier.db"` 断言 `Open` 创建的文件。变异：`store.go` 的文件名改为 `turncourier.sqlite`，`TestOpenDatabaseFileName` 与集成测试失败，其余 store 测试通过；`config/paths.go` 的文件名改为 `turncourier.sqlite`，集成测试失败（`config` 包的 `paths_test.go` 本就以字面量钉住这一侧）。两处改名在旧的集成测试下都能通过。
+  - S2（minor）：两个进程首次同时打开同一个新数据目录时，空文件从回滚日志模式转为 WAL 的锁升级冲突不经 busy_timeout 等待，使一方的 `Open` 直接返回 SQLITE_BUSY。`openDB` 改为经 `retryWhileBusy` 调用 `PingContext`：返回 SQLITE_BUSY（`errors.As` 取 `*sqlite.Error`，`Code()&0xff` 等于 `SQLITE_BUSY`）时每 10ms 重试，期限 `openBusyTimeout` 为 5 秒，与 busy_timeout 一致；等待期间 ctx 结束时返回 `ctx.Err()`。为取得错误类型与结果码常量，`store.go` 对 `modernc.org/sqlite` 的空白导入改为具名导入，并导入同一模块的 `modernc.org/sqlite/lib`，依赖不变。新测试 `TestOpenConcurrentlyOnNewDirectory`：每轮 4 个存储实例同时 `Open` 同一个尚不存在的数据目录，共 30 轮，断言全部成功且 `SchemaVersion` 为 1。旧代码上连跑 10 次全部失败，1200 次 `Open` 失败 123 次（10.3%），300 轮中 86 轮出现失败，错误均为 `cannot open database: database is locked (5) (SQLITE_BUSY)`；修复后单次约 0.15 秒，`-count=30` 通过，`-race -count=3` 连跑 3 次通过。`TestRetryWhileBusy` 用真实的 SQLITE_BUSY 错误（存储持有 IMMEDIATE 事务时，另一个不做忙等待的连接开始写事务）驱动替身操作：忙两次后成功返回 nil 且调用 3 次；其他错误只调用 1 次；持续忙时 50ms 期限到后返回 SQLITE_BUSY；等待中上下文取消时返回 `context.Canceled`；`isBusy` 对 nil 与同文本的普通错误返回 false。变异：`openDB` 改回直接 `PingContext`、`isBusy` 恒为 false，并发测试失败，后者同时使 `TestRetryWhileBusy` 失败；忽略期限，持续忙用例在测试另设的 5 秒上下文期限处以 `context deadline exceeded` 失败；上下文结束时返回最后一次的 SQLITE_BUSY、等待时不检查上下文，取消用例失败（后者一直重试到 1 分钟期限）。`architecture.md`「Database」一段写明打开时重试 SQLITE_BUSY。
+  - S3（minor）：`migrate.go`「事务内重新读取 user_version，多个进程同时打开也不会重复执行」原无测试，由 S2 的 `TestOpenConcurrentlyOnNewDirectory` 一并覆盖。变异「在 `BeginTx` 之前读取 user_version、事务内不再重读」下连跑 10 次全部失败，1200 次 `Open` 失败 220 次，300 轮中 88 轮出现失败，错误均为 `apply migration 0001: SQL logic error: table tasks already exists (1)`；其余测试全部通过，证实原缺口。因此不再另写专门的并发迁移测试。`architecture.md` 同一段写明版本在事务内重读。
+  - SM-2（nit）：`internal/task/state_test.go` 与 `internal/queue/state_test.go` 新增 `TestNextUnknownEvent`：对每个已知状态调用 `Next(state, "bogus")`，断言 `errors.Is(err, ErrInvalidTransition)`，且错误文本含状态名与 `bogus`。测试在旧代码上通过；变异「已知状态收到转移表中没有的事件时返回原状态且无错误」在两个包中都使新测试失败，其余测试通过。两个包的覆盖率仍为 100%。
+  - S1（minor，仅文档）：`RecoverInFlight` 把全部 DISPATCHING 回复改为 UNCERTAIN，隐含单一派发进程的前提，而 `ClaimNextReply` 的注释与跨进程并发测试表明派发支持多个进程。`RecoverInFlight` 的文档注释与 `architecture.md`「Recovery」写明：只能由唯一的派发进程在开始派发之前调用，调用期间不得有其他进程持有在途回复，否则另一个进程正在派发的回复会被误标为 UNCERTAIN；「风险与后续」增加单实例锁一条。代码行为不变。
+  - S4（nit，仅文档）：`architecture.md` 新增「Durability」一段、「风险与后续」增加一条，写明 `synchronous=FULL` 只保证进程崩溃后的持久性，macOS 上断电或内核崩溃后不保证，并注明在后续安全与恢复阶段评估 `fullfsync`。已定的 SQLite 参数不变。
+  - S5（nit，仅文档）：`Open` 在迁移检查之前已执行 `journal_mode(WAL)`，回滚日志模式的新版本数据库会被切换为 WAL，`architecture.md`「Database」原写的 refused unchanged 不准确，改为表结构与数据不变、但打开时文件可能已被切换为 WAL 模式。
+  - SM-1（不修复）：任务已关闭或失败时，`RequeueUnsentReply` 与 `ResolveUncertainReply(false)` 不做派发后事件核对，直接把回复记为 REJECTED。这是 Task 9 实施说明写定的行为：事件核对只为防止放回队列后重复投递，关闭或失败的任务不会再派发，拒绝不会造成重复投递；REJECTED 回复保留 `resume_state`，记录它曾被派发。`TestUnsentReplyRejectedWhenTaskStopped` 钉住此行为，代码不改。
+  - 修正后 `make check`（总覆盖率 93.3%，`internal/store/sqlite` 87.3%，`internal/task` 与 `internal/queue` 100%）、`GOOS=windows go vet ./...`、`GOOS=linux go vet ./...`、`CGO_ENABLED=0 go test -count=1 ./...`、`git diff --check` 均通过，`go test -race -count=3 ./internal/store/sqlite/ ./tests/...` 通过。
+  **复查后补充：** 独立复查批准了上述修正：配置部分 28 个变异拦截 27 个，唯一存活的是去掉打开后按 `Stat` 的大小检查，超限内容仍由 `readConfigData` 拒绝；存储与状态机部分各项变异都被新测试拦截；两个真实进程同时首次打开同一新目录，旧代码 200 次失败 87 次，修正后 0 次。复查另提 5 条 nit，处理如下：
+  - N1：`TestOpenConcurrentlyOnNewDirectory` 对 S3 变异的拦截依赖调度，整包运行时可能漏过。新增 `TestMigrateRereadsVersionInsideTransaction`：另一连接在 IMMEDIATE 事务中执行 0001 并设置 `user_version = 1` 但暂不提交，此时开始迁移，200 ms 后提交，断言迁移返回 nil、版本为 1。S3 变异下该测试连跑 20 次全部失败（`table tasks already exists`）；整包运行时只有它失败，印证了原测试会漏检。
+  - N2：`openBusyTimeout` 的期限与 `isBusy` 取低 8 位的掩码没有测试钉住；`sqlite.Error` 的字段未导出，难以在测试中构造扩展错误码，因此不改，记录在此。
+  - N3：新增 `TestKnownKeysMatchRawConfig`，用反射遍历 `rawConfig` 的 `toml` 标签，断言与 `knownKeys` 完全一致；白名单多一项或少一项的变异都使其失败。
+  - N4：新增 `TestLoadKeyErrorsSkipValueChecks`：未知键与非法 `token_ttl` 同时出现时只报键名错误；去掉「键名有误时提前返回」的变异确定性地使其失败，原重复变体测试只能概率性拦截。
+  - N5：包注释补上「键名有误时只返回键名错误」；Task 5 契约代码块中 `Load` 注释「所有校验错误通过 errors.Join 一次返回」同样以 CFG-1、CFG-5 为准。
 - [ ] **Step 3：提交 PR。** 推送 `feat/phase-03-storage` 分支，开 PR，等待 `quality (ubuntu-24.04)`、`quality (macos-15)`、`security` 三项检查通过；记录 CI 耗时，若 modernc 编译使单次质量任务超过 10 分钟，再单独评估启用 setup-go 缓存，不在本阶段预先修改。
 - [ ] **Step 4：合并与记录。** squash 合并；在本文件末尾追加「验证记录」（本地、审查、远端分开记录，未运行的项写明原因），更新 `HANDOFF.md`。
 
@@ -823,3 +861,5 @@ go version -m dist/turncourier
 - 接入命令行后二进制体积预计由约 4 MB 增至约 10 MB（见 D1 实测）；发布前需补齐链接模块的第三方许可声明。
 - 地址统一转小写基于 QQ 邮箱不区分大小写的假设，邮件阶段须用真实样本复核。
 - 正文加密与 Keychain 接入方式（D2）是邮件闭环阶段的前置任务，未完成前不得保存任何正文。
+- `RecoverInFlight` 把全部 DISPATCHING 回复当作崩溃遗留，只能由唯一的派发进程在开始派发之前调用，调用期间不得有其他进程持有在途回复。接入后台服务时，单实例锁须覆盖 `RecoverInFlight` 与全部派发操作，这是邮件闭环阶段的前置条件。
+- `synchronous=FULL` 只保证进程崩溃后已提交的事务不丢失。macOS 上 modernc 驱动只有设置 `PRAGMA fullfsync=1` 时才使用 `F_FULLFSYNC`，默认的 `fsync` 不保证数据写入持久存储，断电或内核崩溃后可能丢失最近提交的事务。本阶段不改已定参数，在后续安全与恢复阶段评估启用 `fullfsync`，需权衡写锁持有时间变长带来的争用。

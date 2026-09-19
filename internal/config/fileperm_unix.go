@@ -25,3 +25,6 @@ func checkFileOwner(info fs.FileInfo) error {
 	}
 	return nil
 }
+
+// openFlags 让打开配置文件时不因 FIFO 等特殊文件阻塞；对常规文件的读取没有影响。
+const openFlags = syscall.O_NONBLOCK
