@@ -40,12 +40,13 @@ var rivalValue = strings.Repeat("r", 12)
 // 编译期确认 Security 实现 Store。
 var _ Store = (*Security)(nil)
 
-// call 是假 security 记录的一次调用：参数、完整标准输入、环境变量与进程号。
+// call 是假 security 记录的一次调用：参数、完整标准输入、环境变量、标准错误是否为空设备与进程号。
 type call struct {
-	Args  []string
-	Stdin string
-	Env   []string
-	PID   int
+	Args       []string
+	Stdin      string
+	Env        []string
+	StderrNull bool
+	PID        int
 }
 
 // fake 是一个测试使用的假钥匙串：指向测试二进制的 Security、状态文件与调用日志。
@@ -65,13 +66,17 @@ func TestMain(m *testing.M) {
 
 // fakeSecurity 扮演 security：先把本次调用追加写入日志，再按模式动作，返回进程退出码。
 // 状态文件保存 account 到机密的 JSON 映射；output 模式下它的内容原样写到标准输出。
-// hang 模式下读取与删除睡眠 30 秒，security -i 的写入照常完成，以便让期限落在写入后的读回核对中。
+// hang 模式下读取与删除睡眠 30 秒，security -i 的写入照常完成，以便让期限落在写入后的读回核对中；
+// hang-write 相反，只让 security -i 睡眠 30 秒，以便让期限落在 Add 的写入中。
 func fakeSecurity() int {
 	stdin, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return 3
 	}
-	record, err := json.Marshal(call{Args: os.Args[1:], Stdin: string(stdin), Env: os.Environ(), PID: os.Getpid()})
+	stderrInfo, stderrErr := os.Stderr.Stat()
+	nullInfo, nullErr := os.Stat(os.DevNull)
+	stderrNull := stderrErr == nil && nullErr == nil && os.SameFile(stderrInfo, nullInfo)
+	record, err := json.Marshal(call{Args: os.Args[1:], Stdin: string(stdin), Env: os.Environ(), StderrNull: stderrNull, PID: os.Getpid()})
 	if err != nil {
 		return 3
 	}
@@ -90,7 +95,8 @@ func fakeSecurity() int {
 	case mode == "exit1":
 		fmt.Fprint(os.Stderr, "STDERR-CANARY")
 		return 1
-	case mode == "hang" && !slices.Equal(os.Args[1:], []string{"-i"}):
+	case mode == "hang" && !slices.Equal(os.Args[1:], []string{"-i"}),
+		mode == "hang-write" && slices.Equal(os.Args[1:], []string{"-i"}):
 		time.Sleep(30 * time.Second)
 		return 0
 	case mode == "output":
@@ -294,7 +300,7 @@ func assertPanics(t *testing.T, name string, fn func()) {
 }
 
 // TestSetGetRoundTrip 钉住写入与读取的参数与标准输入：机密只以十六进制出现在 security -i 的标准输入中，
-// 机密原文与十六进制文本都不进入任何一次调用的参数与环境变量。
+// 机密原文与十六进制文本都不进入任何一次调用的参数与环境变量；子进程的标准错误接空设备，环境变量与父进程完全相同。
 func TestSetGetRoundTrip(t *testing.T) {
 	f := newFake(t, "normal")
 	ctx := context.Background()
@@ -322,6 +328,12 @@ func TestSetGetRoundTrip(t *testing.T) {
 		}
 	}
 	assertNotExposed(t, calls, secret, secretHex)
+	environ := slices.Sorted(slices.Values(os.Environ()))
+	for index, c := range calls {
+		if !c.StderrNull || !slices.Equal(slices.Sorted(slices.Values(c.Env)), environ) {
+			t.Errorf("call %d did not discard stderr or inherit exactly the parent environment", index)
+		}
+	}
 }
 
 // TestMaximumLengths 确认 128 字符的 account 与 1000 字符的机密可以写入，且整行不超过 security -i 的
@@ -379,6 +391,12 @@ func TestExitCodes(t *testing.T) {
 	if err == nil || err.Error() != "keychain get failed with exit code 1" || strings.Contains(err.Error(), "STDERR-CANARY") {
 		t.Errorf("exit 1: %v", err)
 	}
+	if err := f.security.Set(ctx, account, strings.Repeat("aB3", 4)); err == nil || err.Error() != "keychain set failed with exit code 1" {
+		t.Errorf("Set exit 1: %v", err)
+	}
+	if err := f.security.Delete(ctx, account); err == nil || err.Error() != "keychain delete failed with exit code 1" {
+		t.Errorf("Delete exit 1: %v", err)
+	}
 
 	dir := t.TempDir()
 	missing := &Security{path: filepath.Join(dir, "missing-security"), timeout: time.Second}
@@ -405,6 +423,7 @@ func TestReadBackMismatch(t *testing.T) {
 }
 
 // TestGetRejectsMalformedOutput 确认 Get 只接受恰好一个结尾换行的合法机密，超长输出被拒绝，且错误文本不含读到的内容。
+// 远超管道缓冲的输出同样在期限之前判为格式错误，而不是让子进程阻塞在写管道上直到超时；内存中至多保留 maxOutput+1 字节。
 func TestGetRejectsMalformedOutput(t *testing.T) {
 	f := newFake(t, "output")
 	cases := []struct {
@@ -416,6 +435,7 @@ func TestGetRejectsMalformedOutput(t *testing.T) {
 		{"abc\n\n", "abc"},
 		{strings.Repeat("Q", 4097), "QQQ"},
 		{strings.Repeat("Q", 1001) + "\n", "QQQ"},
+		{strings.Repeat("Q", 1<<20) + "\n", "QQQ"},
 	}
 	for index, test := range cases {
 		if err := os.WriteFile(f.state, []byte(test.output), 0o600); err != nil {
@@ -425,6 +445,11 @@ func TestGetRejectsMalformedOutput(t *testing.T) {
 		if !errors.Is(err, ErrInvalidSecret) || strings.Contains(err.Error(), test.leak) {
 			t.Errorf("case %d: %v", index, err)
 		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), f.security.timeout)
+	defer cancel()
+	if output, err := f.security.run(ctx, "get", "", "find-generic-password"); err != nil || len(output) != maxOutput+1 {
+		t.Errorf("run kept %d bytes of oversized output: %v", len(output), err)
 	}
 }
 
@@ -456,7 +481,8 @@ func TestValidationBeforeProcess(t *testing.T) {
 }
 
 // TestTimeout 确认期限到达时返回包装 context.DeadlineExceeded 的错误并结束子进程；已取消的 ctx 报告取消；
-// 期限落在写入后的读回核对中时报告超时而不是 ErrReadBackMismatch。
+// Delete 与 Add 同样受每次调用的期限约束；期限落在写入后的读回核对中时报告超时而不是 ErrReadBackMismatch；
+// 期限落在 Add 的写入中、再读也因期限失败时报告超时而不是 ErrExists。
 // 慢机器上假程序可能来不及写日志就被结束，因此最多重试几次以取得它的进程号。
 func TestTimeout(t *testing.T) {
 	f := newFake(t, "hang")
@@ -489,14 +515,38 @@ func TestTimeout(t *testing.T) {
 		t.Errorf("cancelled: %v", err)
 	}
 
+	start := time.Now()
+	err := f.security.Delete(context.Background(), account)
+	if elapsed := time.Since(start); elapsed > 2*time.Second || !errors.Is(err, context.DeadlineExceeded) ||
+		!strings.HasPrefix(err.Error(), "keychain delete timed out") {
+		t.Errorf("Delete took %v: %v", elapsed, err)
+	}
+
 	// 写入照常完成、读回挂起；1 秒的期限给写入留足时间，使期限落在读回中。
 	f.security.timeout = time.Second
-	err := f.security.Set(context.Background(), account, strings.Repeat("aB3", 4))
+	err = f.security.Set(context.Background(), account, strings.Repeat("aB3", 4))
 	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrReadBackMismatch) || !strings.HasPrefix(err.Error(), "keychain set timed out") {
 		t.Errorf("read-back timeout: %v", err)
 	}
 	if calls := f.calls(t); calls[len(calls)-1].Args[0] != "find-generic-password" {
 		t.Error("deadline did not expire during the read-back")
+	}
+
+	// 存在性检查照常完成、写入挂起；1 秒的期限给存在性检查留足时间，使期限落在写入中。
+	t.Setenv(envMode, "hang-write")
+	fresh := TokenKeyAccount(testInstance, 1)
+	before := interactiveCalls(f.calls(t))
+	start = time.Now()
+	err = f.security.Add(context.Background(), fresh, strings.Repeat("aB3", 4))
+	if elapsed := time.Since(start); elapsed > 3*time.Second || !errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, ErrExists) || !strings.HasPrefix(err.Error(), "keychain add timed out") {
+		t.Errorf("Add with a hanging write took %v: %v", elapsed, err)
+	}
+	if interactiveCalls(f.calls(t)) != before+1 {
+		t.Error("deadline did not expire during the write")
+	}
+	if _, ok := f.items(t)[fresh]; ok {
+		t.Error("hanging write stored the item")
 	}
 }
 

@@ -177,7 +177,8 @@ func (s *Security) readBack(ctx context.Context, op, account, secret string) err
 }
 
 // run 按固定路径启动一次 security：不经 shell，继承父进程环境变量，标准错误接空设备，input 非空时作为标准输入。
-// 返回至多 maxOutput+1 字节的标准输出；ctx 到期时 exec 结束子进程，Wait 返回前子进程已被回收。
+// 返回至多 maxOutput+1 字节的标准输出，其余输出读出后丢弃，避免子进程写满管道后阻塞到期限；
+// ctx 到期时 exec 结束子进程，Wait 返回前子进程已被回收。
 func (s *Security) run(ctx context.Context, op, input string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, s.path, args...)
 	if input != "" {
@@ -191,6 +192,9 @@ func (s *Security) run(ctx context.Context, op, input string, args ...string) ([
 	if err == nil {
 		var readErr error
 		output, readErr = io.ReadAll(io.LimitReader(stdout, maxOutput+1))
+		if readErr == nil {
+			_, readErr = io.Copy(io.Discard, stdout)
+		}
 		if err = command.Wait(); err == nil {
 			err = readErr
 		}
