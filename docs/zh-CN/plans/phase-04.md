@@ -1668,7 +1668,7 @@ func (w *Watcher) Run(ctx context.Context) error
 
 UIDVALIDITY 变化通过在 imapmemserver 中删除并重建 Junk 文件夹模拟（若它不允许删除 INBOX）。
 
-- [ ] **Step 1：写失败的测试（`session_test.go`）。** 期限全部设为 100–500ms 级别。
+- [x] **Step 1：写失败的测试（`session_test.go`）。** 期限全部设为 100–500ms 级别。
   - **收取与游标：** INBOX 放入 3 封、Junk 放入 1 封；`Scan(INBOX, Cursor{})` 返回 `Reset = true`、3 封按 UID 升序且 `Raw` 与放入的字节相同、`Next = {uv, 3}`；以 `Next` 再次 `Scan` 返回空批（证明过滤了服务器对 `4:*` 返回的 UID 3）；再放入 1 封后只返回第 4 封。
   - **只读：** 以上操作后 imapmemserver 中所有邮件都没有 `\Seen`；代理记录的命令中没有 `SELECT`、`STORE`、`COPY`、`MOVE`、`EXPUNGE`、`APPEND`，每条 `UID FETCH` 的正文项都是 `BODY.PEEK[]<0.N>`（N 为 `maxMessageSize + 1`）。
   - **白名单：** 全部用例中代理记录的命令名都在白名单内；能力改写删去 `IDLE` 时 `Idle` 返回 `ErrCapability` 且没有发出 `IDLE`；删去 `AUTH=PLAIN` 并追加 `LOGINDISABLED` 时 `Dial` 返回 `ErrCapability`，代理没有收到 `LOGIN`。
@@ -1687,7 +1687,7 @@ UIDVALIDITY 变化通过在 imapmemserver 中删除并重建 Junk 文件夹模�
   - **批量与大小：** 放入 120 封时依次得到 50、50、20 封，前两批 `More = true`。`maxMessageSize` 在测试中降为 1 KiB：一封 4 KiB 的邮件返回 `TooLarge = true`、`Raw = nil`，代理记录显示没有对该 UID 请求正文；同一封邮件在「大小改写」把 `RFC822.SIZE` 改为 100 时，请求的是 `BODY.PEEK[]<0.1025>`，结果仍为 `TooLarge = true`、`Raw = nil`。`MaxBatchBytes` 在测试中降低后，本批在达到上限时提前结束并置 `More`，下一批从未交付的第一封开始。
   - **认证与传输安全：** 错误密码返回 `ErrAuthFailed`，错误文本不含密码；明文模式下 `Dial` 失败，代理没有收到任何命令（握手失败前没有明文命令发出）；证书不受信任同样失败；CA 受信但 Host 为不在证书 SAN 中的 `localhost` 时同样失败，代理没有收到 `LOGIN`。
   - **文件夹：** 不存在的文件夹在 `Examine` 与 `Scan` 中都返回 `ErrNoFolder`，连接仍可用；「拒绝」故障对 `EXAMINE Junk` 回 `NO [UNAVAILABLE]` 时同样返回 `ErrNoFolder`；`Examine(INBOX)` 返回的 UIDVALIDITY、UIDNEXT 与邮件数与 imapmemserver 中一致。
-- [ ] **Step 2：写失败的测试（`watcher_test.go`）。** `Handle` 把收到的批次写入测试内的切片并更新内存游标；`Status` 写入通道；`Backoff` 与期限在测试中缩短（登录窗口为秒级）。
+- [x] **Step 2：写失败的测试（`watcher_test.go`）。** `Handle` 把收到的批次写入测试内的切片并更新内存游标；`Status` 写入通道；`Backoff` 与期限在测试中缩短（登录窗口为秒级）。
   - 正常：启动后依次收到 Junk 与 INBOX 的批次；IDLE 期间放入的邮件在 1 秒内交给 `Handle`；每封邮件只交付一次。
   - `Handle` 对某批返回错误：发出 `handle_failed`，按退避等待后同一批被再次交付（游标未前进），之后成功处理；整个过程中代理没有收到新的 `LOGIN`，连接没有断开。
   - 断开与半开：代理断开或冻结后，`Watcher` 发出 `disconnected` 与 `backoff`，按退避重连并继续交付新邮件；退避间隔依次约为 Initial、2×Initial（在 ±20% 内）；一次 IDLE 正常结束后复位。
@@ -1699,19 +1699,74 @@ UIDVALIDITY 变化通过在 imapmemserver 中删除并重建 Junk 文件夹模�
   - `Password` 返回错误时不连接，发出 `credentials_unavailable`，其 `Delay` 等于 `Max`，不计入登录次数。
   - Junk 不存在时启动：恰好发出一次 `folder_missing`，之后只扫描 INBOX；代理断开触发重连与重新 LIST 后不再发出；在 imapmemserver 中创建 Junk 并断开，重连后开始扫描 Junk，不发出 `folder_missing`；再删除 Junk 并断开，重连后再发出一次。Junk 在 LIST 中存在但第一次 `EXAMINE Junk` 被拒绝（`NO [UNAVAILABLE]`）时发出 `folder_unavailable`，下一轮照常扫描 Junk 并交付其中的邮件。
   - 取消：IDLE 中取消 ctx，`Run` 在 1 秒内返回 `context.Canceled`，服务端会话已结束。
-- [ ] **Step 3：写失败的测试（`source_test.go`）。** 用 `go/parser` 解析本包非测试文件，再用 `go/types` 做类型检查（导入器用标准库 `go/importer.ForCompiler(fset, "source", nil)`，不引入新依赖），按白名单检查：
+- [x] **Step 3：写失败的测试（`source_test.go`）。** 用 `go/parser` 解析本包非测试文件，再用 `go/types` 做类型检查（导入器用标准库 `go/importer.ForCompiler(fset, "source", nil)`，不引入新依赖），按白名单检查：
   - imapclient 包的函数只允许 `DialTLS`（类型名不受限）；
   - 接收者为 `*imapclient.Client` 的方法调用与方法值只允许 `Capability`、`Caps`、`WaitGreeting`、`Login`、`List`、`Select`、`UIDSearch`、`Fetch`、`Idle`、`Logout`、`Close`、`Closed`、`Mailbox`；
   - 每次 `Select` 调用的选项是带 `ReadOnly: true` 的 `imap.SelectOptions` 字面量；每次 `Fetch` 的第一个参数的静态类型是 `imap.UIDSet`（序号集会发出非 UID 的 `FETCH`）；每个 `imap.FetchItemBodySection` 与 `imap.FetchItemBinarySection` 字面量都带 `Peek: true`；
   - 不出现 `DebugWriter`、`InsecureSkipVerify`、`KeyLogWriter`、`VerifyPeerCertificate`、`VerifyConnection`；`tls.Config` 字面量只出现一次，位于包内构造它的函数中。
 
   在临时副本中分别加入 `UnselectAndExpunge`、`Noop` 或 `Move` 调用，把 `ReadOnly` 改为 false，去掉 `Peek`，或以 `imap.SeqSet` 调用 `Fetch`，测试都必须失败。
-- [ ] **Step 4：** `go get github.com/emersion/go-imap/v2@v2.0.0-beta.8`；测试失败。确认 go-message v0.18.2 以间接依赖进入 `go.mod`，`go list -deps ./internal/mail/imap/ | grep golang.org/x/text` 无输出，`make security` 无发现。
-- [ ] **Step 5：实现。** 按契约；`Options.Dialer` 设为 `&net.Dialer{Timeout: Dial, KeepAlive: 15 * time.Second}`。imapclient 在自己的解码协程中同步调用 `UnilateralDataHandler`，处理函数阻塞会让解码协程停住，而 `client.Close()` 又要等解码协程退出，两者会互相等待。因此 `UnilateralDataHandler.Mailbox` 在收到 EXISTS（`NumMessages` 非空）时只做非阻塞通知：以 `select … default` 向容量为 1 的通道发送，通道已满时直接丢弃（一个待处理的信号已足以触发补扫），从不阻塞。这个通道是「自上次 `Scan` 开始以来是否收到过 EXISTS」的唯一状态，不另设原子标志：`Scan` 在发出 EXAMINE 之前以非阻塞读取排空通道；`Idle` 先非阻塞检查通道，有信号即取走并返回 true、不发送 IDLE，否则进入 IDLE 并等待该通道。排空发生在 EXAMINE 之前，此后到达的 EXISTS 都会留下信号，不会丢失：新邮件要么已被本次 `Scan` 的 UID SEARCH 覆盖，要么让下一次 `Idle` 立即返回、再补扫一轮。不设置 `WordDecoder`（本包不读 ENVELOPE）。
-- [ ] **Step 6：** `go test -race -count=3 ./internal/mail/imap/` 通过、无抖动，覆盖率 ≥ 85%；`CGO_ENABLED=0 go test ./internal/mail/imap/`、`GOOS=windows go vet ./internal/mail/imap/`、`make modverify` 通过；提交前运行 `make secrets`，覆盖实现过程中改动的测试文件。
-- [ ] **Step 7：** `git add go.mod go.sum internal/mail/imap && git commit -m "feat(imap): read-only fetch with command deadlines, idle watchdog and reconnect"`
+- [x] **Step 4：** `go get github.com/emersion/go-imap/v2@v2.0.0-beta.8`；测试失败。确认 go-message v0.18.2 以间接依赖进入 `go.mod`，`go list -deps ./internal/mail/imap/ | grep golang.org/x/text` 无输出，`make security` 无发现。
+- [x] **Step 5：实现。** 按契约；`Options.Dialer` 设为 `&net.Dialer{Timeout: Dial, KeepAlive: 15 * time.Second}`。imapclient 在自己的解码协程中同步调用 `UnilateralDataHandler`，处理函数阻塞会让解码协程停住，而 `client.Close()` 又要等解码协程退出，两者会互相等待。因此 `UnilateralDataHandler.Mailbox` 在收到 EXISTS（`NumMessages` 非空）时只做非阻塞通知：以 `select … default` 向容量为 1 的通道发送，通道已满时直接丢弃（一个待处理的信号已足以触发补扫），从不阻塞。这个通道是「自上次 `Scan` 开始以来是否收到过 EXISTS」的唯一状态，不另设原子标志：`Scan` 在发出 EXAMINE 之前以非阻塞读取排空通道；`Idle` 先非阻塞检查通道，有信号即取走并返回 true、不发送 IDLE，否则进入 IDLE 并等待该通道。排空发生在 EXAMINE 之前，此后到达的 EXISTS 都会留下信号，不会丢失：新邮件要么已被本次 `Scan` 的 UID SEARCH 覆盖，要么让下一次 `Idle` 立即返回、再补扫一轮。不设置 `WordDecoder`（本包不读 ENVELOPE）。
+- [x] **Step 6：** `go test -race -count=3 ./internal/mail/imap/` 通过、无抖动，覆盖率 ≥ 85%；`CGO_ENABLED=0 go test ./internal/mail/imap/`、`GOOS=windows go vet ./internal/mail/imap/`、`make modverify` 通过；提交前运行 `make secrets`，覆盖实现过程中改动的测试文件。
+- [x] **Step 7：** `git add go.mod go.sum internal/mail/imap && git commit -m "feat(imap): read-only fetch with command deadlines, idle watchdog and reconnect"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** 先写测试：`fakeserver_test.go`、`session_test.go`、`watcher_test.go` 与 `source_test.go` 写好后，`go test ./internal/mail/imap/` 因缺少模块失败（`no required module provides package github.com/emersion/go-imap/v2`）。`go get github.com/emersion/go-imap/v2@v2.0.0-beta.8` 只把 go-imap/v2 记为间接依赖，测试随即报 `missing go.sum entry for module providing package github.com/emersion/go-message`（测试导入的 `imapserver` 需要它）；执行 `go mod tidy` 后编译失败（`undefined: Watcher`、`undefined: Cursor`、`undefined: Timeouts`、`undefined: Session` 等），再实现。`go.mod` 只多两行：go-imap/v2 v2.0.0-beta.8 为直接依赖，go-message v0.18.2 为间接依赖。`go.sum` 多 35 行：两个模块各两行哈希，另 31 行都是只含 `/go.mod` 的哈希，来自 go-message 未剪枝的模块图（它的 `go.mod` 声明 go 1.14，要求 x/text v0.14.0，后者又引出 x/tools、x/net、x/sys 等旧版本的 `go.mod`）。`go list -deps ./internal/mail/imap/ | grep golang.org/x/text` 无输出；`go list -m all` 中 x/text 仍是 v0.14.0，只在模块图里，留给 Task 13 固定。`make security` 通过：govulncheck 无发现，gitleaks 无泄漏。本任务只新增 `internal/mail/imap` 的六个文件。
+
+实现要点（`session.go`）：
+- ① 契约中的常量、类型、哨兵与签名照抄。`maxMessageSize`、`maxBatchBytes` 是包内变量，初值为对应常量。
+- ② 每一步都经 `do` 执行：`fn` 在独立 goroutine 中运行，计时器到期、ctx 结束或 `client.Closed()` 关闭时关闭连接，分别返回 `ErrTimeout`、ctx 的错误（错误链可用 `errors.Is` 判断）与 `ErrClosed`。`fn` 的返回值分两类：服务器带标签的 NO/BAD 转为未导出的 `rejectedError`，只保留步骤名与响应类型、丢弃服务器文本，连接仍可用；其余错误都来自连接层（imapclient 在读写失败时自行关闭连接并以该错误结束所有待完成命令），因此关闭连接并返回 `ErrClosed`。关闭经 `shutdown`：在独立 goroutine 中调用 `client.Close()`，至多等待 `IdleStop`。会话关闭后，`Scan`、`Examine`、`ListFolders`、`Idle` 都返回 `ErrClosed`，`Close` 什么也不做。期限到期后 `fn` 仍在运行，直到连接关闭使它返回；它只写自己的局部变量，调用方在 `do` 返回错误后不读取这些变量。
+- ③ `Dial`：`DialTLS` 的 `tls.Config` 只由 `tlsConfig` 构造，`Dialer` 按 Step 5 设置。`DialTLS` 不接受 ctx，拨号与握手只受 `Timeouts.Dial` 约束，其后每一步都响应 ctx。拨号失败只返回 `imap: dial failed`，不带库的错误（可能含地址或证书细节）。登录前的能力用 `Caps()` 读取：问候带能力列表时直接取用，否则等库在收到问候后自动发出的 CAPABILITY。登录后显式发送 `Capability()`，因为 LOGIN 的响应不带能力列表时，库在后台重新请求，`Caps()` 可能读到登录前的旧值。imapmemserver 只在登录后公告 IDLE，去掉这一步的变异会让 `Idle` 返回 `ErrCapability`，由测试杀死。LOGIN 被回 NO 为 `ErrAuthFailed`。
+- ④ EXISTS 通道按 Step 5 实现：处理函数只做非阻塞发送；`Scan` 在 EXAMINE 之前排空通道；`Idle` 先非阻塞检查，有信号即取走并返回 true。
+- ⑤ `Scan`：游标的 `LastUID` 已是 `math.MaxUint32` 时直接返回空批，否则 `last+1` 会回绕成非法的 `0:*`。补扫结果先过滤 `uid ≤ last` 再升序排列，超出 `MaxBatch` 时截断并置 `More`。UID FETCH (UID RFC822.SIZE) 与逐封取正文都用 `Fetch` 期限。
+- ⑥ 正文合计上限在取下一封正文之前检查：本批已有邮件、且已取回正文加下一封声明的大小超过 `maxBatchBytes` 时，本批结束并置 `More`。这样服务器如实报告大小时合计不超过上限（与「已定的实现细节」中「正文合计至多 16 MiB」一致），恰好等于上限时仍在本批内；每批至少交付一封，单封大于上限时也能前进。声明大小超过上限的邮件不取正文，也不计入合计。
+- ⑦ UID SEARCH 返回、但 UID FETCH 没有返回数据或正文的邮件，视为已在两条命令之间被删除：跳过它，游标越过它。若改为停在这封邮件之前、置 `More` 等下一批，被删除的邮件不会再出现在补扫结果中，看似更保守；但服务器持续如此时，Watcher 会因 `More` 立即反复补扫，形成紧循环，所以没有采用。
+- ⑧ 正文以 `io.LimitReader` 流式读取至多 `maxMessageSize+1` 字节，超出即 `TooLarge`、`Raw` 为 nil，剩余部分由库在 `Next` 时读出丢弃（受 `Fetch` 期限约束）。实现中发现 imapclient 的一处数据竞争：字面量读取因连接关闭而失败后，库已放行解码协程；若此时再调用 `Next`，库会再次读取同一字面量来丢弃它，与解码协程争用读缓冲，`-race` 报告数据竞争（「字面量传到一半冻结」的用例复现）。因此读取失败时立即返回、不再调用 `Next`。连接已断开，解码协程会自行退出并结束命令，不会因为没人取走数据而阻塞。修正后该用例 `-race -count=10` 稳定。
+- ⑨ `Idle` 在 ctx 结束时不发送 DONE，直接关闭连接并返回 ctx 的错误。`Close` 在 `Command` 期限内尽力发送 LOGOUT，总是返回 nil。
+
+实现要点（`watcher.go`）：
+- ① 状态种类导出为 `StatusConnected` 等常量，取值即契约注释中的名称。
+- ② 每次登录前的等待取「待定等待」与登录频率限制两者中较长者，只发出一个状态。待定等待有四种来源：连接失败后的重连退避（`backoff`）、认证失败后的 `AuthPause`（`auth_failed`）、`Password` 失败后的 `Max`（`credentials_unavailable`）；只受登录频率限制时也发出 `backoff`。登录频率限制是：距上次登录至少 `Initial`；`LoginWindow` 内已有 `MaxLogins` 次时，等到其中最早一次满窗口。登录次数在每次拨号前登记，拨号失败也计入；`Password` 失败不拨号，不计入。登录前失败（拨号、问候、能力、LOGIN 的非 NO 错误）只发出 `backoff`，`disconnected` 只在已登录的连接结束时发出。
+- ③ 重连退避在两种情况下复位：每轮补扫完 INBOX 时连接自登录起已存活 `IdleMax`（此时连接刚完成一轮补扫，证明它健康）；或者一次 `Idle` 正常结束。补扫成功本身不复位。半开连接在冻结后没有任何成功的步骤，所以冻结之后的时间不算健康。
+- ④ `Idle` 返回 `ErrTimeout` 时计数加一，返回其他结果（成功或其他错误）时计数清零；计数达到 2 即本次 `Run` 改为轮询，并发出一次 `idle_disabled`。
+- ⑤ 空批次只在游标变化时交给 `Handle`，例如 UIDVALIDITY 变化后的空文件夹要持久化新游标；游标不变的空批不交付。
+- ⑥ `Cursor` 返回错误同样是本地错误，与 `Handle` 失败一样发出 `handle_failed`、在同一连接内按退避重试；契约只写了 `Handle`，这里补上 `Cursor`，已写入 `Watcher` 的注释。同连接重试的退避与重连退避是两串独立的序列，参数相同，处理成功后复位。
+- ⑦ ctx 结束时直接关闭连接，不发送 LOGOUT，所以 `Run` 能在 1 秒内返回。`serve` 因其他原因返回时（例如服务器拒绝了 INBOX），连接可能仍然打开，此时经 `Close` 发送 LOGOUT。
+- ⑧ 同一连接上重新 LIST 的间隔为包内变量 `relistInterval`（1 小时），测试降低它来覆盖重新 LIST。这是契约没有列出的测试替换点，与 `minAuthPause` 同类。
+
+与契约的偏差：`ListFolders` 的注释写「修改版 UTF-7 原样」，但 imapclient 解析 LIST 响应时一律把修改版 UTF-7 解码为 UTF-8，无法关闭；`Examine` 与 `Scan` 发送文件夹名时再编码回去，所以返回的名称可以原样传回。`INBOX`、`Junk` 这类 ASCII 名称不受影响，L1 记录的是解码后的名称。注释已改为如实描述。
+
+离线假服务器（`fakeserver_test.go`）：imapserver 加 imapmemserver 在回环地址的普通监听器上运行（`InsecureAuth = true`，日志丢弃），前面是 TLS 代理。代理的证书借用 `httptest`，服务端配置去掉 `NextProtos`：imapclient 协商 ALPN `imap`，而 httptest 的 `http/1.1` 会让握手失败。代理逐行解析客户端命令，记录标签、命令名、参数与 UID FETCH 的数据项，LOGIN 只记命令名；明文入口收到的 TLS 握手字节不会被误记为命令。服务器方向按字面量长度原样转发字面量，对响应行改写能力列表（问候、LOGIN 响应码与 CAPABILITY 响应）与 `RFC822.SIZE`。故障表之外补了三项：一是 `faultEmpty`，不转发，直接回 `<标签> OK`，模拟补扫期间邮件被删除；二是 `noJunk` 选项；三是 `maxTLSVersion` 选项。冻结后两个方向的数据都读出丢弃而不转发，这样客户端关闭连接时代理能看到，用例据此断言「连接已被关闭」。每个假服务器在用例结束时断言：记录的命令名都在白名单内（含 DONE），UID FETCH 的数据项只有 `UID`、`RFC822.SIZE` 与 `BODY.PEEK[]<0.N>`。测试用户与邮件经 imapmemserver 的用户接口放入，测试密码为 `strings.Repeat("pw", 8)`，错误密码为 `strings.Repeat("qx", 8)`，都在运行时构造，没有使用 `gitleaks:allow`。
+
+测试（期限为 100–500ms 级别，拨号放宽到 1 秒）：
+- `session_test.go` 按 Step 1 覆盖：`TestScanFetchesNewMessagesReadOnly`（收取、游标、只读、正文项为 `BODY.PEEK[]<0.2097153>`）；`TestCapabilities`（无 IDLE、LOGINDISABLED，另补没有 IMAP4rev1）；`TestCommandDeadlines`（问候冻结、LOGIN 后冻结、EXAMINE 与 UID SEARCH 的无标签 BAD、正文字面量传到 512 字节后冻结、IDLE 的无标签 BAD、进入 IDLE 后半开，另补 UID FETCH (RFC822.SIZE) 的无标签 BAD）；`TestExistsDuringScan`、`TestExistsHandlerNeverBlocks`、`TestScanClearsStaleSignal`、`TestIdlePush`、`TestScanUIDValidityChange`、`TestScanBatches`（120、51、50 封）、`TestScanTooLarge`（另补恰为上限的邮件）、`TestScanBatchBytes`（另补单封超过上限时仍然前进）、`TestDialAuthFailed`、`TestDialTransportSecurity`（明文、证书不受信任、主机名为 `localhost`，另补只支持 TLS 1.1 的服务器，并以对照连接确认它确实能协商出 TLS 1.1）、`TestFolders`。
+- `session_test.go` 在契约之外补了：`TestContextCancellation`、`TestServerDisconnect`、`TestScanSkipsVanishedMessages`、`TestScanCursorAtMaxUID`、`TestShutdownBoundedWait`（用测试自建的阻塞处理函数让 `client.Close` 挂住，`shutdown` 在 `IdleStop` 后返回）、`TestCloseLogsOut`、`TestTimeoutsDefaults`、`TestErrorTextHasNoServerText`。
+- `watcher_test.go` 按 Step 2 覆盖：`TestWatcherDelivers`、`TestWatcherRetriesHandleOnSameConnection`（另补处理成功后退避复位）、`TestWatcherReconnectsWithBackoff`（断开与半开后退避约为 Initial、2×Initial；IDLE 收到 EXISTS 正常结束后复位为 Initial，此时连接存活时间远小于 `IdleMax`，复位只能来自 IDLE 正常结束）、`TestWatcherIdlePhaseFaults`、`TestWatcherDisablesIdleAfterTimeouts`、`TestWatcherRecoversFromCommandBAD`（UID SEARCH，另补 LIST）、`TestWatcherExistsDuringFetch`、`TestWatcherAuthFailure`、`TestBackoffDefaults`、`TestWatcherCredentialsUnavailable`、`TestWatcherJunkFolder`、`TestWatcherCancelDuringIdle`。
+- `TestWatcherIdlePhaseFaults` 使用 `Jitter: 0.01`、`Initial` 100ms、`Max` 400ms、`MaxLogins` 4、`LoginWindow` 1.5s：断言前三个登录间隔每次至少增长 1.5 倍，任一登录间隔不低于 `Initial`，任一窗口内的登录不超过 `MaxLogins`。代理记录的是收到 LOGIN 的时刻，比 Watcher 登记的时刻晚一个握手，所以窗口比较留出 100ms 余量。
+- `watcher_test.go` 在契约之外补了：`TestWatcherResetsBackoffAfterHealthyPeriod`（不支持 IDLE、按 Poll 补扫时存活达到 `IdleMax` 后复位）、`TestWatcherIdleTimeoutsMustBeConsecutive`、`TestWatcherPollsWithoutIdleCapability`、`TestWatcherBacksOffWhenDialFails`（退避约为 1、2、4 倍 Initial，且带抖动）、`TestWatcherHandleWaitSurvivesDisconnect`、`TestWatcherDrainsMoreBatches`、`TestWatcherRelists`（另断言游标不变的空批不交付）、`TestWatcherLoginSpacing`（`Jitter: 0.9` 时退避可能短于 Initial，登录间隔仍不低于 Initial）。
+- `source_test.go` 按 Step 3 用 `go/parser` 与 `go/types` 检查，导入器为 `importer.ForCompiler(fset, "source", nil)`，各用例共用一个实例。检查对象经类型信息确定，改名导入与点导入都绕不过；另外仍把任何点导入报告为违规。`Select` 与 `Fetch` 只能直接调用，方法值会绕过参数检查，因此报告为违规。tls.Config 的字段须恰为 `ServerName`、`RootCAs`、`MinVersion`，与 Task 10 一致。`TestSourceProblemsDetectsViolations` 用内存中的源码逐类确认检查有效，共 24 例。
+
+变异测试在仓库副本中进行，每次只改一处，共 64 个，全部被杀死：
+- 契约点名的六项：加入 `UnselectAndExpunge`、`Noop` 或 `Move` 调用，`ReadOnly` 改为 false，去掉 `Peek`，以 `imap.SeqSet` 调用 `Fetch`，都被 `TestSourceRestrictions` 杀死。
+- 处理函数改为阻塞发送：被 `TestExistsHandlerNeverBlocks` 杀死；只运行注入一条的 `TestExistsDuringScan` 时存活，与契约的说明一致。
+- `Scan` 不排空通道：被 `TestScanClearsStaleSignal` 杀死。
+- 「补扫成功复位」与去掉登录上限：被 `TestWatcherIdlePhaseFaults` 杀死；上限的 `>=` 改为 `>` 同样被杀死。
+- 其余涉及：
+  - Idle 不预先检查通道、IDLE 期间忽略 EXISTS、不发 DONE、不检查 IDLE 能力、ctx 结束不返回；
+  - 去掉 `uid > last` 过滤、UIDVALIDITY 变化不从 1 补扫、`MaxBatch` 的截断与边界、合计上限的去掉、边界与「每批至少一封」、大小上限与读取上限的边界、部分取回长度改为 N、跳过的邮件不推进游标、去掉 `MaxUint32` 保护；
+  - 去掉 LOGINDISABLED 或 IMAP4rev1 检查、不映射 `ErrAuthFailed` 或 `ErrNoFolder`、用登录前的能力、`rejectedError` 带出服务器文本；
+  - `do` 去掉计时器、ctx 分支或 ctx 预检、`shutdown` 无限等待、`Close` 不发 LOGOUT、`MinVersion` 降为 TLS 1.0、去掉 `ServerName`（被源码检查杀死）、默认期限；
+  - Watcher 的各条复位规则、最小登录间隔、IDLE 降级的次数与「连续」、同连接重试的复位、处理失败改为重连、`folder_missing` 每次都发或初值为缺失、`folder_unavailable` 改为断开、`AuthPause` 下限、重新 LIST、加倍、上限 `Max`、抖动、`Password` 失败计入登录、认证失败改用退避、凭据不可用改为等 `Initial`、空批次的交付条件（两个方向）。
+- 其中 `MaxBatch` 边界、合计上限的 `>=`、同连接重试不复位、IDLE 超时计数不清零四个变异，第一轮存活；补了 51 与 50 封的批量用例、恰等于上限的合计用例、处理成功后再失败的用例，以及 `TestWatcherIdleTimeoutsMustBeConsecutive` 后被杀死。
+- 另有一个存活变异：去掉读取正文时的 `io.LimitReader`，改为读到字面量结束。imapmemserver 遵守部分取回，字面量本就不超过 N+1 字节，结果相同；这个上界只在服务器不遵守部分取回时限制内存，功能测试观察不到，保留为纵深防御。
+
+验证：
+- `go test -race -count=3 ./internal/mail/imap/` 通过，覆盖率 98.0%。与 sqlite、security 各包的 `-race -count=3` 并行运行时同样通过；另外 `-race -count=8` 连续运行通过。
+- `CGO_ENABLED=0 go test ./internal/mail/imap/` 通过。该命令第一次运行时发现 `TestWatcherResetsBackoffAfterHealthyPeriod` 偶发失败：用例在新连接刚收到 LOGIN、登录尚未完成时就断开，这属于拨号失败，不发出 `disconnected`。改为等 `connected` 状态且新连接上已有补扫后再断开，此后 `-count=20` 稳定。
+- `GOOS=windows go vet ./internal/mail/imap/`、全仓 `GOOS=windows go vet ./...` 与 `GOOS=linux go vet ./...` 通过。
+- `make modverify`、`make secrets`、`make security`、`make check` 通过（含中文注释检查与 staticcheck，总覆盖率 94.06%）。
+
+测试只在 macOS 上运行，Linux 上的测试由 CI 运行，本机未验证。测试只连接回环地址上的本地假服务器，不连接任何真实服务器，不涉及钥匙串。与前面各任务相同，本任务的提交包含本清单的勾选与实施说明。
 
 ### Task 12：`init` 命令
 
