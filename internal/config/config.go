@@ -234,7 +234,7 @@ func parseError(err error) error {
 	}
 	line, key := parseErr.Position.Line, parseErr.LastKey
 	if key != "" && isCredentialKey(strings.Split(key, ".")) {
-		return fmt.Errorf("line %d: %s must not be set: 凭据将由 init 写入 Keychain", line, key)
+		return fmt.Errorf("line %d: %s must not be set: 凭据由 turncourier init 写入 Keychain", line, key)
 	}
 	text := fmt.Sprintf("cannot parse config file: line %d, column %d: invalid TOML", line, parseErr.Position.Col)
 	if key != "" {
@@ -259,7 +259,7 @@ func keyProblems(keys []toml.Key) []error {
 	problems := make([]error, 0, len(unknown))
 	for _, key := range unknown {
 		if isCredentialKey(key) {
-			problems = append(problems, fmt.Errorf("%s must not be set: 凭据将由 init 写入 Keychain", key))
+			problems = append(problems, fmt.Errorf("%s must not be set: 凭据由 turncourier init 写入 Keychain", key))
 			continue
 		}
 		problems = append(problems, fmt.Errorf("unknown key %s", key))

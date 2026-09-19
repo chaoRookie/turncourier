@@ -1,4 +1,4 @@
-// Package cli 使用注入的离线诊断验证命令输出及错误码。
+// Package cli 使用注入的离线诊断验证命令输出、帮助与用法文案及错误码。
 package cli
 
 import (
@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,14 +26,19 @@ func testChecker() doctor.Checker {
 }
 
 // wantDescription 是帮助描述的原文；与实施清单一致，不含阶段号。
-const wantDescription = "pre-alpha：当前没有邮件收发、任务执行或后台服务能力。"
+const wantDescription = "pre-alpha：可以用 init 保存配置、授权码与密钥；尚不能收发邮件、执行任务或运行后台服务。"
 
-// TestHelp 确认所有帮助入口说明当前阶段且不含阶段号，并且不运行诊断或 Agent。
+// wantHelpText 是文本帮助的全文，与实施清单逐字一致。
+const wantHelpText = "turncourier — Email bridge for Codex and Claude Code\n\n" + wantDescription + "\n\n用法：turncourier <命令> [--json]\n\n可用命令：\n" +
+	"  help       查看帮助\n  version    查看版本\n  doctor     只读检查平台及 Git、Codex、Claude 的版本\n" +
+	"  init       交互式创建配置，并把 QQ 授权码与密钥存入 macOS Keychain\n\n规划命令（尚未实现）：run、tasks、logs、service\n"
+
+// TestHelp 确认所有帮助入口输出同一份帮助全文：含新描述与 init，不含阶段号，并且不运行诊断或 Agent。
 func TestHelp(t *testing.T) {
 	for _, args := range [][]string{nil, {"help"}, {"-h"}, {"--help"}} {
 		var stdout, stderr bytes.Buffer
-		code := Run(context.Background(), args, &stdout, &stderr, doctor.Checker{})
-		if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), wantDescription) || !strings.Contains(stdout.String(), "尚未实现") || strings.Contains(stdout.String(), "Phase") {
+		code := Run(context.Background(), args, &stdout, &stderr, Deps{})
+		if code != 0 || stderr.Len() != 0 || stdout.String() != wantHelpText || strings.Contains(stdout.String(), "Phase") {
 			t.Errorf("help failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 	}
@@ -41,14 +47,16 @@ func TestHelp(t *testing.T) {
 // TestHelpJSON 确认机器可读帮助包含实际命令和未实现能力。
 func TestHelpJSON(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), []string{"help", "--json"}, &stdout, &stderr, doctor.Checker{}); code != 0 {
+	if code := Run(context.Background(), []string{"help", "--json"}, &stdout, &stderr, Deps{}); code != 0 {
 		t.Fatalf("help failed: %s", stderr.String())
 	}
 	var help Help
 	if err := json.Unmarshal(stdout.Bytes(), &help); err != nil {
 		t.Fatal(err)
 	}
-	if help.Name != "turncourier" || len(help.Commands) != 3 || len(help.Planned) != 5 || help.Description != wantDescription {
+	if help.Name != "turncourier" || help.Description != wantDescription ||
+		!slices.Equal(help.Commands, []string{"help [--json]", "version [--json]", "doctor [--json]", "init"}) ||
+		!slices.Equal(help.Planned, []string{"run", "tasks", "logs", "service"}) {
 		t.Fatalf("unexpected help: %+v", help)
 	}
 }
@@ -57,7 +65,7 @@ func TestHelpJSON(t *testing.T) {
 func TestVersion(t *testing.T) {
 	for _, args := range [][]string{{"version"}, {"--version"}, {"version", "--json"}} {
 		var stdout, stderr bytes.Buffer
-		if code := Run(context.Background(), args, &stdout, &stderr, doctor.Checker{}); code != 0 || stderr.Len() != 0 {
+		if code := Run(context.Background(), args, &stdout, &stderr, Deps{}); code != 0 || stderr.Len() != 0 {
 			t.Fatalf("version failed: %s", stderr.String())
 		}
 		if len(args) == 2 {
@@ -71,7 +79,11 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-// TestUsageFailures 确认未知命令（即使带参数）、未知参数及规划命令不会伪报执行成功，也不会启动外部工具；提示中不含阶段号。
+// usageError 是参数错误的原文，与实施清单逐字一致。
+const usageError = "参数错误：help、version、doctor 只接受可选的 --json 参数；init 不接受参数。\n"
+
+// TestUsageFailures 确认未知命令（即使带参数）、未知参数及规划命令不会伪报执行成功，也不会启动外部工具或进入 init；
+// 参数错误与规划命令的提示与实施清单逐字一致，不含阶段号。
 func TestUsageFailures(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -80,16 +92,23 @@ func TestUsageFailures(t *testing.T) {
 		{[]string{"unknown"}, "未知命令"}, {[]string{"--json"}, "未知命令"},
 		{[]string{"doctr", "--verbose"}, "未知命令"}, {[]string{"bogus", "x", "y"}, "未知命令"},
 		{[]string{"doctr", "--json"}, "未知命令"},
-		{[]string{"doctor", "--unsafe"}, "参数错误"}, {[]string{"doctor", "--json", "extra"}, "参数错误"},
-		{[]string{"version", "other"}, "参数错误"}, {[]string{"help", "--json", "--json"}, "参数错误"},
-		{[]string{"init"}, "尚未实现"}, {[]string{"run", "codex"}, "尚未实现"},
-		{[]string{"tasks"}, "尚未实现"}, {[]string{"logs"}, "尚未实现"},
-		{[]string{"service", "install"}, "尚未实现"},
+		{[]string{"doctor", "--unsafe"}, usageError}, {[]string{"doctor", "--json", "extra"}, usageError},
+		{[]string{"version", "other"}, usageError}, {[]string{"help", "--json", "--json"}, usageError},
+		{[]string{"init", "--json"}, usageError}, {[]string{"init", "extra"}, usageError},
+		{[]string{"run", "codex"}, "run 尚未实现；当前仅提供 help、version、doctor、init。\n"},
+		{[]string{"run"}, "run 尚未实现；当前仅提供 help、version、doctor、init。\n"},
+		{[]string{"tasks"}, "tasks 尚未实现；当前仅提供 help、version、doctor、init。\n"},
+		{[]string{"logs"}, "logs 尚未实现；当前仅提供 help、version、doctor、init。\n"},
+		{[]string{"service", "install"}, "service 尚未实现；当前仅提供 help、version、doctor、init。\n"},
 	}
 	for _, test := range cases {
 		t.Run(strings.Join(test.args, "/"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code := Run(context.Background(), test.args, &stdout, &stderr, doctor.Checker{}); code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), test.want) || strings.Contains(stderr.String(), "Phase") {
+			// init 的依赖为零值：若误入 init 流程会因调用 nil 函数而 panic。
+			code := Run(context.Background(), test.args, &stdout, &stderr, Deps{})
+			exact := strings.HasSuffix(test.want, "\n")
+			if code != 2 || stdout.Len() != 0 || strings.Contains(stderr.String(), "Phase") ||
+				(exact && stderr.String() != test.want) || (!exact && !strings.Contains(stderr.String(), test.want)) {
 				t.Errorf("unexpected usage result: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
 			}
 		})
@@ -104,7 +123,7 @@ func TestDoctorJSON(t *testing.T) {
 			checker.Lookup = func(string) (string, error) { return "", errors.New("missing") }
 		}
 		var stdout, stderr bytes.Buffer
-		code := Run(context.Background(), []string{"doctor", "--json"}, &stdout, &stderr, checker)
+		code := Run(context.Background(), []string{"doctor", "--json"}, &stdout, &stderr, Deps{Checker: checker})
 		var report doctor.Report
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
@@ -125,7 +144,7 @@ func TestDoctorText(t *testing.T) {
 		return name, nil
 	}
 	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), []string{"doctor"}, &stdout, &stderr, checker); code != 1 {
+	if code := Run(context.Background(), []string{"doctor"}, &stdout, &stderr, Deps{Checker: checker}); code != 1 {
 		t.Fatalf("expected missing tool exit: %d", code)
 	}
 	for _, want := range []string{"darwin", "git version 2.50.0", "codex-cli", "未在 PATH", "不验证登录"} {
@@ -162,7 +181,7 @@ func TestOutputFailure(t *testing.T) {
 	}
 	for _, test := range cases {
 		var stderr bytes.Buffer
-		code := Run(context.Background(), test.args, &failingWriter{writesLeft: test.writes}, &stderr, testChecker())
+		code := Run(context.Background(), test.args, &failingWriter{writesLeft: test.writes}, &stderr, Deps{Checker: testChecker()})
 		if code != 1 || !strings.Contains(stderr.String(), "无法写入") {
 			t.Errorf("output failure lost: args=%v writes=%d code=%d stderr=%q", test.args, test.writes, code, stderr.String())
 		}

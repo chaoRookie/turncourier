@@ -263,7 +263,7 @@ func TestKnownKeysMatchRawConfig(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsCredentialKeys 验证凭据类键被拒绝，并提示凭据由 init 写入 Keychain；
+// TestLoadRejectsCredentialKeys 验证凭据类键被拒绝，并提示凭据由 turncourier init 写入 Keychain；
 // 键名按小写比较，大写或混合大小写的凭据类键同样给出 Keychain 提示。
 func TestLoadRejectsCredentialKeys(t *testing.T) {
 	for _, key := range []string{"password", "authorization_code", "auth_code", "token", "secret", "PASSWORD", "Secret"} {
@@ -272,7 +272,7 @@ func TestLoadRejectsCredentialKeys(t *testing.T) {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("%s: 错误未提到键名: %v", key, err)
 		}
-		if !strings.Contains(err.Error(), "凭据将由 init 写入 Keychain") {
+		if !strings.Contains(err.Error(), "凭据由 turncourier init 写入 Keychain") {
 			t.Errorf("%s: 错误缺少 Keychain 提示: %v", key, err)
 		}
 	}
@@ -586,7 +586,7 @@ func TestLoadParseErrorsHideValues(t *testing.T) {
 	cases := []struct {
 		name, line, value, want string
 	}{
-		{"未加引号的凭据值", "authorization_code = abcdefghijklmnop", "abcdefghijklmnop", "凭据将由 init 写入 Keychain"},
+		{"未加引号的凭据值", "authorization_code = abcdefghijklmnop", "abcdefghijklmnop", "凭据由 turncourier init 写入 Keychain"},
 		{"未加引号的普通值", "imap_host = imapsecretvalue", "imapsecretvalue", "invalid TOML"},
 		{"类型错误", `imap_port = "portsecretvalue"`, "portsecretvalue", "mailbox.imap_port"},
 	}

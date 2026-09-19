@@ -1,4 +1,4 @@
-// Package cli 解析 TurnCourier 命令；当前只提供帮助、版本和只读环境诊断。
+// Package cli 解析 TurnCourier 命令；当前提供帮助、版本、只读环境诊断与交互式 init。
 package cli
 
 import (
@@ -21,10 +21,16 @@ type Help struct {
 	Planned     []string `json:"planned"`
 }
 
-// Run 执行命令并返回退出码：成功为 0，诊断失败或写入错误为 1，用法错误为 2。
+// Deps 是命令用到的外部依赖；cmd/turncourier 装配生产实现，测试注入替身。
+type Deps struct {
+	Checker doctor.Checker
+	Init    InitDeps
+}
+
+// Run 执行命令并返回退出码：成功为 0，诊断失败、init 失败或写入错误为 1，用法错误为 2。
 // 传入的是进程标准输出或标准错误且其管道已断开时，写入不会返回错误，进程按 Unix SIGPIPE 惯例直接终止；
-// 其他写入错误返回 1。checker 仅用于 doctor；其他命令不会查找或运行外部工具。
-func Run(ctx context.Context, args []string, stdout, stderr io.Writer, checker doctor.Checker) int {
+// 其他写入错误返回 1。deps.Checker 仅用于 doctor，deps.Init 仅用于 init；其他命令不会查找或运行外部工具。
+func Run(ctx context.Context, args []string, stdout, stderr io.Writer, deps Deps) int {
 	command := "help"
 	if len(args) > 0 {
 		command, args = args[0], args[1:]
@@ -36,32 +42,33 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, checker d
 		command = "version"
 	}
 	switch command {
-	case "help", "version", "doctor":
+	case "help", "version", "doctor", "init":
 		// 已实现命令继续校验参数；命令名错误优先于参数错误报告。
-	case "init", "run", "tasks", "logs", "service":
-		fmt.Fprintf(stderr, "%s 尚未实现；当前仅提供 help、version、doctor。\n", command)
+	case "run", "tasks", "logs", "service":
+		fmt.Fprintf(stderr, "%s 尚未实现；当前仅提供 help、version、doctor、init。\n", command)
 		return 2
 	default:
 		fmt.Fprintf(stderr, "未知命令 %q；运行 turncourier help 查看用法。\n", command)
 		return 2
 	}
-	jsonOutput := len(args) == 1 && args[0] == "--json"
+	// init 不接受任何参数，包括 --json。
+	jsonOutput := command != "init" && len(args) == 1 && args[0] == "--json"
 	if len(args) > 0 && !jsonOutput {
-		fmt.Fprintln(stderr, "参数错误：只接受 help、version、doctor 的可选 --json 参数。")
+		fmt.Fprintln(stderr, "参数错误：help、version、doctor 只接受可选的 --json 参数；init 不接受参数。")
 		return 2
 	}
 	switch command {
 	case "help":
 		help := Help{
 			Name:        "turncourier",
-			Description: "pre-alpha：当前没有邮件收发、任务执行或后台服务能力。",
-			Commands:    []string{"help [--json]", "version [--json]", "doctor [--json]"},
-			Planned:     []string{"init", "run", "tasks", "logs", "service"},
+			Description: "pre-alpha：可以用 init 保存配置、授权码与密钥；尚不能收发邮件、执行任务或运行后台服务。",
+			Commands:    []string{"help [--json]", "version [--json]", "doctor [--json]", "init"},
+			Planned:     []string{"run", "tasks", "logs", "service"},
 		}
 		if jsonOutput {
 			return writeJSON(stdout, stderr, help)
 		}
-		_, err := fmt.Fprintf(stdout, "%s — Email bridge for Codex and Claude Code\n\n%s\n\n用法：turncourier <命令> [--json]\n\n可用命令：\n  help       查看帮助\n  version    查看版本\n  doctor     只读检查平台及 Git、Codex、Claude 的版本\n\n规划命令（尚未实现）：init、run、tasks、logs、service\n", help.Name, help.Description)
+		_, err := fmt.Fprintf(stdout, "%s — Email bridge for Codex and Claude Code\n\n%s\n\n用法：turncourier <命令> [--json]\n\n可用命令：\n  help       查看帮助\n  version    查看版本\n  doctor     只读检查平台及 Git、Codex、Claude 的版本\n  init       交互式创建配置，并把 QQ 授权码与密钥存入 macOS Keychain\n\n规划命令（尚未实现）：run、tasks、logs、service\n", help.Name, help.Description)
 		return outputStatus(err, stderr)
 	case "version":
 		if jsonOutput {
@@ -69,9 +76,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, checker d
 		}
 		_, err := fmt.Fprintf(stdout, "turncourier %s\n", Version)
 		return outputStatus(err, stderr)
+	case "init":
+		return runInit(ctx, stdout, stderr, deps.Init)
 	default:
 		// 前面的命令检查已排除其他命令，这里只剩 doctor。
-		report := checker.Check(ctx)
+		report := deps.Checker.Check(ctx)
 		if code := writeReport(stdout, stderr, report, jsonOutput); code != 0 {
 			return code
 		}
