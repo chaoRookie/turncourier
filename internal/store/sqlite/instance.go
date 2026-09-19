@@ -132,8 +132,13 @@ func (s *Store) KeyCheckOf(ctx context.Context, purpose KeyPurpose, kid uint8) (
 
 // ActiveKeyID 返回该用途 active 密钥的 kid；没有时返回 ErrNotFound。
 func (s *Store) ActiveKeyID(ctx context.Context, purpose KeyPurpose) (uint8, error) {
+	return activeKeyID(ctx, s.db, purpose)
+}
+
+// activeKeyID 通过 q 读取该用途 active 密钥的 kid，使读取在事务内外都能复用；没有时返回 ErrNotFound。
+func activeKeyID(ctx context.Context, q rowQuerier, purpose KeyPurpose) (uint8, error) {
 	var kid uint8
-	err := s.db.QueryRowContext(ctx, "SELECT kid FROM crypto_keys WHERE purpose = ? AND state = ?", string(purpose), string(KeyActive)).Scan(&kid)
+	err := q.QueryRowContext(ctx, "SELECT kid FROM crypto_keys WHERE purpose = ? AND state = ?", string(purpose), string(KeyActive)).Scan(&kid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("active %s key: %w", purpose, ErrNotFound)
 	}
@@ -145,8 +150,13 @@ func (s *Store) ActiveKeyID(ctx context.Context, purpose KeyPurpose) (uint8, err
 
 // KeyStateOf 返回 (purpose, kid) 的状态；未登记时返回 ErrNotFound。
 func (s *Store) KeyStateOf(ctx context.Context, purpose KeyPurpose, kid uint8) (KeyState, error) {
+	return keyStateOf(ctx, s.db, purpose, kid)
+}
+
+// keyStateOf 通过 q 读取 (purpose, kid) 的状态，使读取在事务内外都能复用；未登记时返回 ErrNotFound。
+func keyStateOf(ctx context.Context, q rowQuerier, purpose KeyPurpose, kid uint8) (KeyState, error) {
 	var state KeyState
-	err := s.db.QueryRowContext(ctx, "SELECT state FROM crypto_keys WHERE purpose = ? AND kid = ?", string(purpose), kid).Scan(&state)
+	err := q.QueryRowContext(ctx, "SELECT state FROM crypto_keys WHERE purpose = ? AND kid = ?", string(purpose), kid).Scan(&state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("key %s/%d: %w", purpose, kid, ErrNotFound)
 	}

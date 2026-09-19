@@ -139,7 +139,9 @@ func (s *Store) StartTask(ctx context.Context, id string, version int64, session
 
 // ApplyTaskEvent 执行 turn_completed、input_requested、approval_requested、approval_resolved、fail、close 之一。
 // start、reply_dispatched、delivery_unknown、delivery_confirmed 必须由对应的存储操作原子完成，这里直接拒绝。
-// fail 与 close 在同一事务中把该任务所有 QUEUED 回复改为 REJECTED（原因分别为 task_failed、task_closed）。
+// fail 与 close 在同一事务中把该任务所有 QUEUED 回复改为 REJECTED（原因分别为 task_failed、task_closed），提交后执行检查点。
+// close 还在同一事务中把该任务的 PENDING 通知改为 ABANDONED(task_closed)；SENDING 与 UNCERTAIN 通知的结果尚未确定，保持不变，
+// 之后确认未投递时由 RequeueNotification 或 ResolveUncertainNotification 改为 ABANDONED(task_closed)。fail 不影响通知。
 func (s *Store) ApplyTaskEvent(ctx context.Context, id string, version int64, event task.Event) (Task, error) {
 	if !manualEvents[event] {
 		return Task{}, fmt.Errorf("%w: event %q must be applied by its dedicated store operation", task.ErrInvalidTransition, event)
@@ -183,12 +185,21 @@ func (s *Store) applyEvent(ctx context.Context, id string, version int64, event 
 			return Task{}, fmt.Errorf("cannot reject queued replies: %w", err)
 		}
 	}
+	if event == task.Close {
+		if _, err := abandonPending(ctx, tx, abandonTaskClosed, now, "task_id = ?", id); err != nil {
+			return Task{}, err
+		}
+	}
 	updated, err := getTask(ctx, tx, id)
 	if err != nil {
 		return Task{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Task{}, fmt.Errorf("cannot commit task event: %w", err)
+	}
+	// 被拒绝的排队回复与被放弃的通知，其正文已由触发器在同一事务中删除。
+	if _, ok := rejectReasons[event]; ok {
+		truncateWAL(ctx, s.db)
 	}
 	return updated, nil
 }

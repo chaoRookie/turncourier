@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chaoRookie/turncourier/internal/security/payload"
+
 	// 导入时注册纯 Go 实现的 "sqlite" 驱动，构建不依赖 CGO；错误类型与结果码用于识别 SQLITE_BUSY。
 	moderncsqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -21,15 +23,19 @@ import (
 
 // Store 是可并发使用的 SQLite 存储；进程内所有操作串行经过单个连接。
 type Store struct {
-	db     *sql.DB
-	now    func() time.Time
-	random io.Reader
+	db         *sql.DB
+	now        func() time.Time
+	random     io.Reader
+	payloadKey *payload.Key
 }
 
 // Options 允许测试注入时钟与随机源；零值使用 time.Now 与 crypto/rand。
+// PayloadKey 是进程启动时从 Keychain 读出的正文密钥。为 nil 时，所有需要加密或解密正文的操作返回 ErrPayloadKeyUnavailable
+// （「Keychain 读取失败时拒绝发送与派发」）。
 type Options struct {
-	Now    func() time.Time
-	Random io.Reader
+	Now        func() time.Time
+	Random     io.Reader
+	PayloadKey *payload.Key
 }
 
 const (
@@ -70,7 +76,7 @@ func Open(ctx context.Context, dataDir string, opts Options) (*Store, error) {
 	}
 	// 清掉上次运行留在 WAL 中的历史帧；忙或出错时留待下一次清理，不影响打开。
 	truncateWAL(ctx, db)
-	store := &Store{db: db, now: opts.Now, random: opts.Random}
+	store := &Store{db: db, now: opts.Now, random: opts.Random, payloadKey: opts.PayloadKey}
 	if store.now == nil {
 		store.now = time.Now
 	}
