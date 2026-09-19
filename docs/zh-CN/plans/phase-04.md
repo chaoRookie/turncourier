@@ -395,7 +395,7 @@ func KeyCheck(purpose string, kid uint8, key []byte) [8]byte
 
 其他退出码返回 `keychain <操作> failed with exit code N`；期限到达时返回包装 `context.DeadlineExceeded` 的 `keychain <操作> timed out`，并确保子进程被结束。子进程继承父进程环境变量，不另外设置任何变量。
 
-- [ ] **Step 1：写失败的测试。** 沿用 `internal/doctor` 的测试辅助子进程模式：`TestMain` 发现 `TURNCOURIER_TEST_SECURITY_STATE`（假钥匙串状态文件）非空时不运行测试，而是扮演 `security`：把每次调用的 argv、完整标准输入与 `os.Environ()` 追加写入 `TURNCOURIER_TEST_SECURITY_LOG`，再按 `TURNCOURIER_TEST_SECURITY_MODE`（`normal`、`exit36`、`exit1`、`corrupt`、`drop`、`hang`、`output`、`add-exists`）动作；`normal` 模式下不带 `-U` 的写入遇到已有条目时以非 0 退出且不改动。测试把 `Security.path` 设为 `os.Executable()`。用例：
+- [x] **Step 1：写失败的测试。** 沿用 `internal/doctor` 的测试辅助子进程模式：`TestMain` 发现 `TURNCOURIER_TEST_SECURITY_STATE`（假钥匙串状态文件）非空时不运行测试，而是扮演 `security`：把每次调用的 argv、完整标准输入与 `os.Environ()` 追加写入 `TURNCOURIER_TEST_SECURITY_LOG`，再按 `TURNCOURIER_TEST_SECURITY_MODE`（`normal`、`exit36`、`exit1`、`corrupt`、`drop`、`hang`、`output`、`add-exists`）动作；`normal` 模式下不带 `-U` 的写入遇到已有条目时以非 0 退出且不改动。测试把 `Security.path` 设为 `os.Executable()`。用例：
   - **往返与参数：** 机密在运行时构造为 `strings.Repeat("aB3", 4)`（含小写、大写与数字）；`Set(ctx, "0123456789abcdef:qq-auth-code", 机密)` 后 `Get` 返回同一值；日志中第一次调用 argv 恰为 `["-i"]`，标准输入恰为 `"add-generic-password -U -s " + Service + " -a 0123456789abcdef:qq-auth-code -X " + hex.EncodeToString([]byte(机密)) + "\n"`（期望文本在运行时拼接；`hex.EncodeToString` 输出小写，同时钉住小写十六进制）；第二次调用 argv 恰为 `["find-generic-password", "-s", Service, "-a", 账户, "-w"]`。机密原文与其十六进制文本都不出现在任何一次调用的 argv 与环境变量中。
   - **退出码映射：** `Get` 不存在的条目返回 `ErrNotFound`（假程序退出 44）；`exit36` 返回 `ErrInteractionNotAllowed`；`exit1` 时假程序向 stderr 写入 `STDERR-CANARY` 并退出 1，返回的错误含 `exit code 1`，且不含 `STDERR-CANARY`。
   - **读回核对：** `corrupt`（写入时存成另一个值）与 `drop`（`-i` 退出 0 但不保存）下 `Set` 都返回 `ErrReadBackMismatch`。
@@ -409,12 +409,12 @@ func KeyCheck(purpose string, kid uint8, key []byte) [8]byte
   - **条目命名：** `AuthCodeAccount("0123456789abcdef")` 为 `0123456789abcdef:qq-auth-code`；`TokenKeyAccount(id, 1)` 为 `…:token-key-1`；`PayloadKeyAccount(id, 255)` 为 `…:payload-key-255`；三者都满足名称规则；kid 为 0 时 panic。
   - **密钥文本：** 字节 `0x00…0x1f` 的读取器给出的文本，等于测试中用 `base64.RawURLEncoding` 对同一字节数组编码的结果（不把编码结果写成字符串字面量，见 Step 4 的 `make secrets`）；读取器不足 32 字节时报错；`DecodeKeyText` 能还原；42 或 44 个字符、带 `=` 填充、含 `+` 或 `/` 时返回 `ErrInvalidSecret`，错误文本不含输入。
   - **校验值：** `KeyCheck` 与测试内直接调用 `crypto/hmac` 的参考实现一致；用途、kid 或密钥任一不同时结果不同；与 `token.BodyDigest` 及令牌 MAC 的前缀互不为前缀；未知用途或 kid 为 0 时 panic。
-- [ ] **Step 2：** `go test ./internal/security/keychain/` 编译失败。
-- [ ] **Step 3：实现。** 只用标准库。`exec.CommandContext` 配合 `context.WithTimeout`；`Set` 与 `Add` 的标准输入用 `strings.NewReader`；`Get` 以 `io.LimitReader(stdout, 4097)` 读取；标准错误设为 `nil`（丢弃）。
-- [ ] **Step 4：** `go test -race ./internal/security/keychain/` 通过，覆盖率 ≥ 90%；`CGO_ENABLED=0 go test ./internal/security/keychain/`、`GOOS=linux go vet ./internal/security/keychain/`、`GOOS=windows go vet ./internal/security/keychain/` 通过；`make comments` 与 `make secrets` 通过。测试向量按「4a 已定的实现细节」中「测试向量与密钥扫描」一行的约定在运行时构造，源码中不出现机密形状的字面量；只让变量名避开关键词不够。
-- [ ] **Step 5：** `git add internal/security/keychain && git commit -m "feat(keychain): wrap the macOS security tool without exposing secrets"`
+- [x] **Step 2：** `go test ./internal/security/keychain/` 编译失败。
+- [x] **Step 3：实现。** 只用标准库。`exec.CommandContext` 配合 `context.WithTimeout`；`Set` 与 `Add` 的标准输入用 `strings.NewReader`；`Get` 以 `io.LimitReader(stdout, 4097)` 读取；标准错误设为 `nil`（丢弃）。
+- [x] **Step 4：** `go test -race ./internal/security/keychain/` 通过，覆盖率 ≥ 90%；`CGO_ENABLED=0 go test ./internal/security/keychain/`、`GOOS=linux go vet ./internal/security/keychain/`、`GOOS=windows go vet ./internal/security/keychain/` 通过；`make comments` 与 `make secrets` 通过。测试向量按「4a 已定的实现细节」中「测试向量与密钥扫描」一行的约定在运行时构造，源码中不出现机密形状的字面量；只让变量名避开关键词不够。
+- [x] **Step 5：** `git add internal/security/keychain && git commit -m "feat(keychain): wrap the macOS security tool without exposing secrets"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** 先写测试，`go test ./internal/security/keychain/` 编译失败（`undefined: Store`、`Security`、`Service`、`DefaultTimeout` 等），再实现。实现要点：每个公开方法只设一个期限，Set、Add 的存在性检查、写入与读回共用它；错误文本中的操作名为 get、set、add、delete；无法启动 security 时返回不含路径的固定文本；读回阶段期限到达时返回期限错误而不是 `ErrReadBackMismatch`；Get 读到格式不符的输出时返回包装 `ErrInvalidSecret` 的错误，不回显内容。契约之外的两处小补充：ctx 被取消时返回包装 `context.Canceled` 的 `keychain <操作> canceled`，避免把取消报成超时；`DecodeKeyText` 用严格模式解码，拒绝末字符含非零填充比特的文本，使同一把密钥只有一种写法。测试方面：`strings.Repeat("aB3", 4)` 的十六进制是 `614233…`，不含字母，单靠它钉不住小写十六进制，小写改由 Add 用例（base64url 密钥文本）与 1000 个 `~` 的行长用例（`7e…`）逐字节比对钉住；假程序在清单的 8 种模式之外增加 `add-fails`（写入以 1 退出且不保存），用来钉住「Add 写入失败、条目仍不存在时返回原错误」；`hang` 只让读取与删除挂起、写入照常完成，同一模式还用来测试读回阶段超时；期限用例最多重试 5 次，防止慢机器上假程序来不及写日志、取不到 PID；测试为子进程设置 `GORACE=atexit_sleep_ms=0`（保留已有选项），否则竞态检测下每次以 0 退出都要多睡 1 秒，本包测试会从约 3 秒变成约 26 秒。另补了 exit36 下的 Set、Delete、Add（存在性检查失败时不启动写入进程），31 字节编码加换行、43 字符加换行两个解码用例，允许字符的正例与 `0x7f`。在仓库副本上做了 22 个变异，涉及读回与超时、Add 的预检和再读、退出码先后、严格解码、大小写十六进制、`-U` 有无、换行处理、字符集与长度边界、KeyCheck 输入顺序、环境变量泄露等，全部被测试杀死。验证：`go test -race` 通过，覆盖率 100%，`-count=10` 稳定；`CGO_ENABLED=0 go test`、包级与全仓的 `GOOS=linux go vet`、`GOOS=windows go vet`、`make comments`、`make secrets`、`make check`（总覆盖率 93.97%）均通过。未运行：真实钥匙串往返（按安全规则留给 Task 13 的 `tests/live`，由维护者人工执行）；本任务只在 macOS 上运行了测试，Linux 上的测试由 CI 运行。
 
 ### Task 3：回复令牌 v1
 
