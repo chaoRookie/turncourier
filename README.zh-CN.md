@@ -117,7 +117,7 @@ CI 会运行 `make check`、`make security` 和 `make workflows`；提交 PR 前
 
 代码规则：
 
-- 除 Go 标准库外，产品二进制链接 `modernc.org/sqlite` v1.59.0（纯 Go 实现的 SQLite，不需要 CGO）、`github.com/BurntSushi/toml` v1.6.0 与 `golang.org/x/term` v0.46.0。邮件包使用 `github.com/emersion/go-smtp` v0.25.0、`github.com/emersion/go-imap/v2` v2.0.0-beta.8、`github.com/emersion/go-message` v0.18.2（及 `github.com/emersion/go-sasl`）与 `golang.org/x/text` v0.42.0；目前没有命令导入它们，二进制中也就没有它们。版本固定在 `go.mod` 与 `go.sum`。新增依赖须在实施清单或 issue 中说明理由与许可证，只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。
+- 除 Go 标准库外，产品二进制链接 `modernc.org/sqlite` v1.59.0（纯 Go 实现的 SQLite，不需要 CGO）、`github.com/BurntSushi/toml` v1.6.0、`golang.org/x/term` v0.46.0 与 `golang.org/x/sys` v0.48.0。邮件包使用 `github.com/emersion/go-smtp` v0.25.0、`github.com/emersion/go-imap/v2` v2.0.0-beta.8、`github.com/emersion/go-message` v0.18.2 与 `github.com/emersion/go-sasl`，`golang.org/x/text` v0.42.0 由 `tests/live` 使用（`go-message/charset` 也需要它）；目前没有命令导入这五个模块，二进制中也就没有它们。版本固定在 `go.mod` 与 `go.sum`。新增依赖须在实施清单或 issue 中说明理由与许可证，只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。
 - 标识符使用英文。
 - 每个手写的包、类型（包括局部类型）和具名函数（包括方法和测试）都要有中文注释，由 `tools/commentcheck` 检查。
 - 导出标识符的注释以标识符名称开头，由 staticcheck 检查。
@@ -245,6 +245,8 @@ turncourier/
 │       ├── state.go                 # 任务状态、事件与转移表
 │       └── state_test.go            # 穷举全部状态 × 事件组合
 ├── tests/                           # 跨包测试与人工执行的测试
+│   ├── docs/                        # 核对文档与代码是否一致
+│   │   └── deps_test.go             # 依赖表与 go.mod、实际导入的比对
 │   ├── integration/                 # 跨包测试
 │   │   ├── lifecycle_test.go        # 配置、存储与状态机的完整生命周期
 │   │   └── payload_test.go          # 通知、令牌、摘要与正文密文的生命周期

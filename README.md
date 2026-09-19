@@ -117,7 +117,7 @@ CI runs `make check`, `make security` and `make workflows`; run them locally bef
 
 Code rules:
 
-- Besides the Go standard library, the product binary links `modernc.org/sqlite` v1.59.0 (pure Go SQLite, no CGO), `github.com/BurntSushi/toml` v1.6.0 and `golang.org/x/term` v0.46.0. The mail packages use `github.com/emersion/go-smtp` v0.25.0, `github.com/emersion/go-imap/v2` v2.0.0-beta.8, `github.com/emersion/go-message` v0.18.2 (with `github.com/emersion/go-sasl`) and `golang.org/x/text` v0.42.0; no command imports them yet, so they are not in the binary. Versions are pinned in `go.mod` and `go.sum`. A new dependency needs its reason and license stated in a plan or issue, and only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
+- Besides the Go standard library, the product binary links `modernc.org/sqlite` v1.59.0 (pure Go SQLite, no CGO), `github.com/BurntSushi/toml` v1.6.0, `golang.org/x/term` v0.46.0 and `golang.org/x/sys` v0.48.0. The mail packages use `github.com/emersion/go-smtp` v0.25.0, `github.com/emersion/go-imap/v2` v2.0.0-beta.8, `github.com/emersion/go-message` v0.18.2 and `github.com/emersion/go-sasl`, and `tests/live` uses `golang.org/x/text` v0.42.0 (`go-message/charset` needs it too); no command imports these five yet, so they are not in the binary. Versions are pinned in `go.mod` and `go.sum`. A new dependency needs its reason and license stated in a plan or issue, and only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
 - Identifiers are in English.
 - Every hand-written package, type (including local types) and named function (including methods and tests) has a Chinese comment, checked by `tools/commentcheck`.
 - Comments on exported identifiers start with the identifier name, checked by staticcheck.
@@ -245,6 +245,8 @@ turncourier/
 │       ├── state.go                 # Task states, events, transition table
 │       └── state_test.go            # Every state × event combination
 ├── tests/                           # Cross-package and manual tests
+│   ├── docs/                        # Checks that documentation matches the code
+│   │   └── deps_test.go             # Dependency tables against go.mod and imports
 │   ├── integration/                 # Cross-package tests
 │   │   ├── lifecycle_test.go        # Config, storage and state machines together
 │   │   └── payload_test.go          # Notifications, tokens, digests, ciphertext
