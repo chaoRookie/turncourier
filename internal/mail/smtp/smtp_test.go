@@ -9,10 +9,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http/httptest"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -697,6 +700,29 @@ func TestSendVerifiesHostname(t *testing.T) {
 	}
 }
 
+// TestSendRefusesOldTLS 验证服务器最高只支持 TLS 1.1 时握手失败，不发送凭据；对照连接先确认该服务器确实能以 TLS 1.1 握手，
+// 因此 Send 失败只能是因为客户端要求至少 TLS 1.2。
+func TestSendRefusesOldTLS(t *testing.T) {
+	serverTLS, pool := testCerts(t)
+	serverTLS.MinVersion, serverTLS.MaxVersion = tls.VersionTLS10, tls.VersionTLS11
+	b := newBackend()
+	lis := startServer(t, b, serverTLS, serverOptions{})
+	conn, err := tls.Dial("tcp", lis.Addr().String(), &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS10})
+	if err != nil {
+		t.Fatalf("control handshake: %v", err)
+	}
+	version := conn.ConnectionState().Version
+	conn.Close()
+	if version != tls.VersionTLS11 {
+		t.Fatalf("control handshake negotiated version %#x, want TLS 1.1", version)
+	}
+	_, err = Send(context.Background(), testConfig(lis, pool, generous), testPassword, testEnvelope(), testMessage())
+	checkOutcome(t, err, ErrNotSent)
+	if got := b.snapshot(); got.auths != 0 {
+		t.Errorf("backend saw %d AUTH attempts", got.auths)
+	}
+}
+
 // TestSendRequiresAuthPlain 验证服务器不公告 AUTH，或只公告 PLAIN 以外的机制时，不发送凭据。
 func TestSendRequiresAuthPlain(t *testing.T) {
 	serverTLS, pool := testCerts(t)
@@ -860,6 +886,31 @@ func TestSendSlowReaderWithinChunkDeadlines(t *testing.T) {
 	}
 }
 
+// TestSendWritesBodyInChunks 验证正文恰按 64 KiB 分块写入：128 KiB + 1 字节的邮件依次写 64 KiB、64 KiB、1 字节。
+// 分块大小决定服务器每 Command 期限至少要读走多少字节，慢速读取的用例只能区分分块与整封，钉不住具体大小。
+func TestSendWritesBodyInChunks(t *testing.T) {
+	serverTLS, pool := testCerts(t)
+	b := newBackend()
+	lis := startServer(t, b, serverTLS, serverOptions{})
+	original := writeChunk
+	t.Cleanup(func() { writeChunk = original })
+	var sizes []int
+	writeChunk = func(data *gosmtp.DataCommand, p []byte) (int, error) {
+		sizes = append(sizes, len(p))
+		return original(data, p)
+	}
+	msg := bigMessage(128<<10 + 1)
+	if _, err := Send(context.Background(), testConfig(lis, pool, generous), testPassword, testEnvelope(), msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if want := []int{64 << 10, 64 << 10, 1}; !slices.Equal(sizes, want) {
+		t.Errorf("chunk sizes = %v, want %v", sizes, want)
+	}
+	if got := b.snapshot(); !bytes.Equal(got.data, msg) {
+		t.Errorf("server received %d bytes of DATA, want %d", len(got.data), len(msg))
+	}
+}
+
 // TestSendFlushStall 验证提交阶段在 flush 剩余正文时阻塞，看门狗在调用 CloseWithResponse 之前就以 Submission 期限生效，返回 ErrUncertain。
 func TestSendFlushStall(t *testing.T) {
 	serverTLS, pool := testCerts(t)
@@ -883,16 +934,22 @@ func TestSendFlushStall(t *testing.T) {
 	}
 }
 
-// startScripted 启动按脚本应答的 TLS 假服务器，用于 go-smtp 服务端无法给出的回复：先写问候，
+// startScripted 启动按脚本应答的 TLS 假服务器，用于 go-smtp 服务端无法给出的回复：完成握手后写问候，
 // 之后每读到一条命令就依次写出 replies 中的一项；对 DATA 命令回复 354 之后，先读完 DATA 直到结束标记再写下一项；
-// 回复为空字符串时关闭连接。
-func startScripted(t *testing.T, serverTLS *tls.Config, replies ...string) net.Listener {
+// 回复为空字符串时关闭连接。pauses[0] 是写问候之前的停顿，pauses[i+1] 是写 replies[i] 之前的停顿，缺省为 0。
+// 回复写完后只读不回，5 秒后关闭连接：客户端缺少期限时用例以耗时失败，而不是挂起到测试超时。
+func startScripted(t *testing.T, serverTLS *tls.Config, pauses []time.Duration, replies ...string) net.Listener {
 	t.Helper()
 	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { raw.Close() })
+	pause := func(i int) {
+		if i < len(pauses) {
+			time.Sleep(pauses[i])
+		}
+	}
 	go func() {
 		conn, err := raw.Accept()
 		if err != nil {
@@ -900,12 +957,16 @@ func startScripted(t *testing.T, serverTLS *tls.Config, replies ...string) net.L
 		}
 		defer conn.Close()
 		tlsConn := tls.Server(conn, serverTLS)
+		if tlsConn.Handshake() != nil {
+			return
+		}
 		r := bufio.NewReader(tlsConn)
+		pause(0)
 		if _, err := io.WriteString(tlsConn, "220 example.com ESMTP\r\n"); err != nil {
 			return
 		}
 		inData := false // 上一项回复是对 DATA 命令的 354：下一项回复对应结束标记，而不是新命令
-		for _, reply := range replies {
+		for i, reply := range replies {
 			if inData {
 				for line := ""; line != ".\r\n"; {
 					if line, err = r.ReadString('\n'); err != nil {
@@ -918,11 +979,13 @@ func startScripted(t *testing.T, serverTLS *tls.Config, replies ...string) net.L
 			if reply == "" {
 				return
 			}
+			pause(i + 1)
 			if _, err := io.WriteString(tlsConn, reply+"\r\n"); err != nil {
 				return
 			}
 			inData = !inData && strings.HasPrefix(reply, "354")
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, _ = io.Copy(io.Discard, r)
 	}()
 	return raw
@@ -948,7 +1011,7 @@ func TestSendUnusualReplies(t *testing.T) {
 		{"auth 334 with bad base64", []string{ehlo, "334 !!" + serverCanary, "501 5.0.0 cancelled"}, ErrNotSent, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			lis := startScripted(t, serverTLS, tc.replies...)
+			lis := startScripted(t, serverTLS, nil, tc.replies...)
 			env := Envelope{From: botAddr, To: []string{userAddr}}
 			_, err := Send(context.Background(), testConfig(lis, pool, generous), testPassword, env, testMessage())
 			checkOutcome(t, err, tc.outcome)
@@ -969,7 +1032,7 @@ func TestSendUnusualReplies(t *testing.T) {
 // TestSendIgnoresQuitFailure 验证邮件被接受后 QUIT 没有回应时，在 Command 期限内关闭连接并照常返回成功。
 func TestSendIgnoresQuitFailure(t *testing.T) {
 	serverTLS, pool := testCerts(t)
-	lis := startScripted(t, serverTLS, "250-example.com\r\n250 AUTH PLAIN", "235 2.7.0 ok", "250 ok", "250 ok", "354 go ahead", "250 2.0.0 queued")
+	lis := startScripted(t, serverTLS, nil, "250-example.com\r\n250 AUTH PLAIN", "235 2.7.0 ok", "250 ok", "250 ok", "354 go ahead", "250 2.0.0 queued")
 	cfg := testConfig(lis, pool, Timeouts{Command: 200 * time.Millisecond, Submission: 10 * time.Second})
 	start := time.Now()
 	res, err := Send(context.Background(), cfg, testPassword, Envelope{From: botAddr, To: []string{userAddr}}, testMessage())
@@ -1010,6 +1073,59 @@ func TestSendGreetingStall(t *testing.T) {
 	elapsed, err := sendTimed(context.Background(), cfg, testEnvelope(), testMessage())
 	checkTimedOut(t, err, ErrNotSent, "ehlo", elapsed)
 	closed.wait(t, "the client to close the connection")
+}
+
+// scriptedEHLO 是脚本服务器对 EHLO 的回复：公告 AUTH PLAIN。
+const scriptedEHLO = "250-example.com\r\n250 AUTH PLAIN"
+
+// TestSendCommandStalls 验证服务器在某条命令之后不再回复时，Send 在 Command 期限后返回 ErrNotSent 并注明该步骤超时。
+// 这些步骤只有一次往来，看门狗与库的 CommandTimeout 期限相同，本用例钉住的是两道至少有一道生效；
+// 哪一道生效不可区分，看门狗的作用由 TestSendStepDeadlineSpansExchanges 钉住。
+func TestSendCommandStalls(t *testing.T) {
+	serverTLS, pool := testCerts(t)
+	for _, tc := range []struct {
+		step    string
+		replies []string // 依次回复这些之后不再回复
+	}{
+		{"ehlo", nil},
+		{"auth", []string{scriptedEHLO}},
+		{"mail", []string{scriptedEHLO, "235 2.7.0 ok"}},
+		{"rcpt", []string{scriptedEHLO, "235 2.7.0 ok", "250 ok"}},
+		{"data", []string{scriptedEHLO, "235 2.7.0 ok", "250 ok", "250 ok"}},
+	} {
+		t.Run(tc.step, func(t *testing.T) {
+			lis := startScripted(t, serverTLS, nil, tc.replies...)
+			cfg := testConfig(lis, pool, Timeouts{Command: 200 * time.Millisecond, Submission: 10 * time.Second})
+			elapsed, err := sendTimed(context.Background(), cfg, Envelope{From: botAddr, To: []string{userAddr}}, testMessage())
+			checkTimedOut(t, err, ErrNotSent, tc.step, elapsed)
+		})
+	}
+}
+
+// TestSendStepDeadlineSpansExchanges 验证一个步骤内的多次往来共用一个 Command 期限：每次回复都慢 200ms、单独都在 300ms 之内，
+// 但步骤合计超过 300ms 时，Send 在该步骤超时。问候与 EHLO 同属一步；AUTH 收到 334 后客户端发 "*" 中止，再等 501，也同属一步。
+// 库的 CommandTimeout 按单次往来计时，拦不住这种情形：看门狗缺席时，ehlo 一例会照常投递，auth 一例报 auth failed。
+func TestSendStepDeadlineSpansExchanges(t *testing.T) {
+	serverTLS, pool := testCerts(t)
+	const slow = 200 * time.Millisecond
+	for _, tc := range []struct {
+		step    string
+		pauses  []time.Duration // 见 startScripted
+		replies []string
+	}{
+		{"ehlo", []time.Duration{slow, slow}, []string{scriptedEHLO, "235 2.7.0 ok", "250 ok", "250 ok", "354 go ahead", "250 2.0.0 queued"}},
+		{"auth", []time.Duration{0, 0, slow, slow}, []string{scriptedEHLO, "334 !!", "501 5.0.0 cancelled"}},
+	} {
+		t.Run(tc.step, func(t *testing.T) {
+			lis := startScripted(t, serverTLS, tc.pauses, tc.replies...)
+			cfg := testConfig(lis, pool, Timeouts{Command: 300 * time.Millisecond, Submission: 10 * time.Second})
+			elapsed, err := sendTimed(context.Background(), cfg, Envelope{From: botAddr, To: []string{userAddr}}, testMessage())
+			checkTimedOut(t, err, ErrNotSent, tc.step, elapsed)
+			if errors.Is(err, ErrAuth) {
+				t.Errorf("err = %v matches ErrAuth", err)
+			}
+		})
+	}
 }
 
 // TestSendCanceled 验证取消 ctx 时关闭连接：阻塞在 RCPT 时返回 ErrNotSent，阻塞在结束标记之后时返回 ErrUncertain，两者都带 context.Canceled。
@@ -1072,6 +1188,23 @@ func TestWatchdogHalt(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	if n := closes.Load(); n != 0 {
 		t.Errorf("connection closed %d times after halt", n)
+	}
+}
+
+// TestWatchdogFailDeadline 验证看门狗尚未因计时器到期置位时，库的连接期限到期（os.ErrDeadlineExceeded）也写作超时：
+// 两道期限同时到期时，Send 可能先读到库的期限错误，看门狗才置位。其他库错误只写 failed，不保留库的错误文本。
+func TestWatchdogFailDeadline(t *testing.T) {
+	w := startWatchdog(context.Background(), func() {})
+	defer w.halt()
+	err := w.fail(ErrNotSent, "mail", fmt.Errorf("%s: %w", serverCanary, os.ErrDeadlineExceeded))
+	checkOutcome(t, err, ErrNotSent)
+	if !strings.HasSuffix(err.Error(), ": mail timed out") {
+		t.Errorf("err = %v, want a mail timeout", err)
+	}
+	err = w.fail(ErrUncertain, "submission", errors.New(serverCanary))
+	checkOutcome(t, err, ErrUncertain)
+	if !strings.HasSuffix(err.Error(), ": submission failed") {
+		t.Errorf("err = %v, want a plain submission failure", err)
 	}
 }
 

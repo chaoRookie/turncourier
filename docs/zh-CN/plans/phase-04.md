@@ -1440,12 +1440,12 @@ func Send(ctx context.Context, cfg Config, password string, env Envelope, msg []
 - 去掉提交阶段的看门狗：`TestSendFlushStall` 在 5 秒后以耗时失败。
 - 在副本中加入 `gosmtp.Dial`、`gosmtp.DialStartTLS`，或设置 `KeyLogWriter`：`TestSourceRestrictions` 分别失败。
 
-全部 75 个变异中，67 个被杀死，涉及：各项参数校验的去掉与边界；结果分类（提交阶段失败归为 `ErrNotSent`、拒绝报告为结果不确定、`ErrAuth` 的判定范围与包装、ehlo 附 `ReplyError`）；`replyOf` 的上下界；`fail` 忽略 ctx 或计时器、保留库错误文本；各步骤名；截断与 512 的边界；默认期限；分块大小；整封正文共用一个计时器；EHLO 名；`AUTH PLAIN` 检查；固定 `ServerName`；去掉 `MinVersion`；只发第一个收件人；绕过 `closeData`；计时器到期不关闭连接；看门狗不监视 ctx；`halt` 不等待；跳过 QUIT；QUIT 失败时返回错误。其中 halt、QUIT 两项是补测后才被杀死的。去掉 `RootCAs` 的变异只对源码检查运行（被杀死），没有运行功能测试，以免调用系统证书校验。
+全部 75 个变异中，67 个被杀死，涉及：各项参数校验的去掉与边界；结果分类（提交阶段失败归为 `ErrNotSent`、拒绝报告为结果不确定、`ErrAuth` 的判定范围与包装、ehlo 附 `ReplyError`）；`replyOf` 的上下界；`fail` 忽略 ctx 或计时器、保留库错误文本；各步骤名；截断与 512 的边界；默认期限；分块大小（审查指出原测试只能区分分块与整封，见下文「审查后修正」）；整封正文共用一个计时器；EHLO 名；`AUTH PLAIN` 检查；固定 `ServerName`；去掉 `MinVersion`（只被源码检查杀死，功能上等价；降级变异见下文「审查后修正」）；只发第一个收件人；绕过 `closeData`；计时器到期不关闭连接；看门狗不监视 ctx；`halt` 不等待；跳过 QUIT；QUIT 失败时返回错误。其中 halt、QUIT 两项是补测后才被杀死的。去掉 `RootCAs` 的变异只对源码检查运行（被杀死），没有运行功能测试，以免调用系统证书校验。
 
-存活 8 个，均为等价或设计上的冗余：
-- Hello 或 QUIT 放在看门狗之外、去掉库的 `CommandTimeout` 或 `SubmissionTimeout`（4 个）：命令步骤与读取提交响应有看门狗与库期限两道保险，期限相同，任一道单独都够；写正文与 flush 只有看门狗，去掉即被杀死。
+存活 8 个。审查指出其中 Hello 与 `os.ErrDeadlineExceeded` 两项并不等价，已补测试杀死，见下文「审查后修正」；其余为等价或设计上的冗余：
+- Hello 或 QUIT 放在看门狗之外、去掉库的 `CommandTimeout` 或 `SubmissionTimeout`（4 个）：命令步骤与读取提交响应有看门狗与库期限两道保险，期限相同，任一道单独都够；写正文与 flush 只有看门狗，去掉即被杀死。（更正：这只对一次往来的步骤成立，Hello 不在此列。）
 - 步骤之间不停止计时（2 种写法）：步骤之间没有网络读写。
-- 去掉 `os.ErrDeadlineExceeded` 分支：本机 3 次运行都是看门狗先生效；保留这个分支是为了让错误文本确定。
+- 去掉 `os.ErrDeadlineExceeded` 分支：本机 3 次运行都是看门狗先生效；保留这个分支是为了让错误文本确定。（更正：不等价，见下文「审查后修正」⑤。）
 - 去掉 `TLSConnectionState` 检查：`DialTLS` 得到的一定是 TLS 连接，按契约保留作纵深防御。
 
 验证：
@@ -1455,6 +1455,20 @@ func Send(ctx context.Context, cfg Config, password string, env Envelope, msg []
 - `make modverify`、`make secrets`、`make check` 通过（含中文注释检查与 staticcheck，总覆盖率 93.59%）。
 
 测试只在 macOS 上运行，Linux 上的测试由 CI 运行；写正文阻塞与慢速读取两个用例依赖 socket 缓冲吸收不了全部正文，这一点在 Linux 上未在本机验证。与 Task 1–9 相同，本任务的提交包含本清单的勾选与实施说明。
+
+**审查后修正：** 变异均在仓库副本中进行，每次只改一处（组合变异另行注明）。
+
+① 命令步骤的看门狗计时。原说明把「Hello 放在看门狗之外」列为等价变异，理由是两道期限相同，这不成立。库的 `CommandTimeout` 按单次往来设置：问候与 EHLO 各有一个，EHLO 回 500 或 502 时回退的 HELO 还有一个；AUTH 收到 334 后发 `"*"` 中止，这次往来也另有一个。契约表把「问候与 EHLO」写作一行、一个期限，AUTH 也是一个期限，这两步只有看门狗能保证。新增 `TestSendStepDeadlineSpansExchanges`：脚本服务器每次回复前停顿 200ms，`Command` 为 300ms，每次往来都在库的期限之内，而步骤合计超过 300ms。ehlo 一例让问候与 EHLO 回复各慢 200ms，auth 一例让 334 与 501 各慢 200ms，断言 `ErrNotSent`、不是 `ErrAuth`、错误文本以 `<步骤> timed out` 结尾、2 秒内返回。另新增 `TestSendCommandStalls`：服务器在 EHLO、AUTH、MAIL、RCPT、DATA（至 354）处不再回复，断言与上一用例相同；这些步骤原先只有问候阻塞一个超时用例，RCPT 的阻塞只用取消测过。为此 `startScripted` 增加 `pauses` 参数；它先显式完成握手再停顿，否则停顿会落在 `DialTLS` 的握手里。回复写完后服务器只读不回，5 秒后关闭连接，客户端缺少期限时用例以耗时失败，而不是挂起到测试超时。变异结果：Hello、AUTH 分别移出看门狗，或全部命令步骤的看门狗期限改为 0，被 `TestSendStepDeadlineSpansExchanges` 杀死。组合变异把库的两个超时改为 1 小时，同时把 AUTH、MAIL、RCPT 或 DATA 之一移出看门狗，即两道期限都去掉，被 `TestSendCommandStalls` 的对应子用例杀死；对 Hello 做同样处理时，`TestSendCommandStalls/ehlo` 单独运行在 5 秒时失败，完整运行时原有的 `TestSendGreetingStall` 先阻塞到测试期限。MAIL、RCPT、DATA、QUIT 单独移出看门狗仍然存活：它们只有一次往来，两道期限相同，几乎同时设置，任一道单独都够，是等价变异。契约措辞前后不一：「已定的实现细节」写问候、EHLO「各 30 秒」，`Timeouts.Command` 的注释写「各自的期限」，发送步骤表则把「问候与 EHLO」写作一行 30 秒。实现按表取后者，两者合计一个期限，比各自一个期限更严，现已由测试钉住；措辞是否统一留给维护者决定，本任务不改契约文字。
+
+② 分块大小。原说明称「分块大小」变异被杀死，这不准确：`TestSendSlowReaderWithinChunkDeadlines` 只能区分分块与整封正文共用一个期限，分块改为 128 KiB 到 1 MiB 都能存活。现在仿照 `closeData`，写正文改为经包内函数变量 `writeChunk`（即 `(*gosmtp.DataCommand).Write`）调用。新增 `TestSendWritesBodyInChunks`，替换它来记录每次写入的长度：128 KiB + 1 字节的邮件恰好写成 64 KiB、64 KiB、1 字节三块。分块改为 32 KiB、128 KiB、256 KiB、1 MiB，或绕过 `writeChunk` 直接写，这些变异都被杀死。这是清单之外增加的测试替换点，发送行为不变。
+
+③ 点导入。源码检查原先只看包选择器：点导入 go-smtp 后直接调用 `Dial` 能绕过白名单，点导入 `crypto/tls` 也能绕过对 `tls.Config` 的检查。现在 `sourceProblems` 把任何点导入都报告为违规。这比只禁止受限路径更简单，本包原本也没有点导入。`TestSourceProblemsDetectsViolations` 增加两例：点导入 go-smtp 后调用 `Dial`，以及点导入 `crypto/tls`。在副本的 `smtp.go` 中加入点导入与 `Dial` 调用后，`TestSourceRestrictions` 失败。
+
+④ TLS 最低版本。源码检查只核对 `tls.Config` 字面量的字段名。把 `MinVersion` 降为 TLS 1.0 或 1.1 时，原有测试全部通过，客户端会在 TLS 1.1 上发送凭据。原说明列为已杀死的「去掉 `MinVersion`」只被源码检查杀死，功能上是等价的，因为 Go 客户端的默认最低版本就是 TLS 1.2。新增 `TestSendRefusesOldTLS`：服务器只支持 TLS 1.0–1.1，断言 `ErrNotSent`，且后端没有收到 AUTH。用例先用一条允许 TLS 1.0 的对照连接，确认服务器确实能协商出 TLS 1.1，避免 Go 日后移除旧版本支持时用例空转通过。`MinVersion` 改为 TLS 1.0 或 TLS 1.1 的变异都被杀死。源码检查没有另外核对取值，降级由这个功能用例覆盖。
+
+⑤ `fail` 的 `os.ErrDeadlineExceeded` 分支。原说明列为等价，这不成立：两道期限同时到期时，`Send` 可能先读到库的期限错误，看门狗随后才置位，去掉该分支后错误文本会从 `timed out` 变成 `failed`。新增 `TestWatchdogFailDeadline`，直接调用 `fail`：包装 `os.ErrDeadlineExceeded` 的错误写作 `mail timed out`；其他库错误写作 `submission failed`，且不含库的错误文本。去掉该分支、所有失败都写作超时，这两个变异都被杀死。
+
+修正后的验证：`go test -race ./internal/mail/smtp/` 通过，覆盖率 100.0%；`-race -count=5` 稳定；与 sqlite、security 各包的 `-race -count=3` 并行运行时，新增及改动的用例 `-race -count=10` 通过。`CGO_ENABLED=0 go test ./internal/mail/smtp/`、全仓 `GOOS=windows go vet ./...` 与 `GOOS=linux go vet ./...`、`make check`（总覆盖率 93.59%）、`make secrets` 均通过。
 
 ### Task 11：IMAP 客户端
 

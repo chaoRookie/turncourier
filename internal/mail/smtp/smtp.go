@@ -90,6 +90,9 @@ var (
 // closeData 是提交阶段调用的 CloseWithResponse；测试替换它来构造 flush 剩余正文时阻塞的情形。
 var closeData = (*gosmtp.DataCommand).CloseWithResponse
 
+// writeChunk 是写正文一个分块的调用；测试替换它来记录各分块的长度。
+var writeChunk = (*gosmtp.DataCommand).Write
+
 // ReplyError 携带服务器拒绝时的步骤与状态码，不含服务器响应文本。
 type ReplyError struct {
 	Step     string // auth、mail、rcpt、data、submission
@@ -169,7 +172,7 @@ func Send(ctx context.Context, cfg Config, password string, env Envelope, msg []
 	for off := 0; off < len(msg); off += chunkSize {
 		chunk := msg[off:min(off+chunkSize, len(msg))]
 		if err := w.step(timeouts.Command, func() error {
-			_, err := data.Write(chunk)
+			_, err := writeChunk(data, chunk)
 			return err
 		}); err != nil {
 			return Result{}, w.fail(ErrNotSent, "body", err)

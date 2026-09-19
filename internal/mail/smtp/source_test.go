@@ -1,4 +1,4 @@
-// Package smtp 用 go/parser 检查本包非测试源码：只使用 go-smtp 与 go-sasl 的白名单符号，不出现调试输出与放宽证书校验的标识符，
+// Package smtp 用 go/parser 检查本包非测试源码：没有点导入，只使用 go-smtp 与 go-sasl 的白名单符号，不出现调试输出与放宽证书校验的标识符，
 // tls.Config 只在 tlsConfig 中构造一次。功能测试无法证明「从不调用 Dial、DialStartTLS」这类否定性质，由本文件钉住。
 package smtp
 
@@ -76,6 +76,8 @@ func TestSourceProblemsDetectsViolations(t *testing.T) {
 		{"compliant with renamed import", renamed, ""},
 		{"plaintext dial", header + good + "func bad() { _, _ = gosmtp.Dial(\"\") }\n", "gosmtp.Dial"},
 		{"plaintext dial via renamed import", renamed + "func bad() { _, _ = mail.Dial(\"\") }\n", "mail.Dial"},
+		{"plaintext dial via dot import", strings.Replace(header, "gosmtp \"", ". \"", 1) + good + "func bad() { _, _ = Dial(\"\") }\n", "dot import \"github.com/emersion/go-smtp\""},
+		{"dot import of crypto/tls", strings.Replace(header, "\"crypto/tls\"", ". \"crypto/tls\"", 1) + good + "func bad() *Config { return &Config{} }\n", "dot import \"crypto/tls\""},
 		{"STARTTLS dial", header + good + "func bad() { _, _ = gosmtp.DialStartTLS(\"\", nil) }\n", "gosmtp.DialStartTLS"},
 		{"other sasl client", header + good + "func bad() { _ = sasl.NewLoginClient(\"\", \"\") }\n", "sasl.NewLoginClient"},
 		{"key log writer", header + good + "func bad(c *tls.Conn) { c.KeyLogWriter = nil }\n", "KeyLogWriter"},
@@ -106,13 +108,19 @@ func TestSourceProblemsDetectsViolations(t *testing.T) {
 	}
 }
 
-// sourceProblems 返回违反源码约定的位置说明：受限模块使用了白名单以外的符号；出现禁用标识符；
+// sourceProblems 返回违反源码约定的位置说明：任何点导入（点导入后直接调用 Dial 或使用 Config 不经过包选择器，会绕过下面的检查）；
+// 受限模块使用了白名单以外的符号；出现禁用标识符；
 // tls.Config 字面量不是恰好一个、不在 tlsConfig 中或字段不是恰为 ServerName、RootCAs、MinVersion；tlsConfig 以外引用了 tls.Config。
 func sourceProblems(fset *token.FileSet, files []*ast.File) []string {
 	var problems []string
 	literals := 0
 	for _, file := range files {
 		names := importNames(file)
+		for _, spec := range file.Imports {
+			if spec.Name != nil && spec.Name.Name == "." {
+				problems = append(problems, fmt.Sprintf("%s: dot import %s is not allowed", fset.Position(spec.Pos()), spec.Path.Value))
+			}
+		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch n := node.(type) {
 			case *ast.Ident:
