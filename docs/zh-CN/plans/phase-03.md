@@ -796,7 +796,7 @@ grep -rn fmt-check README.md README.zh-CN.md CONTRIBUTING.md \
 
 ### Task 12：全量验证、审查与合并
 
-- [ ] **Step 1：本地门槛。**
+- [x] **Step 1：本地门槛。**
 
 ```sh
 export PATH="$PWD/.local/toolchains/go/bin:$PATH"
@@ -811,7 +811,7 @@ go version -m dist/turncourier
 ```
 
   期望：`make check` 通过且总覆盖率 ≥ 80%；gitleaks 与 govulncheck 无发现；actionlint 通过；`go version -m dist/turncourier` 的输出中没有 `modernc.org/sqlite` 与 `BurntSushi/toml`（本阶段命令行未接入新包，产品二进制不应变化）。
-- [ ] **Step 2：审查。** 按 Phase 2 的做法，对状态机、配置校验、存储事务与恢复、测试有效性做独立审查；确认的问题修复后以变异测试证明测试能拦截回归。
+- [x] **Step 2：审查。** 按 Phase 2 的做法，对状态机、配置校验、存储事务与恢复、测试有效性做独立审查；确认的问题修复后以变异测试证明测试能拦截回归。
 
   **审查后修正：** 配置（`internal/config`）部分。变异均在临时副本中逐项施加，每次只改一处。
   - CFG-1（major）：BurntSushi/toml v1.6.0 精确匹配失败时用 `strings.EqualFold` 把键匹配到字段并记为已解码，`ADDRESS`、`Allowed_Senders`、`[MAILBOX]` 不出现在 `Undecoded()` 中而被静默采用；同一字段写两个大小写变体时，采用哪个取值由 map 遍历顺序决定。现改为遍历 `MetaData.Keys()`，把每个键路径逐段区分大小写地与 `knownKeys` 白名单（13 条，已与 `rawConfig` 的 `toml` 标签逐一核对）比对，不用 `Key.String()` 比较；不在白名单中的键交给 `keyProblems`，凭据类键仍给 Keychain 提示，表数组重复列出的同一路径只报一次。键名有误时 `Load` 只返回键名错误、不再校验取值，否则错误文本会随采用的变体变化。D1 表格中「可通过 `MetaData.Undecoded()` 精确拒绝未知键」与 Task 5 Step 4 的实现说明保留原文，以本条为准；`development.md` 与 `architecture.md` 的依赖表和配置文件说明已改（键名区分大小写）。新测试 `TestLoadRejectsCaseVariantKeys` 在旧代码上失败（三种变体都加载成功）；`TestLoadRejectsDuplicateCaseVariants` 在旧代码上连跑 6 次全部失败，1 次为「Load 应当返回错误」（采用了合法值），5 次只报 `mailbox.address: invalid email address`（采用了变体的值）。变异：改回 `Undecoded()`、白名单改用 `EqualFold` 比较，两个测试都失败；去掉「键名有误时提前返回」，重复变体测试在第 3 次加载时报错误文本不一致；去掉去重，`TestLoadRejectsUnknownKey` 新增的表数组用例报同一键出现 2 次。
@@ -844,8 +844,8 @@ go version -m dist/turncourier
   - N3：新增 `TestKnownKeysMatchRawConfig`，用反射遍历 `rawConfig` 的 `toml` 标签，断言与 `knownKeys` 完全一致；白名单多一项或少一项的变异都使其失败。
   - N4：新增 `TestLoadKeyErrorsSkipValueChecks`：未知键与非法 `token_ttl` 同时出现时只报键名错误；去掉「键名有误时提前返回」的变异确定性地使其失败，原重复变体测试只能概率性拦截。
   - N5：包注释补上「键名有误时只返回键名错误」；Task 5 契约代码块中 `Load` 注释「所有校验错误通过 errors.Join 一次返回」同样以 CFG-1、CFG-5 为准。
-- [ ] **Step 3：提交 PR。** 推送 `feat/phase-03-storage` 分支，开 PR，等待 `quality (ubuntu-24.04)`、`quality (macos-15)`、`security` 三项检查通过；记录 CI 耗时，若 modernc 编译使单次质量任务超过 10 分钟，再单独评估启用 setup-go 缓存，不在本阶段预先修改。
-- [ ] **Step 4：合并与记录。** squash 合并；在本文件末尾追加「验证记录」（本地、审查、远端分开记录，未运行的项写明原因），更新 `HANDOFF.md`。
+- [x] **Step 3：提交 PR。** 推送 `feat/phase-03-storage` 分支，开 PR，等待 `quality (ubuntu-24.04)`、`quality (macos-15)`、`security` 三项检查通过；记录 CI 耗时，若 modernc 编译使单次质量任务超过 10 分钟，再单独评估启用 setup-go 缓存，不在本阶段预先修改。
+- [x] **Step 4：合并与记录。** squash 合并；在本文件末尾追加「验证记录」（本地、审查、远端分开记录，未运行的项写明原因），更新 `HANDOFF.md`。
 
 ## 完成标准
 
@@ -863,3 +863,35 @@ go version -m dist/turncourier
 - 正文加密与 Keychain 接入方式（D2）是邮件闭环阶段的前置任务，未完成前不得保存任何正文。
 - `RecoverInFlight` 把全部 DISPATCHING 回复当作崩溃遗留，只能由唯一的派发进程在开始派发之前调用，调用期间不得有其他进程持有在途回复。接入后台服务时，单实例锁须覆盖 `RecoverInFlight` 与全部派发操作，这是邮件闭环阶段的前置条件。
 - `synchronous=FULL` 只保证进程崩溃后已提交的事务不丢失。macOS 上 modernc 驱动只有设置 `PRAGMA fullfsync=1` 时才使用 `F_FULLFSYNC`，默认的 `fsync` 不保证数据写入持久存储，断电或内核崩溃后可能丢失最近提交的事务。本阶段不改已定参数，在后续安全与恢复阶段评估启用 `fullfsync`，需权衡写锁持有时间变长带来的争用。
+
+## 验证记录
+
+记录日期：2026-09-19（Asia/Shanghai）。环境：macOS arm64、Go 1.27.1（`.local/toolchains/go`）。本地门槛在合并前的分支提交 `8697ea1` 上运行，它的文件树与合并后 main 的 `e046ff4` 相同（`git diff` 为空）。
+
+### 本地通过
+
+- `make check`：gofmt（含 `tests`）、`go vet`、`go mod verify`（all modules verified）、中文注释检查（40 个手写 Go 文件）、`-race` 测试、覆盖率 93.2765%（985/1056，门槛 80%）、staticcheck（含 ST1020–ST1022）。`internal/task` 与 `internal/queue` 覆盖率 100%。
+- `make security`：gitleaks 扫描历史、暂存区与工作树快照，无发现；govulncheck 无可达漏洞。
+- `make workflows`：actionlint 通过。`GOOS=linux`、`GOOS=windows` 的 `go vet ./...` 通过；`CGO_ENABLED=0 go test -count=1 ./...` 全部 10 个包通过。
+- `make build` 后，`go version -m dist/turncourier` 只列出本模块，没有 `modernc.org/sqlite` 与 `BurntSushi/toml`。冒烟在 `2f3dad7` 的构建上运行，其后的提交没有改动 `cmd/`、`internal/cli`、`Makefile` 与工作流：`help`、`version`、`doctor --json` 返回 0，帮助描述与 Task 11 Step 1 的原文一致；`run` 等规划命令返回 2。
+- 两个 README 的文件树覆盖 `git ls-files` 列出的全部文件。
+
+### 审查与修复
+
+整阶段审查分为状态机、配置校验、存储事务与恢复、测试有效性四个维度。每个维度由一名审查员在临时副本中取证，再由一名反方验证员逐条尝试推翻。21 条发现全部复现，复核后 major 4 条（CFG-2 与 TE-3 是同一问题）、minor 10 条、nit 7 条。逐条处理与变异证据见 Task 12 Step 2 的「审查后修正」与「复查后补充」。主要修复：
+
+- 配置键逐段区分大小写，对照与 `rawConfig` 标签一致的白名单。原先大小写变体被静默采用，同一字段写两个变体时取值随机。
+- 配置文件先打开，再对已打开的描述符做检查；Unix 上以 `O_NONBLOCK` 打开，超过上界的内容读取后拒绝。
+- 解析错误不再回显原文，未加引号的凭据不会进入错误文本。
+- 多个进程首次同时打开新数据目录时，`SQLITE_BUSY` 在 5 秒内重试。两个真实进程实测：200 次打开的失败数由 87 降为 0。
+- 补充测试：配置文件属主检查、非终止事件保留排队回复、任务事件写入失败时回滚、只有 `TURNCOURIER_NOTIFY_EVENTS` 可覆盖配置、错误文本剥离路径、数据库文件名、状态机的未知事件、迁移在事务内重读版本。
+
+只改文档：`RecoverInFlight` 的单一派发进程前提、macOS 断电持久性的局限、版本过新的数据库在拒绝前可能已切换为 WAL。未修改：SM-1（按 Task 9 的规定，终止任务上核对为未送达的回复记为 REJECTED，并保留 `resume_state`）与 N2（原因见「复查后补充」）。独立复查一轮批准，另提 5 条 nit，其中 4 条已补。
+
+### 远端验证
+
+- 本阶段分 4 个 PR 合并：#6（Task 1–5）、#7（Task 6–7）、#8（Task 8–9）以合并提交保留逐任务提交，#9（Task 10–12）按本清单 squash 合并。每个 PR 都在三项必需检查通过后合并。
+- PR #9：`quality (ubuntu-24.04)` 2 分 03 秒、`quality (macos-15)` 2 分 28 秒、`security` 53 秒。
+- 合并后 main `e046ff4`：CI 成功（`quality (ubuntu-24.04)` 2 分 05 秒、`quality (macos-15)` 2 分 09 秒），Security 成功（47 秒）。
+- 引入 modernc 后单次质量任务约 2 分钟，远低于 10 分钟的阈值，本阶段不启用 setup-go 缓存。
+- 未运行：Candidate build 只能手动触发；本阶段没有改动构建工作流，产品二进制也没有链接新依赖（`go version -m` 已确认），因此没有重新运行。
