@@ -6,15 +6,19 @@ Email bridge for Codex and Claude Code, under development: the goal is to contin
 
 ## Status
 
-Pre-alpha. The Go command-line program offers only `help`, `version` and a read-only `doctor`. The repository also has quality gates and CI.
+Pre-alpha. The Go command-line program offers `help`, `version`, a read-only `doctor` and an interactive `init`. The repository also has quality gates and CI.
 
-Configuration, storage and the state machines are implemented and tested as internal packages, but no command uses them yet:
+`turncourier init` is the first command that does real work: on macOS, in an interactive terminal and without touching the network, it writes the configuration file, creates the instance ID, reads the QQ Mail authorization code without echoing it and stores it together with two generated keys in the macOS Keychain. It never overwrites an existing configuration file or an already registered key.
 
-- `internal/config` loads and strictly validates the TOML configuration ([example](configs/turncourier.example.toml)).
-- `internal/task` and `internal/queue` are the task and reply queue state machines.
-- `internal/store/sqlite` stores tasks and reply metadata in SQLite, with migrations, deduplication, a FIFO reply queue and crash recovery. It stores no email bodies, only their SHA-256 digests.
+These packages are implemented and tested; `init` uses some of them, and the rest wait for the mail loop:
 
-TurnCourier cannot send or receive email yet. There are no agent adapters, no Keychain access and no background service. There are no releases or tags; the default branch is `main`.
+- `internal/config` loads and strictly validates the TOML configuration ([example](configs/turncourier.example.toml)) and renders a new one for `init`.
+- `internal/task` and `internal/queue` are the task, reply queue and outgoing notification state machines.
+- `internal/store/sqlite` stores tasks, reply metadata, the instance ID, key metadata, outgoing notifications, fetch cursors and rejected inbound mail. A pending body is on disk only as AES-256-GCM ciphertext and is deleted in the same transaction that finishes it.
+- `internal/security/keychain`, `token` and `payload` hold the Keychain wrapper, reply tokens and body encryption.
+- `internal/mail/smtp` and `internal/mail/imap` are the mail clients: implicit TLS only, a deadline on every step, and read-only access to the mailbox.
+
+TurnCourier still cannot send or receive email: nothing renders a notification, parses an inbound message or runs a send and receive loop. Those wait for the L1 probe against a real mailbox, described in the [Phase 4 plan](docs/zh-CN/plans/phase-04.md). There are no agent adapters and no background service. There are no releases or tags; the default branch is `main`.
 
 The Phase 0–1 research probes (Node.js scripts, not product code) resumed the same Codex and Claude Code sessions from a new process on one Mac. Claude Code's first attempt exited abnormally on its second turn, for a reason not yet determined; the retest passed. No real mail round trip has been tested. See the [research report](docs/zh-CN/research/phase-01.md) (Chinese) for evidence and limits.
 
@@ -22,7 +26,7 @@ The Phase 0–1 research probes (Node.js scripts, not product code) resumed the 
 
 > Planned. None of this is implemented.
 
-You start a Codex or Claude Code task through TurnCourier on your Mac. By default, when a turn completes, the agent waits for input or the task fails, TurnCourier emails the status and the agent's reply from a dedicated QQ Mail account to your own mailbox. You answer by replying to that email, and after sender, thread and signed-token checks the reply becomes the next user message in the same agent session. Email cannot approve tool permissions. The first release targets macOS, Codex CLI, Claude Code CLI and QQ Mail; the mail authorization code is to be entered locally with `turncourier init` and stored in the macOS Keychain. The [design](docs/zh-CN/design.md) (Chinese) defines the scope, security boundaries and target directory tree.
+You start a Codex or Claude Code task through TurnCourier on your Mac. By default, when a turn completes, the agent waits for input or the task fails, TurnCourier emails the status and the agent's reply from a dedicated QQ Mail account to your own mailbox. You answer by replying to that email, and after sender, thread and signed-token checks the reply becomes the next user message in the same agent session. Email cannot approve tool permissions. The first release targets macOS, Codex CLI, Claude Code CLI and QQ Mail. Entering the authorization code locally with `turncourier init` and storing it in the macOS Keychain already works; everything else above does not. The [design](docs/zh-CN/design.md) (Chinese) defines the scope, security boundaries and target directory tree.
 
 ## Quick start
 
@@ -79,13 +83,14 @@ Example `doctor --json` on macOS with all three tools installed (your versions w
 | `help [--json]` | Usage, available commands and planned commands. Also runs with no arguments, `-h` or `--help`. | 0 |
 | `version [--json]` | Version string. `make build` sets `0.1.0-dev`. `--version` is an alias. | 0 |
 | `doctor [--json]` | Read-only check of the platform and the `git`, `codex` and `claude` versions. | 0 ready, 1 not ready |
-| `init`, `run`, `tasks`, `logs`, `service` | Planned. Prints that the command is not implemented yet. | 2 |
+| `init` | Interactive setup: writes the configuration file and stores the authorization code and two keys in the Keychain. macOS and an interactive terminal only; takes no arguments and opens no network connection. | 0 done, 1 failed |
+| `run`, `tasks`, `logs`, `service` | Planned. Prints that the command is not implemented yet. | 2 |
 | Any other command or argument | Usage error. | 2 |
 
 Exit codes:
 
 - `0`: success.
-- `1`: `doctor` is not ready (the platform is not macOS, or `git`, `codex` or `claude` is missing, fails, times out, is interrupted or prints unexpected output), or writing the output failed.
+- `1`: `doctor` is not ready (the platform is not macOS, or `git`, `codex` or `claude` is missing, fails, times out, is interrupted or prints unexpected output), `init` failed, or writing the output failed. `init` prints one line saying why, with no paths and no secrets in it.
 - `2`: usage error, unknown command, or a planned command.
 - If stdout is a closed pipe, the process is terminated by `SIGPIPE`, following Unix convention (shell exit status 141).
 
@@ -97,11 +102,11 @@ Contributors should read [CONTRIBUTING.md](CONTRIBUTING.md) and the [development
 | --- | --- |
 | `make build` | Builds `dist/turncourier`. |
 | `make fmt`, `make fmt-check` | Formats, or checks formatting of, `cmd`, `internal`, `tests` and `tools`. |
-| `make vet` | `go vet ./...` |
+| `make vet` | `go vet ./...`, then `go vet -tags live ./tests/live/`. |
 | `make modverify` | `go mod verify`: module checksums must match `go.sum`. |
 | `make comments` | `tools/commentcheck`: Chinese doc comments on packages, types and named functions. |
 | `make test` | `go test -race` writing `coverage.out`; `tools/covercheck` fails below 80% statement coverage of all hand-written Go code, with no exclusions. |
-| `make lint` | staticcheck v0.8.1, with ST1020–ST1022 enabled in `staticcheck.conf`. |
+| `make lint` | staticcheck v0.8.1, with ST1020–ST1022 enabled in `staticcheck.conf`, then the same with `-tags live` over `tests/live`. |
 | `make check` | `fmt-check`, `vet`, `modverify`, `comments`, `test` and `lint`. |
 | `make security` | govulncheck v1.8.0 and `secrets`. |
 | `make secrets` | gitleaks v8.30.1 over all Git history, the staged changes and a snapshot of tracked and non-ignored files. Refuses to run if `.gitleaks.toml` or `.gitleaksignore` exists at the repository root. |
@@ -112,7 +117,7 @@ CI runs `make check`, `make security` and `make workflows`; run them locally bef
 
 Code rules:
 
-- Besides the Go standard library, production code uses two third-party modules: `modernc.org/sqlite` v1.59.0 (pure Go SQLite, no CGO) and `github.com/BurntSushi/toml` v1.6.0. Versions are pinned in `go.mod` and `go.sum`. A new dependency needs its reason and license stated in a plan or issue, and only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
+- Besides the Go standard library, the product binary links `modernc.org/sqlite` v1.59.0 (pure Go SQLite, no CGO), `github.com/BurntSushi/toml` v1.6.0 and `golang.org/x/term` v0.46.0. The mail packages use `github.com/emersion/go-smtp` v0.25.0, `github.com/emersion/go-imap/v2` v2.0.0-beta.8, `github.com/emersion/go-message` v0.18.2 (with `github.com/emersion/go-sasl`) and `golang.org/x/text` v0.42.0; no command imports them yet, so they are not in the binary. Versions are pinned in `go.mod` and `go.sum`. A new dependency needs its reason and license stated in a plan or issue, and only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
 - Identifiers are in English.
 - Every hand-written package, type (including local types) and named function (including methods and tests) has a Chinese comment, checked by `tools/commentcheck`.
 - Comments on exported identifiers start with the identifier name, checked by staticcheck.
@@ -129,7 +134,7 @@ CI:
 - [Design](docs/zh-CN/design.md) (Chinese): approved scope, architecture, security boundaries and target tree
 - [Phase 2 plan](docs/zh-CN/plans/phase-02.md) (Chinese)
 - [Phase 3 plan](docs/zh-CN/plans/phase-03.md) (Chinese): configuration, storage and state machines
-- [Phase 4 plan](docs/zh-CN/plans/phase-04.md) (Chinese, decisions confirmed, 4a task contracts reviewed): mail loop
+- [Phase 4 plan](docs/zh-CN/plans/phase-04.md) (Chinese): the mail loop, split into 4a (built), L1 (a manual probe against a real mailbox) and 4b
 - [Phase 0–1 research report](docs/zh-CN/research/phase-01.md) (Chinese)
 - [Architecture](docs/en/architecture.md)
 - [Research probes](experiments/phase01/README.md) (Chinese)
@@ -149,21 +154,30 @@ turncourier/
 │   ├── dependabot.yml               # Weekly github-actions and gomod updates
 │   └── workflows/                   # ci.yml, security.yml, build.yml (manual)
 ├── cmd/turncourier/                 # Executable
-│   ├── main.go                      # Entry point: signal cancellation, exit code
+│   ├── main.go                      # Entry point: signals, dependencies, exit code
 │   └── main_test.go                 # Entry point tests
 ├── configs/                         # Configuration examples
 │   └── turncourier.example.toml     # Loaded by tests to stay in sync with validation
 ├── internal/                        # Product packages
 │   ├── cli/                         # Command-line interface
-│   │   ├── cli.go                   # help, version, doctor; planned commands exit 2
-│   │   └── cli_test.go              # Output, argument and exit code tests
-│   ├── config/                      # TOML configuration, not used by commands yet
+│   │   ├── cli.go                   # help, version, doctor, init; planned exit 2
+│   │   ├── cli_test.go              # Output, argument and exit code tests
+│   │   ├── init.go                  # Interactive init flow
+│   │   ├── init_test.go             # init flow, refusals and error text tests
+│   │   ├── terminal.go              # x/term terminal: line and no-echo input
+│   │   ├── terminal_test.go         # Non-terminal input and output tests
+│   │   ├── terminal_darwin.go       # macOS: turn terminal echo off (termios)
+│   │   ├── terminal_darwin_test.go  # macOS pseudo-terminal tests
+│   │   └── terminal_other.go        # Other platforms: no echo switch
+│   ├── config/                      # TOML configuration
 │   │   ├── address.go               # Strict email address normalization
 │   │   ├── address_test.go          # Table cases and fuzz seeds
 │   │   ├── config.go                # Config types, defaults, Load, validation
 │   │   ├── config_test.go           # Defaults, rejected keys, env override
 │   │   ├── paths.go                 # Config file and data directory paths
 │   │   ├── paths_test.go            # Default and environment variable paths
+│   │   ├── write.go                 # init: render and atomically create the file
+│   │   ├── write_test.go            # Rendering, atomic create, never overwrite
 │   │   ├── fileperm_unix.go         # Unix: config file owner and write bits
 │   │   ├── fileperm_unix_test.go    # Unix: owner check, FIFO, unreadable parent
 │   │   └── fileperm_other.go        # Other platforms: regular file and size
@@ -173,29 +187,73 @@ turncourier/
 │   │   ├── process_unix.go          # Unix: kill the version process group
 │   │   ├── process_other.go         # Other platforms: default cancellation
 │   │   └── process_unix_test.go     # Process group termination test
-│   ├── queue/                       # Reply queue state machine, no I/O
-│   │   ├── state.go                 # Queue states, events, transition table
-│   │   └── state_test.go            # Every state × event combination
-│   ├── store/sqlite/                # SQLite storage, not used by commands yet
+│   ├── mail/                        # Mail clients; no storage, no config
+│   │   ├── imap/                    # Read-only IMAP over implicit TLS
+│   │   │   ├── session.go           # Login, EXAMINE, UID rescan, PEEK, IDLE
+│   │   │   ├── watcher.go           # Long loop: watchdog, backoff reconnect
+│   │   │   ├── fakeserver_test.go   # imapmemserver plus a fault-injecting proxy
+│   │   │   ├── session_test.go      # Bare BAD, half-open, UIDVALIDITY change
+│   │   │   ├── watcher_test.go      # Backoff, login rate limit, auth pause
+│   │   │   └── source_test.go       # Source check: DialTLS, read-only, PEEK
+│   │   └── smtp/                    # Submit one message over implicit TLS
+│   │       ├── smtp.go              # Per-step deadlines, outcome classification
+│   │       ├── smtp_test.go         # go-smtp fake server, plaintext guard
+│   │       └── source_test.go       # Source check: DialTLS only, no debug log
+│   ├── queue/                       # Queue state machines, no I/O
+│   │   ├── state.go                 # Reply queue states, events, transitions
+│   │   ├── state_test.go            # Every state × event combination
+│   │   ├── outbox.go                # Outgoing notification states and transitions
+│   │   └── outbox_test.go           # Every state × event combination
+│   ├── security/                    # Credentials, tokens, body encryption
+│   │   ├── keychain/                # /usr/bin/security wrapper
+│   │   │   ├── keychain.go          # Get, Set, Add, Delete; entry naming
+│   │   │   └── keychain_test.go     # Fake security subprocess, leak checks
+│   │   ├── payload/                 # Pending body encryption
+│   │   │   ├── payload.go           # AES-256-GCM, associated data, format
+│   │   │   └── payload_test.go      # Binding, swapping and size tests
+│   │   └── token/                   # Reply tokens
+│   │       ├── token.go             # Issue, parse, verify; keyed body digest
+│   │       ├── token_test.go        # Tampering, binding, expiry, canary, fuzz
+│   │       └── source_test.go       # Source check: constant-time comparison
+│   ├── store/sqlite/                # SQLite storage
 │   │   ├── store.go                 # Open, Close, connection parameters
 │   │   ├── migrate.go               # Embedded migrations and user_version
 │   │   ├── migrations/0001_init.sql # Initial schema
+│   │   ├── migrations/0002_mail.sql # Folder column, keys, notifications, bodies
 │   │   ├── perm_unix.go             # Unix: data directory and file modes
 │   │   ├── perm_other.go            # Other platforms: no mode check
 │   │   ├── id.go                    # Task ID generation
+│   │   ├── instance.go              # Instance ID and key metadata
+│   │   ├── wal.go                   # TRUNCATE checkpoint after a body is gone
 │   │   ├── tasks.go                 # Tasks and task events, versioned
 │   │   ├── replies.go               # Reply dedup, queue, dispatch, recovery
+│   │   ├── notifications.go         # Notifications: create, claim, record, recover
+│   │   ├── mailbox.go               # Fetch cursors and rejected inbound mail
 │   │   ├── store_test.go            # Pragmas, path escaping, file modes
 │   │   ├── migrate_test.go          # Migration version, rollback, too new
+│   │   ├── schema_test.go           # 0002 constraints, indexes and triggers
 │   │   ├── id_test.go               # Task ID encoding tests
+│   │   ├── instance_test.go         # Instance ID and key registration tests
+│   │   ├── wal_test.go              # Checkpoint without waiting for readers
 │   │   ├── tasks_test.go            # Task lifecycle and version conflicts
 │   │   ├── replies_test.go          # Deduplication, conflicts, atomicity
+│   │   ├── notifications_test.go    # Outbox states, expiry, no auto-resend
+│   │   ├── mailbox_test.go          # Cursor regression and rejection tests
+│   │   ├── residue_test.go          # No ciphertext left in the database or WAL
 │   │   └── dispatch_test.go         # FIFO, uncertain delivery, recovery
 │   └── task/                        # Task state machine, no I/O
 │       ├── state.go                 # Task states, events, transition table
 │       └── state_test.go            # Every state × event combination
-├── tests/integration/               # Cross-package tests
-│   └── lifecycle_test.go            # Config, storage and state machines together
+├── tests/                           # Cross-package and manual tests
+│   ├── integration/                 # Cross-package tests
+│   │   ├── lifecycle_test.go        # Config, storage and state machines together
+│   │   └── payload_test.go          # Notifications, tokens, digests, ciphertext
+│   └── live/                        # Manual L1 probes; never run by make test
+│       ├── sample.go                # No build tag: redaction and output checks
+│       ├── sample_test.go           # No build tag: offline tests of the above
+│       ├── live_test.go             # live tag: switches and confirmations
+│       ├── probe_test.go            # live tag: capabilities, send, replies, IDLE
+│       └── keychain_test.go         # live tag: real keychain round trip
 ├── tools/                           # Engineering checkers run by make
 │   ├── commentcheck/                # make comments
 │   │   ├── main.go                  # Chinese doc comment checker
@@ -213,7 +271,7 @@ turncourier/
 │       ├── plans/                   # Phase checklists
 │       │   ├── phase-02.md          # Phase 2: engineering skeleton
 │       │   ├── phase-03.md          # Phase 3: config, storage, state machines
-│       │   └── phase-04.md          # Phase 4: mail loop (4a contracts reviewed)
+│       │   └── phase-04.md          # Phase 4: mail loop (4a built, L1 pending)
 │       └── research/phase-01.md     # Phase 0–1 findings and limits
 ├── experiments/phase01/             # Research probes, not product code
 │   ├── README.md                    # How to run the probes
@@ -241,7 +299,10 @@ turncourier/
 
 - Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/chaoRookie/turncourier/security/advisories/new), not public issues. See [SECURITY.md](SECURITY.md). There are no supported releases; reproduce problems on the latest commit of `main`.
 - Do not put QQ Mail authorization codes, tokens, real email content, agent session transcripts or absolute local paths in issues, pull requests or logs. Use synthetic data to reproduce problems.
-- The `turncourier` command reads no configuration, credentials or sessions. The configuration file rejects credential keys; the mail authorization code is to be stored in the Keychain by `init`, which is not implemented. Public CI does not use real mailboxes or call models.
+- The configuration file rejects credential keys. `turncourier init` stores the authorization code and the two keys in the macOS Keychain instead, and they never enter the configuration file or the repository.
+- **Threat model.** Those entries are written with `/usr/bin/security`, so any process running as the same user — including a shell command an agent runs, if the agent's sandbox allows it — can read them silently. A process that has read them can sign a valid token, forge a reply that passes every check, inject content into any task and rewrite the local queue. TurnCourier does not defend against processes of the same user. The Keychain protects against plaintext reaching the configuration file, the repository, logs and backups; against other system users; and against offline disk access without the login password. Use a dedicated bot mailbox, and disable the authorization code in QQ Mail if you suspect it has leaked. See [SECURITY.md](SECURITY.md).
+- A pending body is stored only as ciphertext and deleted when its item finishes, but ciphertext left in an APFS snapshot or a Time Machine backup can still be decrypted while the key is in the Keychain. Do not restore the data directory from an old backup: notifications that were already sent would be sent again, and replies that were already acknowledged would be dispatched again.
+- Public CI does not use real mailboxes or call models. The probes in `tests/live` do, and they run only when the maintainer gives the `live` build tag, `TURNCOURIER_LIVE=1` and an interactive confirmation for each step.
 
 ## License
 

@@ -10,17 +10,18 @@ What exists today:
 
 - `turncourier help`, `turncourier version` and `turncourier doctor`, each with an optional `--json` flag.
 - `doctor` checks the platform and runs `git --version`, `codex --version` and `claude --version`, with a 3-second timeout per tool. It does not check logins, permissions, Agent sessions or mailboxes.
-- `init`, `run`, `tasks`, `logs` and `service` are planned. They print that they are not implemented and exit with code 2.
-- Configuration loading, SQLite storage and the task and reply queue state machines exist as internal packages with tests, but no command uses them yet.
-- Exit codes: `0` on success; `1` when `doctor` is not ready (the platform is not macOS, or the version check for `git`, `codex` or `claude` did not pass: missing, timed out, failed, cancelled or printed unexpected output) or when writing output fails; `2` for usage errors, unknown commands and planned commands. If stdout is a closed pipe, the process is terminated by `SIGPIPE` (exit status 141).
+- `init` is interactive setup: on macOS, in an interactive terminal and without any network access, it writes the configuration file and stores the mail authorization code and two keys in the macOS Keychain.
+- `run`, `tasks`, `logs` and `service` are planned. They print that they are not implemented and exit with code 2.
+- Configuration loading, SQLite storage, the state machines, the Keychain wrapper, reply tokens, body encryption and the SMTP and IMAP clients exist as internal packages with tests. So far only `init` uses any of them.
+- Exit codes: `0` on success; `1` when `doctor` is not ready (the platform is not macOS, or the version check for `git`, `codex` or `claude` did not pass: missing, timed out, failed, cancelled or printed unexpected output), when `init` fails, or when writing output fails; `2` for usage errors, unknown commands and planned commands. If stdout is a closed pipe, the process is terminated by `SIGPIPE` (exit status 141).
 
-What does not exist yet: sending or receiving email, Agent adapters, Keychain storage, commands that read the configuration or open the database, and any background service. Do not describe these as supported in code, help output or documentation.
+What does not exist yet: sending or receiving email in the product (the clients exist, but nothing renders a notification, parses an inbound message or runs a send and receive loop), Agent adapters, and any background service. Do not describe these as supported in code, help output or documentation.
 
-The approved scope, boundaries and target directory tree are in [docs/zh-CN/design.md](docs/zh-CN/design.md). The current phase checklist is [docs/zh-CN/plans/phase-03.md](docs/zh-CN/plans/phase-03.md). Before working on something that belongs to a later phase or changes the design, open a feature request so the scope can be agreed first.
+The approved scope, boundaries and target directory tree are in [docs/zh-CN/design.md](docs/zh-CN/design.md). The current phase checklist is [docs/zh-CN/plans/phase-04.md](docs/zh-CN/plans/phase-04.md). Before working on something that belongs to a later phase or changes the design, open a feature request so the scope can be agreed first.
 
 ## Development environment
 
-- Go 1.27.1, as declared in [go.mod](go.mod). Besides the Go standard library, production code uses `modernc.org/sqlite` v1.59.0 and `github.com/BurntSushi/toml` v1.6.0, pinned in `go.mod` and `go.sum`. A new dependency must have its reason and license stated in an implementation plan or issue. Only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
+- Go 1.27.1, as declared in [go.mod](go.mod). Besides the Go standard library, the product binary links `modernc.org/sqlite` v1.59.0, `github.com/BurntSushi/toml` v1.6.0 and `golang.org/x/term` v0.46.0; the mail packages use the `emersion` modules and `golang.org/x/text`, which no command imports yet. All versions are pinned in `go.mod` and `go.sum`. A new dependency must have its reason and license stated in an implementation plan or issue. Only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
 - `git`, `bash` and `tar` for `make secrets`.
 - Network access the first time each quality tool is installed, and the first time Go module dependencies are downloaded (by `make vet`, `make modverify`, `make test`, `make lint` or `make check`).
 
@@ -97,7 +98,7 @@ The full rules are in [AGENTS.md](AGENTS.md) and the development guide [docs/zh-
 
 ## Sensitive data
 
-Never put QQ Mail authorization codes, tokens, passwords, real email content, Agent session transcripts or local absolute paths in issues, pull requests, commits, test data or logs. Reproduce problems with synthetic data. The planned `init` command will store the mailbox authorization code in the macOS Keychain on your own machine; it is not implemented yet. Do not send an authorization code to anyone, including maintainers.
+Never put QQ Mail authorization codes, tokens, passwords, real email content, Agent session transcripts or local absolute paths in issues, pull requests, commits, test data or logs. Reproduce problems with synthetic data. `turncourier init` stores the mailbox authorization code in the macOS Keychain on your own machine; note that any process running as the same user can read it back, so use a dedicated bot mailbox. Do not send an authorization code to anyone, including maintainers.
 
 ## License of contributions
 
@@ -127,17 +128,18 @@ TurnCourier 处于 pre-alpha 阶段。没有发布版本，也没有版本标签
 
 - `turncourier help`、`turncourier version`、`turncourier doctor`，均支持可选的 `--json`。
 - `doctor` 检查平台，并执行 `git --version`、`codex --version`、`claude --version`，每个工具超时 3 秒。它不验证登录、权限、Agent 会话或邮箱。
-- `init`、`run`、`tasks`、`logs`、`service` 是规划命令，运行时输出「尚未实现」，退出码为 2。
-- 配置加载、SQLite 存储以及任务与回复队列状态机已作为内部包实现并有测试，但还没有任何命令使用它们。
-- 退出码：`0` 表示成功；`1` 表示 `doctor` 未就绪（平台不是 macOS，或 `git`、`codex`、`claude` 任一版本检查未通过：缺失、超时、执行失败、被取消或输出异常），或写入输出失败；`2` 表示用法错误、未知命令或规划命令。stdout 管道已断开时，进程按 `SIGPIPE` 终止（退出状态 141）。
+- `init` 是交互式初始化：在 macOS 的交互式终端中、不联网地写出配置文件，并把邮箱授权码与两把密钥存入 macOS Keychain。
+- `run`、`tasks`、`logs`、`service` 是规划命令，运行时输出「尚未实现」，退出码为 2。
+- 配置加载、SQLite 存储、各状态机、Keychain 封装、回复令牌、正文加密以及 SMTP、IMAP 客户端都已作为内部包实现并有测试；目前只有 `init` 使用了其中一部分。
+- 退出码：`0` 表示成功；`1` 表示 `doctor` 未就绪（平台不是 macOS，或 `git`、`codex`、`claude` 任一版本检查未通过：缺失、超时、执行失败、被取消或输出异常），或 `init` 失败，或写入输出失败；`2` 表示用法错误、未知命令或规划命令。stdout 管道已断开时，进程按 `SIGPIPE` 终止（退出状态 141）。
 
-尚不存在：邮件收发、Agent 适配器、Keychain 存储、读取配置或打开数据库的命令，以及任何后台服务。不要在代码、帮助输出或文档中把它们写成已支持。
+尚不存在：产品中的邮件收发（客户端已有，但没有通知渲染、来信解析和收发循环）、Agent 适配器，以及任何后台服务。不要在代码、帮助输出或文档中把它们写成已支持。
 
-已批准的范围、边界和目标目录树见 [docs/zh-CN/design.md](docs/zh-CN/design.md)，当前阶段清单见 [docs/zh-CN/plans/phase-03.md](docs/zh-CN/plans/phase-03.md)。如果要做属于后续阶段或会改变设计的工作，先提交功能建议，确认范围后再动手。
+已批准的范围、边界和目标目录树见 [docs/zh-CN/design.md](docs/zh-CN/design.md)，当前阶段清单见 [docs/zh-CN/plans/phase-04.md](docs/zh-CN/plans/phase-04.md)。如果要做属于后续阶段或会改变设计的工作，先提交功能建议，确认范围后再动手。
 
 ## 开发环境
 
-- Go 1.27.1，以 [go.mod](go.mod) 为准。生产代码除 Go 标准库外使用 `modernc.org/sqlite` v1.59.0 与 `github.com/BurntSushi/toml` v1.6.0，版本固定在 `go.mod` 与 `go.sum`。新增依赖须在实施清单或 issue 中说明理由与许可证，只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。
+- Go 1.27.1，以 [go.mod](go.mod) 为准。除 Go 标准库外，产品二进制链接 `modernc.org/sqlite` v1.59.0、`github.com/BurntSushi/toml` v1.6.0 与 `golang.org/x/term` v0.46.0；邮件包使用 `emersion` 系列模块与 `golang.org/x/text`，目前没有命令导入它们。版本全部固定在 `go.mod` 与 `go.sum`。新增依赖须在实施清单或 issue 中说明理由与许可证，只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。
 - `make secrets` 需要 `git`、`bash` 和 `tar`。
 - 每个质量工具首次安装时需要联网；首次下载 Go 模块依赖时（由 `make vet`、`make modverify`、`make test`、`make lint` 或 `make check` 触发）也需要联网。
 
@@ -214,7 +216,7 @@ PR 会在 GitHub Actions 中运行同样的目标。CI 工作流在 ubuntu-24.04
 
 ## 敏感数据
 
-不要在 issue、PR、提交、测试数据或日志中放入 QQ 邮箱授权码、令牌、密码、真实邮件内容、Agent 会话记录或本机绝对路径。复现问题时使用合成数据。规划中的 `init` 命令会把邮箱授权码写入你本机的 macOS Keychain，但它尚未实现。不要把授权码发给任何人，包括维护者。
+不要在 issue、PR、提交、测试数据或日志中放入 QQ 邮箱授权码、令牌、密码、真实邮件内容、Agent 会话记录或本机绝对路径。复现问题时使用合成数据。`turncourier init` 会把邮箱授权码写入你本机的 macOS Keychain；同一用户下的任何进程都能把它读回去，因此请使用专用的机器人邮箱。不要把授权码发给任何人，包括维护者。
 
 ## 贡献的许可
 
