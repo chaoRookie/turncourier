@@ -152,6 +152,35 @@ func TestRegisterKey(t *testing.T) {
 	}
 }
 
+// TestRegisterKeyNonActive 验证非 active 的密钥：以绑定参数直接插入一条 retired 或 destroyed 的 payload 密钥后，
+// ActiveKeyID(payload) 返回 ErrNotFound，KeyStateOf 读回该状态；该用途已有密钥，RegisterKey(payload, 2) 仍返回
+// ErrKeyExists，crypto_keys 行数不变。
+func TestRegisterKeyNonActive(t *testing.T) {
+	for _, state := range []KeyState{KeyRetired, KeyDestroyed} {
+		t.Run(string(state), func(t *testing.T) {
+			store, _ := openTaskStore(t, nil)
+			ctx := t.Context()
+			if _, err := store.db.ExecContext(ctx,
+				"INSERT INTO crypto_keys (purpose, kid, state, key_check, created_at, updated_at) VALUES (?, 1, ?, ?, 0, 0)",
+				string(KeyPurposePayload), string(state), bytes.Repeat([]byte{0x5a}, 8)); err != nil {
+				t.Fatalf("插入 %s 密钥失败: %v", state, err)
+			}
+			if kid, err := store.ActiveKeyID(ctx, KeyPurposePayload); !errors.Is(err, ErrNotFound) {
+				t.Errorf("ActiveKeyID(payload) = %d, %v; want ErrNotFound", kid, err)
+			}
+			if got, err := store.KeyStateOf(ctx, KeyPurposePayload, 1); err != nil || got != state {
+				t.Errorf("KeyStateOf(payload, 1) = %q, %v; want %q, nil", got, err, state)
+			}
+			if err := store.RegisterKey(ctx, KeyPurposePayload, 2, [8]byte{}); !errors.Is(err, ErrKeyExists) {
+				t.Errorf("RegisterKey(payload, 2): err = %v; want ErrKeyExists", err)
+			}
+			if got := countRows(t, store.db, "crypto_keys"); got != 1 {
+				t.Errorf("crypto_keys 行数 = %d; want 1", got)
+			}
+		})
+	}
+}
+
 // TestRegisterKeyValidation 验证 kid 为 0 或用途未知时，RegisterKey 在开始事务前报错且不写入：
 // 上下文已取消时仍返回参数错误，而不是 context.Canceled。
 func TestRegisterKeyValidation(t *testing.T) {
