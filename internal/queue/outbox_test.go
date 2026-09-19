@@ -14,6 +14,7 @@ var allOutboxStates = []OutboxState{OutboxPending, OutboxSending, OutboxSent, Ou
 var allOutboxEvents = []OutboxEvent{OutboxClaim, OutboxDelivered, OutboxMarkUncertain, OutboxRequeue, OutboxAbandon}
 
 // TestOutboxPersistedNames 确认待发通知状态与事件的字符串值与规格一致；状态值写入存储并受表约束检查，改名会破坏已有数据。
+// 同时钉住哨兵错误的文本。
 func TestOutboxPersistedNames(t *testing.T) {
 	states := map[OutboxState]string{
 		OutboxPending: "PENDING", OutboxSending: "SENDING", OutboxSent: "SENT",
@@ -32,6 +33,10 @@ func TestOutboxPersistedNames(t *testing.T) {
 		if string(event) != events[event] {
 			t.Errorf("event %q, want %q", event, events[event])
 		}
+	}
+	// 哨兵文本与回复队列不同，排查时能从错误文本分辨是哪一张转移表报的错。
+	if got := ErrInvalidOutboxTransition.Error(); got != "invalid outbox transition" {
+		t.Errorf("ErrInvalidOutboxTransition = %q, want %q", got, "invalid outbox transition")
 	}
 }
 

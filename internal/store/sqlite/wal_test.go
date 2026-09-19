@@ -163,9 +163,14 @@ func TestTruncateWALDiscardsConnOnRestoreFailure(t *testing.T) {
 	}
 }
 
-// TestOpenTruncatesWAL 验证 Open 在迁移完成后执行一次检查点：存储 A 写入若干行并保持打开，
-// 打开同一目录的存储 B 之后 WAL 为 0 字节。
+// TestOpenTruncatesWAL 验证 Open 在迁移完成后执行一次检查点：新目录打开后迁移写下的帧已被截断，WAL 为 0 字节；
+// 存储 A 写入若干行并保持打开，打开同一目录的存储 B 之后 WAL 为 0 字节。
 func TestOpenTruncatesWAL(t *testing.T) {
+	fresh := dataDir(t)
+	openStore(t, fresh)
+	if size := walSize(t, fresh); size != 0 {
+		t.Errorf("新目录迁移后 WAL 大小 = %d; want 0（检查点须在迁移之后）", size)
+	}
 	dir := dataDir(t)
 	first := openStore(t, dir)
 	insertTasks(t, first.db, "open0000", 5)
