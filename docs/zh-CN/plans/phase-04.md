@@ -1271,16 +1271,22 @@ func (s *Store) Rejections(ctx context.Context, since time.Time, limit int) ([]R
 
 被拒来信只记录，不回信（防回环与反向散射）；由 CLI 或菜单栏展示属于后续阶段。
 
-- [ ] **Step 1：写失败的测试。**
+- [x] **Step 1：写失败的测试。**
   - **游标：** 没有记录时 `ErrNotFound`；写入 `(7, 10)` 后读回；`(7, 12)` 成功；`(7, 11)` 返回 `ErrCursorRegression` 且仍为 `(7, 12)`；`(7, 12)` 重复写入成功；`(8, 3)` 重置成功；INBOX 与 Junk 的游标互不影响；账户为空或含空白、文件夹为空、256 个字符或含 NUL、UIDVALIDITY 为 0 时在开始事务前报错。
   - **被拒来信：** 首次写入返回新 ID 与 `duplicate = false`；同一 (账户, 文件夹, UIDVALIDITY, UID) 再次写入返回同一 ID 与 `true`，已有字段不变；原因码 `Bad` 或空字符串报错；Message-ID 为 2 个字符报错，且错误文本不含该值与发件人地址；TaskID 不存在返回 `ErrNotFound`；Message-ID 与发件人为空时可以写入；`Rejections` 按时间升序返回，`limit` 生效，`limit` 为 0 或 1001 时报错。
   - **Go 与数据库一致：** 遍历全部原因码常量，每个都满足数据库的形状约束（逐个插入成功）。
-- [ ] **Step 2：** 测试失败。
-- [ ] **Step 3：** 实现。`AdvanceCursor` 用 `INSERT … ON CONFLICT (account, folder) DO UPDATE … WHERE excluded.uid_validity <> fetch_cursors.uid_validity OR excluded.last_uid >= fetch_cursors.last_uid`，受影响行数为 0 即回退。
-- [ ] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
-- [ ] **Step 5：** `git commit -m "feat(store): persist fetch cursors and rejected mail metadata"`
+- [x] **Step 2：** 测试失败。
+- [x] **Step 3：** 实现。`AdvanceCursor` 用 `INSERT … ON CONFLICT (account, folder) DO UPDATE … WHERE excluded.uid_validity <> fetch_cursors.uid_validity OR excluded.last_uid >= fetch_cursors.last_uid`，受影响行数为 0 即回退。
+- [x] **Step 4：** `go test -race ./internal/store/sqlite/` 通过。
+- [x] **Step 5：** `git commit -m "feat(store): persist fetch cursors and rejected mail metadata"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** 先写测试，`go test ./internal/store/sqlite/` 编译失败（`undefined: Cursor`、`s.AdvanceCursor undefined`、`s.FetchCursor undefined`、`undefined: Rejection` 等），再实现。实现只新增 `mailbox.go`：① `AdvanceCursor` 按 Step 3 用一条 `INSERT … ON CONFLICT (account, folder) DO UPDATE SET uid_validity、last_uid、updated_at … WHERE excluded.uid_validity <> fetch_cursors.uid_validity OR excluded.last_uid >= fetch_cursors.last_uid`，受影响行数为 0 即返回 `ErrCursorRegression`；单条语句自身是原子的，不另开事务，多个进程并发写入同一游标也不会让它后退。「在开始事务前报错」按「执行任何 SQL 之前校验」落实。② 账户与文件夹的校验提取为 `checkMailbox`，规则与 `InboundReply.validate` 相同（账户 3–254 个字符且不含空白，文件夹 1–255 个字符、可含空格，按 Unicode 字符计，含 NUL 一律拒绝），游标与被拒来信共用；`replies.go` 未改动。③ `RecordRejection` 在校验后开启一个 IMMEDIATE 事务：先按 (account, folder, uid_validity, uid) 查找，已有记录即返回原 ID 与 `duplicate = true`，不覆盖；否则 TaskID 非空时经 `getTask` 确认任务存在（不存在返回包装 `ErrNotFound` 的错误），再 `INSERT … RETURNING id`。空的 Message-ID、发件人与 TaskID 写为 NULL（小函数 `optional`）。④ 原因码的合法取值集中在 `knownRejectReasons`（与契约的 13 个常量一一对应），数据库只约束形状；`Rejections` 读回时原因码按原样返回，不按本版本的列表校验，因为它只用于展示，较新版本增补的原因码仍可读出。⑤ 清单之外的一处改动：`tasks.go` 中 `ErrNotFound` 的注释补上「收取游标」，因为 `FetchCursor` 也返回它；只改这一行注释。
+
+契约未规定之处的取舍（均写入函数注释并由测试钉住）：`Rejection.ID` 与 `ReceivedAt` 由存储填写，`RecordRejection` 忽略输入中的这两个字段，`received_at` 取存储时钟的当前时间（UTC 毫秒），与 `inbound_messages.received_at` 由 `RecordReply` 取当前时间一致，因此也不需要对输入时间做校验；`Rejections` 的「since 之后」按严格晚于处理（`received_at > since`，按毫秒比较，恰在 since 的不返回）；已有记录的邮件再次写入时先按重复返回、不再检查任务；`FetchCursor` 对账户与文件夹做与写入相同的校验（契约只要求写入时校验），避免非法参数被误读为「没有游标」而触发全量补扫；发件人按规范化地址不允许空白，Message-ID 与 `InboundReply` 一样只校验长度与 NUL；错误文本不含地址、文件夹与 Message-ID，只有未知原因码会以 `%q` 回显原因码本身（它来自程序常量，不来自邮件）。
+
+测试（`mailbox_test.go`）：`TestAdvanceCursor` 按契约顺序走完 `ErrNotFound`、(7, 10)、(7, 12)、(7, 11) 回退、(7, 12) 重复、(8, 3) 重置，另断言回退被拒后整行（含 `updated_at`）不变、重复写入刷新 `updated_at`、重置后再以 (7, 1) 重置且 (7, 0) 仍为回退、新 UIDVALIDITY 下 `LastUID = 0` 可重复写入、uint32 最大值可写入；`TestCursorFoldersIndependent` 覆盖 INBOX 与 Junk、两个账户各自前进、回退与重置互不影响；`TestCursorValidation` 覆盖契约列出的非法输入与账户过短、过长、末尾换行，上下文已取消时仍返回校验错误且不写入，`FetchCursor` 对同样的账户与文件夹报错，文件夹含空格、恰为 255 个字符（含非 ASCII 字符）与账户边界值可以写入；`TestRecordRejection` 断言首次写入后全部字段逐一读回、输入中的 ID 与 ReceivedAt 被忽略，再次写入时其余字段不同也返回同一 ID 与 `true` 且原记录不变，四个键中任一不同都是新记录，Message-ID、发件人与任务为空时写入且库中为 NULL；`TestRecordRejectionUnknownTask` 覆盖 TaskID 不存在返回 `ErrNotFound` 且不写入、已有记录时按重复返回；`TestRecordRejectionValidation` 覆盖原因码 `Bad`、空字符串与形状合法但不在列表中的 `synthetic`，以及各字段的长度、空白、NUL 与取值范围，上下文已取消时仍返回校验错误，错误文本不含账户、Message-ID 与发件人，边界值可以写入；`TestRejectionsOrderAndLimit` 以乱序时间写入四条（含同一毫秒的两条），断言按 (received_at, id) 升序、`limit` 生效、since 的边界，以及 `limit` 为 0、−1、1001 时报错；`TestRejectReasonsMatchDatabase` 断言 `knownRejectReasons` 恰为契约的 13 个常量，并逐个经 `RecordRejection` 写入成功（即满足数据库的形状约束）后按原样读回；`TestMailboxCanceledContext` 断言输入合法而上下文已取消时四个方法都返回 `context.Canceled`。测试只用合成地址与 `example.invalid` 域名，不含机密形状的测试向量。
+
+在仓库副本上做了 55 个变异，每次只改一处，涉及：UPSERT 的 `>=` 改为 `>`、去掉「UIDVALIDITY 不同即重置」、去掉整个 WHERE、OR 改为 AND、回退判定失效、不刷新 `updated_at`、不更新 UIDVALIDITY 或 LastUID；`FetchCursor` 不按文件夹或账户查找、不校验；UIDVALIDITY 为 0 不拒绝；账户与文件夹的长度上下界、空白、NUL、按字节计长与按空白拒绝文件夹；被拒来信按四个键去重时各漏一个键、重复时返回 false、不检查任务、`received_at` 取输入、空字符串不写为 NULL；原因码、UID、UIDVALIDITY、Message-ID 与发件人的各项校验（上下界、按字节计长、空白、NUL、空值也校验长度）；错误文本回显 Message-ID、发件人或账户；不提交事务；`Rejections` 改用 `>=`、只按 id 排序、同一毫秒按 id 倒序、忽略 limit、limit 上下界、不换算 UTC、不读回 task_id；原因码列表少一项。全部被测试杀死，没有存活与编译失败的变异。验证：`go test -race ./internal/store/sqlite/` 通过，新增用例以 `-race -count=3` 重复运行稳定；`CGO_ENABLED=0 go test ./internal/store/sqlite/`、全仓 `GOOS=windows go vet` 与 `GOOS=linux go vet`、`make check`（含中文注释检查与 staticcheck，总覆盖率 93.12%，本包 88.3%，`mailbox.go` 中未覆盖的只有数据库出错与提交失败的分支）、`make secrets` 均通过。本任务不涉及钥匙串与网络；测试只在 macOS 上运行，Linux 上的测试由 CI 运行。与 Task 1–8 相同，本任务的提交包含本清单的勾选与实施说明。
 
 ### Task 10：SMTP 客户端
 
