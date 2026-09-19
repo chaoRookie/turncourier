@@ -289,13 +289,13 @@ tests/integration ─► config、store/sqlite、task、queue、security/token�
 
 本任务不导入新模块。各模块在第一个导入它的任务中接入，避免 `go mod tidy` 删除尚未使用的依赖：go-smtp 与 go-sasl 在 Task 10；go-imap/v2 在 Task 11，go-message 随之作为间接依赖进入 `go.mod`（imapclient 导入 `go-message/mail`）；x/term 在 Task 12；x/text 在 Task 13 导入 `go-message/charset` 时显式固定（此前它不在任何包的构建图中，只以 go-message 要求的 v0.14.0 出现在模块图里）。`golang.org/x/sys` 先单独升级，使现有存储栈在新版本上的回归与新功能分开。
 
-- [ ] **Step 1：补齐 D2 留下的 x/term 编译验证。** 在仓库之外的临时模块中写一个示例程序，调用 `term.IsTerminal` 与 `term.ReadPassword`，固定 `golang.org/x/term@v0.46.0`；以 `CGO_ENABLED=0` 分别构建 darwin/arm64、darwin/amd64、linux/amd64，并对三者运行 `go vet`。用 `go mod graph` 确认 x/term v0.46.0 要求 `golang.org/x/sys v0.48.0`。
-- [ ] **Step 2：许可证核对。** 对 D2 表中的每个模块执行 `go mod download -json <模块>@<版本>`，读取返回的 `Dir` 下的 LICENSE 文件，确认许可证与 D2 表一致（go-imap/v2、go-message、go-sasl、go-smtp 为 MIT；x/text、x/term、x/sys 为 BSD-3-Clause）。结果写入本任务的实施说明，不写本机路径。
-- [ ] **Step 3：升级。** `go get golang.org/x/sys@v0.48.0`，再 `go mod tidy`。`git diff go.mod` 只改动 `golang.org/x/sys` 一行。
-- [ ] **Step 4：验证。** `make check`、`make security`（govulncheck 无发现）、`CGO_ENABLED=0 go test -count=1 ./...`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...` 全部通过。
-- [ ] **Step 5：提交。** `git add go.mod go.sum && git commit -m "build: upgrade golang.org/x/sys to v0.48.0"`
+- [x] **Step 1：补齐 D2 留下的 x/term 编译验证。** 在仓库之外的临时模块中写一个示例程序，调用 `term.IsTerminal` 与 `term.ReadPassword`，固定 `golang.org/x/term@v0.46.0`；以 `CGO_ENABLED=0` 分别构建 darwin/arm64、darwin/amd64、linux/amd64，并对三者运行 `go vet`。用 `go mod graph` 确认 x/term v0.46.0 要求 `golang.org/x/sys v0.48.0`。
+- [x] **Step 2：许可证核对。** 对 D2 表中的每个模块执行 `go mod download -json <模块>@<版本>`，读取返回的 `Dir` 下的 LICENSE 文件，确认许可证与 D2 表一致（go-imap/v2、go-message、go-sasl、go-smtp 为 MIT；x/text、x/term、x/sys 为 BSD-3-Clause）。结果写入本任务的实施说明，不写本机路径。
+- [x] **Step 3：升级。** `go get golang.org/x/sys@v0.48.0`，再 `go mod tidy`。`git diff go.mod` 只改动 `golang.org/x/sys` 一行。
+- [x] **Step 4：验证。** `make check`、`make security`（govulncheck 无发现）、`CGO_ENABLED=0 go test -count=1 ./...`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...` 全部通过。
+- [x] **Step 5：提交。** `git add go.mod go.sum && git commit -m "build: upgrade golang.org/x/sys to v0.48.0"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** 本任务不新增代码与测试，以升级前 `go list -m golang.org/x/sys` 为 v0.47.0 作为失败基线，升级后为 v0.48.0。Step 1 的临时模块（go 1.27.1）调用 `term.IsTerminal` 与 `term.ReadPassword`，`go get golang.org/x/term@v0.46.0` 同时加入 `golang.org/x/sys v0.48.0`；以 `CGO_ENABLED=0` 构建 darwin/arm64、darwin/amd64、linux/amd64 并运行 `go vet` 均通过，`go mod graph` 含 `golang.org/x/term@v0.46.0 golang.org/x/sys@v0.48.0`。Step 2 的许可证与 D2 表一致：go-imap/v2 v2.0.0-beta.8、go-message v0.18.2、go-sasl `v0.0.0-20241020182733-b788ff22d5a6`（即 D2 的 `b788ff2`，由 go-imap/v2 的 `go.mod` 指定）、go-smtp v0.25.0 的 LICENSE 为 MIT 全文；x/text v0.42.0、x/term v0.46.0、x/sys v0.48.0 的 LICENSE 为 BSD-3-Clause（三项条件），另附 Go 项目的 PATENTS 专利授权文件。go-smtp 的 LICENSE 列有 The Go Authors、Gleez Technologies、emersion、Proton Technologies AG 四个版权方，发布前补齐第三方许可声明时须全部保留。Step 3 中 `go mod tidy` 没有其他改动：`go.mod` 只改 x/sys 一行，`go.sum` 只替换 x/sys 的两行哈希，与临时模块下载所得一致。Step 4 全部通过：`make check`（覆盖率 93.3%）、`make security`（govulncheck 无发现，gitleaks 无泄漏）、`CGO_ENABLED=0 go test -count=1 ./...`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...`。本任务的勾选与实施说明随 Step 5 的同一提交写入本清单，因此该提交在 `go.mod`、`go.sum` 之外还包含本文件。
 
 ### Task 2：Keychain 封装
 
