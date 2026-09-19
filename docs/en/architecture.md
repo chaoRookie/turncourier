@@ -81,7 +81,7 @@ internal/mail/imap           ─► github.com/emersion/go-imap/v2 (imapclient),
                                 (imapclient imports go-message/mail)
 
 tests/live (sample.go, no build tag) ─► go-message, go-message/charset, x/text
-tests/live (probes, live build tag)  ─► config, security/*, mail/*, modernc.org/sqlite
+tests/live (probes, live build tag)  ─► config, security/keychain, security/token, mail/*, modernc.org/sqlite
                                         (a read-only query for the instance ID)
 tests/integration ─► config, store/sqlite, task, queue, security/token, security/payload
 
@@ -161,7 +161,7 @@ These rules are implemented and tested in `internal/config` and `internal/store/
 | Table | Contents |
 | --- | --- |
 | `inbound_messages` | Rebuilt with a `folder` column. A UID is unique only within one folder (RFC 3501), so the UID key is now `(account, folder, uid_validity, uid)`. The `(account, message_id)` key is unchanged. `body_sha256` keeps its name, published in `0001`, but from `0002` on it holds the keyed digest. |
-| `replies` | Rebuilt alongside `inbound_messages`, because it references that table and a migration runs inside a transaction, where foreign keys cannot be switched off. Its columns, the partial unique index for one in-flight reply per task and the `AUTOINCREMENT` sequences are all preserved; existing rows get the folder `INBOX`. |
+| `replies` | Rebuilt alongside `inbound_messages`, because it references that table and a migration runs inside a transaction, where foreign keys cannot be switched off. Its columns, the partial unique index for one in-flight reply per task and the `AUTOINCREMENT` sequences are all preserved; existing `inbound_messages` rows get the folder `INBOX`. |
 | `instance` | One row with the instance ID: 10 random bytes as 16 lowercase Crockford base32 characters, created by `init` and stable for as long as the data directory is. |
 | `crypto_keys` | Key metadata only, never key material: purpose (`token` or `payload`), key id 1–255, state (`active`, `retired`, `destroyed`), an 8-byte check value and timestamps. A partial unique index allows one `active` key per purpose. |
 | `notifications` | One row per outgoing notification: task, event, the 12-byte nid, our Message-ID, the delivered Message-ID, the token key id and expiry, state, abandon reason, attempts, `not_before` and timestamps. A partial unique index allows at most one `SENDING` row globally, so sending is serial. Triggers make the fields that enter the token MAC immutable and let the delivered Message-ID be written only once. |

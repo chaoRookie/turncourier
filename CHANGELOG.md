@@ -77,7 +77,7 @@ Phase 4 is split into 4a (offline), L1 (a manual probe the maintainer runs again
 - The `help` description and the message for planned commands no longer name a phase; the description now starts with `pre-alpha`.
 - README, architecture, development and contribution documents describe the new packages, dependencies and checks.
 - `turncourier init` no longer reports that it is not implemented. The planned commands are now `run`, `tasks`, `logs` and `service`.
-- The product binary links `BurntSushi/toml`, `modernc.org/sqlite` and `golang.org/x/term`, because `init` uses the configuration, the store and the terminal. It does not link the mail modules or `golang.org/x/text`; those enter in Phase 4b.
+- The product binary links `BurntSushi/toml`, `modernc.org/sqlite`, `golang.org/x/term` and `golang.org/x/sys`, because `init` uses the configuration, the store and the terminal. It does not link the mail modules or `golang.org/x/text`; those enter in Phase 4b.
 - `inbound_messages.body_sha256` keeps its name, published in `0001`, but from `0002` on it holds a keyed HMAC-SHA256 digest rather than a bare SHA-256.
 - `make vet` and `make lint` each run a second time with `-tags live` over `tests/live`.
 

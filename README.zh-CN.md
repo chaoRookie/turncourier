@@ -16,7 +16,7 @@ Pre-alpha。Go 命令行程序提供 `help`、`version`、只读的 `doctor` 和
 - `internal/task` 与 `internal/queue` 分别是任务状态机、回复队列状态机和待发通知状态机。
 - `internal/store/sqlite` 保存任务、回复元数据、实例 ID、密钥元数据、待发通知、收取游标与被拒来信。待处理正文只以 AES-256-GCM 密文落盘，并在处理完成的同一事务中删除。
 - `internal/security/keychain`、`token`、`payload` 分别是 Keychain 封装、回复令牌与正文加密。
-- `internal/mail/smtp` 与 `internal/mail/imap` 是邮件客户端：只用隐式 TLS，每一步都有期限，且只以只读方式访问邮箱。
+- `internal/mail/smtp` 与 `internal/mail/imap` 是邮件客户端：只用隐式 TLS，每一步都有期限；IMAP 客户端只读取邮箱，从不改动它。
 
 TurnCourier 仍然不能收发邮件：没有通知渲染、来信解析和收发循环。这些要等 L1 真机探测的结果，见 [Phase 4 实施清单](docs/zh-CN/plans/phase-04.md)。没有 Agent 适配器，也没有后台服务。没有任何发布版本或标签，默认分支为 `main`。
 
@@ -24,7 +24,7 @@ Phase 0–1 的研究探针（Node.js 脚本，不是产品代码）在一台 Ma
 
 ## 目标体验
 
-> 规划中，以下内容均未实现。
+> 规划中，下文另有注明者除外。
 
 通过 TurnCourier 在 Mac 上启动 Codex 或 Claude Code 任务。默认在回合完成、Agent 等待输入或任务失败时，TurnCourier 用专用 QQ 邮箱把状态和 Agent 的回复发到你自己的邮箱。你直接回复这封邮件；经过发件人、邮件线程和签名令牌校验后，回复成为同一 Agent 会话的下一条用户消息。邮件不能批准工具权限。首版面向 macOS、Codex CLI、Claude Code CLI 和 QQ 邮箱。其中「通过本地 `turncourier init` 输入授权码并存入 macOS Keychain」已经可用，上面其余内容都还没有实现。范围、安全边界和目标目录树以[设计文档](docs/zh-CN/design.md)为准。
 

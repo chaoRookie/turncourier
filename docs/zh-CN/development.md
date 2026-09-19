@@ -179,6 +179,7 @@ go run ./tools/commentcheck .
 ## 测试约定
 
 - 单元测试和被测代码放在同一目录（`*_test.go`）。
+- 核对文档与代码是否一致的测试放在 `tests/docs/`（包名 `docs_test`）：`deps_test.go` 以 `go.mod` 的直接依赖与各包实际导入为准，核对中英文两份第三方依赖表。
 - 跨包的集成测试放在 `tests/integration/`（包名 `integration_test`，只有测试文件，需要单独写中文包注释）。`lifecycle_test.go` 组合示例配置、临时目录中的真实 SQLite 与两个状态机，走完一条回复从入队、派发、模拟崩溃后恢复到任务关闭的完整流程；`payload_test.go` 再走一遍通知、令牌、键控摘要、正文密文与派发的组合生命周期。端到端测试按设计将来也放在 `tests/` 下，有代码时再建对应目录；人工执行的真机探测已经在 `tests/live/`，见[真机探测](#真机探测testslive)。
 - 测试必须离线：不访问网络、真实邮箱、模型或 Agent 会话，不读写真实钥匙串，也不依赖本机是否装有 `git`、`codex`、`claude`。`internal/doctor` 的测试通过 `Checker` 注入 `GOOS`、`Lookup`、`Run` 和 `Timeout`，使用合成的版本字符串（见 `doctor_test.go` 中的 `healthyChecker`）。CLI 测试把输出写到 `bytes.Buffer`，并注入终端、Keychain、环境变量、随机源与时钟的替身。唯一的例外是带 `live` 标签的 `tests/live`，它不随 `go test ./...` 编译。
 - 需要真实子进程时，使用测试辅助子进程模式，让测试二进制自己扮演被调用的命令。`internal/doctor/doctor_test.go` 中的 `TestMain` 发现环境变量 `TURNCOURIER_TEST_VERSION_PROCESS` 非空时不运行测试，而是按模式（`ok`、`error`、`large`、`wait`、`background`、`group`）模拟版本命令。`internal/security/keychain/keychain_test.go` 同理：`TURNCOURIER_TEST_SECURITY_MODE` 非空时，测试二进制扮演 `/usr/bin/security`，用 `TURNCOURIER_TEST_SECURITY_STATE` 指向的文件保存假条目，把收到的参数与标准输入写进 `TURNCOURIER_TEST_SECURITY_LOG`，测试据此断言机密没有进入参数列表与环境变量。测试用 `os.Executable()` 取得自身路径，用 `t.Setenv` 选择模式，通过 `TURNCOURIER_TEST_PID_FILE` 取回孙进程 PID，结束前清理遗留进程。现有这类变量都以 `TURNCOURIER_TEST_` 开头，正常测试流程不会设置它们。
@@ -202,7 +203,7 @@ make test
 
 覆盖率门槛只以 `make test` 的结果为准。
 
-模糊测试：`internal/config` 的 `FuzzNormalizeAddress` 在普通 `go test` 与 CI 中只运行种子用例。需要运行模糊引擎时在本地执行：
+模糊测试：`internal/config` 的 `FuzzNormalizeAddress` 与 `internal/security/token` 的 `FuzzParse` 在普通 `go test` 与 CI 中只运行种子用例。需要运行模糊引擎时在本地执行（把包与目标名换成另一个即可）：
 
 ```sh
 go test -run='^$' -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/

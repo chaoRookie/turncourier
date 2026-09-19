@@ -16,7 +16,7 @@ These packages are implemented and tested; `init` uses some of them, and the res
 - `internal/task` and `internal/queue` are the task, reply queue and outgoing notification state machines.
 - `internal/store/sqlite` stores tasks, reply metadata, the instance ID, key metadata, outgoing notifications, fetch cursors and rejected inbound mail. A pending body is on disk only as AES-256-GCM ciphertext and is deleted in the same transaction that finishes it.
 - `internal/security/keychain`, `token` and `payload` hold the Keychain wrapper, reply tokens and body encryption.
-- `internal/mail/smtp` and `internal/mail/imap` are the mail clients: implicit TLS only, a deadline on every step, and read-only access to the mailbox.
+- `internal/mail/smtp` and `internal/mail/imap` are the mail clients: implicit TLS only and a deadline on every step; the IMAP client only reads the mailbox and never changes it.
 
 TurnCourier still cannot send or receive email: nothing renders a notification, parses an inbound message or runs a send and receive loop. Those wait for the L1 probe against a real mailbox, described in the [Phase 4 plan](docs/zh-CN/plans/phase-04.md). There are no agent adapters and no background service. There are no releases or tags; the default branch is `main`.
 
@@ -24,7 +24,7 @@ The Phase 0–1 research probes (Node.js scripts, not product code) resumed the 
 
 ## Planned experience
 
-> Planned. None of this is implemented.
+> Planned, except where the paragraph below says otherwise.
 
 You start a Codex or Claude Code task through TurnCourier on your Mac. By default, when a turn completes, the agent waits for input or the task fails, TurnCourier emails the status and the agent's reply from a dedicated QQ Mail account to your own mailbox. You answer by replying to that email, and after sender, thread and signed-token checks the reply becomes the next user message in the same agent session. Email cannot approve tool permissions. The first release targets macOS, Codex CLI, Claude Code CLI and QQ Mail. Entering the authorization code locally with `turncourier init` and storing it in the macOS Keychain already works; everything else above does not. The [design](docs/zh-CN/design.md) (Chinese) defines the scope, security boundaries and target directory tree.
 
