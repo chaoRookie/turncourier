@@ -1,10 +1,10 @@
 # HANDOFF
 
-**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）已完成，下一阶段为邮件闭环。
+**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）已完成，当前为 Phase 4 邮件闭环，清单已确认，下一步实施 4a。
 **更新于**：2026-09-19 · claude-code
 **项目目录**：本仓库根目录（含 `go.mod` 的目录）
 **基线 commit**：`e046ff4`（Phase 3 最后一个 PR #9 合并后的 main，CI 与 Security 通过）；其后为记录 Phase 3 验证结果的文档提交。以 `git log --oneline -3` 与 `git status --short` 核对。
-**暂停原因**：Phase 3 已完成。下一阶段须先写实施清单，并由维护者确认其中的决策（IMAP/SMTP 依赖、Keychain 接入方式、正文加密），然后才能开始实现。
+**暂停原因**：Phase 4 实施清单 `docs/zh-CN/plans/phase-04.md` 已写成：D1–D5 与「文件夹列」方案 (a) 已由维护者确认，4a 的 15 个任务契约经两轮审查与复查。下一步在 `feat/phase-04a-mail` 分支从 4a Task 1 开始实施。
 
 ## 已完成
 
@@ -23,7 +23,7 @@
 
 ## 未完成
 
-- [ ] 下一阶段（邮件闭环）：先写 `docs/zh-CN/plans/phase-04.md`，列出需维护者确认的决策后再实施。前置条件（均已写入 phase-03.md「风险与后续」）：
+- [ ] Phase 4 邮件闭环：按 `docs/zh-CN/plans/phase-04.md` 分三段实施：4a 离线 → L1 真机探测（需维护者在本机录入授权码并授权发信）→ 4b。4a 从 Task 1 开始；Task 13 的 L1 工具只由维护者授权后人工运行。前置条件（均已写入 phase-03.md「风险与后续」，并在 phase-04 中落实）：
   - D2 的正文加密与 Keychain 接入必须先于任何正文存储；
   - 后台服务的单实例锁须覆盖 `RecoverInFlight` 与全部派发操作；
   - 地址小写化须用真实 QQ 邮箱样本复核。
@@ -35,8 +35,8 @@
 
 1. 读 `AGENTS.md`，核对 `git status --short`、`git log --oneline -3` 与 `gh run list --repo chaoRookie/turncourier --limit 5`。
 2. `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`，运行下方验证命令，确认仍全部通过。
-3. 按 `docs/zh-CN/design.md` 的开发顺序编写邮件闭环阶段的实施清单，交维护者确认决策；确认前不写实现代码。
-4. 确认后在新的功能分支上逐任务实施：先写失败的测试，再由子代理实现，经规格与质量审查（含变异测试）、修复和独立复查后提交；阶段末做整阶段审查，然后开 PR。
+3. 从 main 建 `feat/phase-04a-mail`，按 phase-04.md 从 4a Task 1 起逐任务实施：先写失败的测试，再由子代理实现，经规格与质量审查（含变异测试）、修复和独立复查后提交；阶段末做整阶段审查，然后开 PR。
+4. 4a 合并后进入 L1：需维护者在本机操作，授权码只在本机终端输入，每封探测邮件发出前逐封确认。
 
 ## 验证方式
 
@@ -87,6 +87,7 @@ git diff --check
 
 - 按已批准设计的顺序推进：配置/存储/状态机 → 邮件闭环 → Codex → Claude → 安全与恢复 → 真实邮箱验收 → 发布。不要为了让维护者早点试收发邮件而压缩阶段或做「最小闭环」演示；维护者问时间点不等于要求改优先级。每阶段先写清单、确认决策，再逐任务实施和审查。
 - 不再围绕已批准设计做选择题问答；常规实现决定自行完成。对外发布动作（推送、开或合并 PR、改仓库设置）仍需用户在当次对话确认。
+- `make secrets` 扫描全部历史（含本地未推送分支）。清单或测试里不要写密钥形状的字面量，测试向量在运行时构造；推送前先跑 `make secrets`，命中只存在于未推送提交时，压缩或改写这些本地提交后再推送。
 - 本机 Go 与质量工具下载很慢，已安装的不要重复下载；modernc.org/sqlite 首次下载约 11 分钟。Makefile 以版本目录判断是否需要安装。
 - BurntSushi/toml 在精确匹配失败时按不区分大小写把键匹配到字段，并记为已解码，`Undecoded()` 看不到这些变体；配置改用 `MetaData.Keys()` 对照白名单。新增配置字段时必须同步 `knownKeys`。
 - `RecoverInFlight` 把全部 DISPATCHING 当作崩溃遗留，只能由唯一的派发进程在开始派发前调用；CLI 等其他进程不得调用。
