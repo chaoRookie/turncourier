@@ -273,7 +273,8 @@ func TestRecordRejectionUnknownTask(t *testing.T) {
 }
 
 // TestRecordRejectionValidation 验证原因码不在列表中、各字段长度、空白、NUL、非法 UTF-8 或取值范围不符时，RecordRejection
-// 在开始事务前报错（上下文已取消仍返回校验错误）且不写入，错误文本不含地址与 Message-ID；边界值可以写入。
+// 在开始事务前报错（上下文已取消仍返回校验错误）且不写入，错误文本不含地址、Message-ID 与任务 ID；任务 ID 须为空或任务 ID 的形式；
+// 边界值可以写入。
 func TestRecordRejectionValidation(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -305,6 +306,8 @@ func TestRecordRejectionValidation(t *testing.T) {
 		{"发件人含 NUL", func(r *Rejection) { r.Sender = "user\x00@example.invalid" }},
 		{"发件人含非法 UTF-8", func(r *Rejection) { r.Sender = "\xc0\x80\xc0\x80" }},
 		{"任务不存在时仍先校验字段", func(r *Rejection) { r.TaskID, r.UID = "0000000000", 0 }},
+		{"任务 ID 含大写字母", func(r *Rejection) { r.TaskID = "000000000A" }},
+		{"任务 ID 形似地址", func(r *Rejection) { r.TaskID = "attacker@example.invalid" }},
 	}
 	for _, tt := range tests {
 		r := rejectionFor(1)
@@ -314,7 +317,7 @@ func TestRecordRejectionValidation(t *testing.T) {
 			t.Errorf("%s: RecordRejection = %d, %t, %v; want 含 \"invalid rejection\" 的错误而不是 context.Canceled", tt.name, id, duplicate, err)
 			continue
 		}
-		for _, value := range []string{r.Account, r.MessageID, r.Sender} {
+		for _, value := range []string{r.Account, r.MessageID, r.Sender, r.TaskID} {
 			if len(value) >= 3 && strings.Contains(err.Error(), value) {
 				t.Errorf("%s: 错误文本 %q 回显了 %q", tt.name, err, value)
 			}

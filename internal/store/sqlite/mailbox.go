@@ -208,6 +208,8 @@ func (r Rejection) validate() error {
 		return fmt.Errorf("invalid rejection: unknown reason %q", r.Reason)
 	case r.UIDValidity == 0 || r.UID == 0:
 		return errors.New("invalid rejection: uid validity and uid must be positive")
+	case r.TaskID != "" && !taskIDPattern.MatchString(r.TaskID):
+		return errors.New("invalid rejection: task id must be empty or a 10-character task id")
 	case r.MessageID != "" && (messageIDLen < 3 || messageIDLen > 998):
 		return errors.New("invalid rejection: message id must be empty or 3-998 characters")
 	case r.Sender != "" && (senderLen < 3 || senderLen > 254 || strings.ContainsFunc(r.Sender, unicode.IsSpace)):
