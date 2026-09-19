@@ -44,7 +44,7 @@ type TaskEvent struct {
 }
 
 var (
-	// ErrNotFound 表示指定的任务或回复不存在。
+	// ErrNotFound 表示指定的任务、回复、实例 ID 或密钥元数据不存在。
 	ErrNotFound = errors.New("not found")
 	// ErrVersionConflict 表示调用方持有的任务版本已过期，需要重新读取后再决定。
 	ErrVersionConflict = errors.New("task version conflict")

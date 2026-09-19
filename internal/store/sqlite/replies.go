@@ -22,6 +22,7 @@ import (
 type InboundReply struct {
 	TaskID      string
 	Account     string // 调用方已用 config.NormalizeAddress 规范化的机器人邮箱地址
+	Folder      string // 取回该邮件的文件夹，4b 传入 imap.Batch.Folder；1–255 个字符（按字符计，与表约束一致），不含 NUL，可以含空格
 	UIDValidity uint32
 	UID         uint32
 	MessageID   string // 与邮件头一致的原样字符串
@@ -79,8 +80,9 @@ type knownInbound struct {
 
 // RecordReply 在同一事务中完成去重检查、写入入站记录与写入回复队列项。
 // 任务处于 AcceptsReplies 为 true 的状态时入队为 QUEUED；否则记录为 REJECTED，原因为 task_not_accepting、task_failed 或 task_closed。
-// 同一账户中 (UIDVALIDITY, UID) 或 Message-ID 已有记录时，Message-ID、正文摘要与任务都一致才算重复，
-// 返回原回复且不写入；任一不一致返回 ErrMessageConflict。重复邮件不按任务的当前状态重新判定。
+// 同一账户、同一文件夹中 (UIDVALIDITY, UID) 已有记录，或同一账户中 Message-ID 已有记录时，Message-ID、正文摘要与任务
+// 都一致才算重复，返回原回复且不写入；任一不一致返回 ErrMessageConflict。按 Message-ID 的查找不含文件夹，
+// 同一封信在 INBOX 与 Junk 各有一份时判为重复。重复邮件不按任务的当前状态重新判定。
 func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult, error) {
 	if err := in.validate(); err != nil {
 		return RecordResult{}, err
@@ -95,7 +97,7 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 	if err != nil {
 		return RecordResult{}, err
 	}
-	byUID, err := findInbound(ctx, tx, "account = ? AND uid_validity = ? AND uid = ?", in.Account, in.UIDValidity, in.UID)
+	byUID, err := findInbound(ctx, tx, "account = ? AND folder = ? AND uid_validity = ? AND uid = ?", in.Account, in.Folder, in.UIDValidity, in.UID)
 	if err != nil {
 		return RecordResult{}, err
 	}
@@ -125,8 +127,8 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 	now := s.now().UnixMilli()
 	var inboundID, seq int64
 	if err := tx.QueryRowContext(ctx,
-		"INSERT INTO inbound_messages (account, uid_validity, uid, message_id, body_sha256, task_id, received_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
-		in.Account, in.UIDValidity, in.UID, in.MessageID, in.BodySHA256[:], in.TaskID, now).Scan(&inboundID); err != nil {
+		"INSERT INTO inbound_messages (account, folder, uid_validity, uid, message_id, body_sha256, task_id, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+		in.Account, in.Folder, in.UIDValidity, in.UID, in.MessageID, in.BodySHA256[:], in.TaskID, now).Scan(&inboundID); err != nil {
 		return RecordResult{}, fmt.Errorf("cannot record inbound message: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx,
@@ -146,17 +148,21 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 
 // validate 在事务开始前检查与表约束对应的长度、空白与取值范围；存储层不导入 config，地址规范化由调用方负责。
 // 长度按 Unicode 字符计，与表约束中 SQLite 的 length() 一致；length() 遇到 NUL 即停止计数，因此含 NUL 的值一律拒绝。
+// IMAP 文件夹名可以含空格（例如 Sent Messages），因此 Folder 不按空白拒绝；取值由调用方决定，存储层不限定。
 func (in InboundReply) validate() error {
 	accountLen, messageIDLen := utf8.RuneCountInString(in.Account), utf8.RuneCountInString(in.MessageID)
+	folderLen := utf8.RuneCountInString(in.Folder)
 	switch {
 	case accountLen < 3 || accountLen > 254 || strings.ContainsFunc(in.Account, unicode.IsSpace):
 		return errors.New("invalid inbound reply: account must be 3-254 characters without whitespace")
+	case folderLen < 1 || folderLen > 255:
+		return errors.New("invalid inbound reply: folder must be 1-255 characters")
 	case in.UIDValidity == 0 || in.UID == 0:
 		return errors.New("invalid inbound reply: uid validity and uid must be positive")
 	case messageIDLen < 3 || messageIDLen > 998:
 		return errors.New("invalid inbound reply: message id must be 3-998 characters")
-	case strings.ContainsRune(in.Account, 0) || strings.ContainsRune(in.MessageID, 0):
-		return errors.New("invalid inbound reply: account and message id must not contain NUL")
+	case strings.ContainsRune(in.Account, 0) || strings.ContainsRune(in.Folder, 0) || strings.ContainsRune(in.MessageID, 0):
+		return errors.New("invalid inbound reply: account, folder and message id must not contain NUL")
 	}
 	return nil
 }

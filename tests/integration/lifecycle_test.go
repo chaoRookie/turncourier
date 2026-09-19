@@ -31,6 +31,7 @@ func syntheticReply(taskID, account string, uid uint32, messageID, body string) 
 	return sqlite.InboundReply{
 		TaskID:      taskID,
 		Account:     account,
+		Folder:      "INBOX",
 		UIDValidity: 1,
 		UID:         uid,
 		MessageID:   messageID,

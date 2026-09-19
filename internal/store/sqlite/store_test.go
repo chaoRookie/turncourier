@@ -85,7 +85,7 @@ func fileMode(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
-// TestOpenConnectionSettings 验证 WAL、外键、FULL 同步、忙等待与单连接设置已生效。
+// TestOpenConnectionSettings 验证 WAL、外键、FULL 同步、忙等待、安全删除与单连接设置已生效。
 func TestOpenConnectionSettings(t *testing.T) {
 	store := openStore(t, dataDir(t))
 	tests := []struct {
@@ -96,6 +96,7 @@ func TestOpenConnectionSettings(t *testing.T) {
 		{"foreign_keys", "1"},
 		{"synchronous", "2"},
 		{"busy_timeout", "5000"},
+		{"secure_delete", "1"},
 	}
 	for _, tt := range tests {
 		var got string
@@ -139,7 +140,7 @@ func TestOpenBeginsImmediateTransactions(t *testing.T) {
 }
 
 // TestOpenConcurrentlyOnNewDirectory 模拟多个进程首次同时打开同一个尚不存在的数据目录：每轮 4 个存储实例同时 Open，
-// 全部成功且读到的 user_version 都是 1；循环 30 轮。空文件从回滚日志模式转为 WAL 时的锁升级冲突不经 busy_timeout 等待，
+// 全部成功且读到的 user_version 都是 2；循环 30 轮。空文件从回滚日志模式转为 WAL 时的锁升级冲突不经 busy_timeout 等待，
 // 直接返回 SQLITE_BUSY，须由 Open 重试吸收；迁移在事务内重新读取 user_version，不会被第二个实例重复执行而报表已存在。
 func TestOpenConcurrentlyOnNewDirectory(t *testing.T) {
 	const rounds, openers = 30, 4
@@ -157,8 +158,8 @@ func TestOpenConcurrentlyOnNewDirectory(t *testing.T) {
 					return
 				}
 				opened <- store
-				if version, err := store.SchemaVersion(t.Context()); err != nil || version != 1 {
-					t.Errorf("第 %d 轮: SchemaVersion = %d, %v; want 1, nil", round, version, err)
+				if version, err := store.SchemaVersion(t.Context()); err != nil || version != 2 {
+					t.Errorf("第 %d 轮: SchemaVersion = %d, %v; want 2, nil", round, version, err)
 				}
 			})
 		}

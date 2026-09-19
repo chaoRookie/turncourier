@@ -25,11 +25,12 @@ var (
 	digestB = sha256.Sum256([]byte("synthetic reply B"))
 )
 
-// inbound 返回任务 taskID 的一条合成入站回复：uv=7、uid=1、<a@example.invalid>、摘要 A；测试按需修改字段。
+// inbound 返回任务 taskID 的一条合成入站回复：INBOX、uv=7、uid=1、<a@example.invalid>、摘要 A；测试按需修改字段。
 func inbound(taskID string) InboundReply {
 	return InboundReply{
 		TaskID:      taskID,
 		Account:     botAccount,
+		Folder:      "INBOX",
 		UIDValidity: 7,
 		UID:         1,
 		MessageID:   "<a@example.invalid>",
@@ -205,6 +206,9 @@ func TestRecordReplyValidation(t *testing.T) {
 		{"Account 含全角空格", func(in *InboundReply) { in.Account = "bot\u3000@example.invalid" }},
 		{"Account 少于 3 个非 ASCII 字符", func(in *InboundReply) { in.Account = "中@" }},
 		{"Account 含 NUL", func(in *InboundReply) { in.Account = "bot\x00@example.invalid" }},
+		{"Folder 为空", func(in *InboundReply) { in.Folder = "" }},
+		{"Folder 超过 255 字符", func(in *InboundReply) { in.Folder = strings.Repeat("f", 256) }},
+		{"Folder 含 NUL", func(in *InboundReply) { in.Folder = "IN\x00BOX" }},
 		{"UIDValidity 为 0", func(in *InboundReply) { in.UIDValidity = 0 }},
 		{"UID 为 0", func(in *InboundReply) { in.UID = 0 }},
 		{"MessageID 为空", func(in *InboundReply) { in.MessageID = "" }},
@@ -255,7 +259,57 @@ func TestRecordReplyValidation(t *testing.T) {
 	if got := recordReply(t, store, in); got.Duplicate || got.Reply.State != queue.Queued {
 		t.Errorf("254 与 998 个非 ASCII 字符: RecordReply = %+v; want 新入队", got)
 	}
-	requireRows(t, store, 4, 4)
+	// IMAP 文件夹名可以含空格；255 个非 ASCII 字符超过 255 字节，仍在表约束允许的范围内。
+	in = inbound(running.ID)
+	in.Folder = "Sent Messages"
+	if got := recordReply(t, store, in); got.Duplicate || got.Reply.State != queue.Queued {
+		t.Errorf("含空格的 Folder: RecordReply = %+v; want 新入队", got)
+	}
+	in = inbound(running.ID)
+	in.Folder, in.UID, in.MessageID = strings.Repeat("文", 255), 2, "<c@example.invalid>"
+	if got := recordReply(t, store, in); got.Duplicate || got.Reply.State != queue.Queued {
+		t.Errorf("255 个字符的 Folder: RecordReply = %+v; want 新入队", got)
+	}
+	requireRows(t, store, 6, 6)
+}
+
+// TestRecordReplySameUIDInDifferentFolders 验证 UID 只在同一文件夹内唯一：INBOX 与 Junk 中 UIDVALIDITY 与 UID 都相同、
+// Message-ID 与摘要不同的两封邮件都作为新回复入队，得到不同的序号。按 UID 查找时不含文件夹的实现会把第二封判为冲突。
+func TestRecordReplySameUIDInDifferentFolders(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	running := startTask(t, store)
+	first := recordReply(t, store, inbound(running.ID))
+	junk := inbound(running.ID)
+	junk.Folder, junk.MessageID, junk.BodySHA256 = "Junk", "<b@example.invalid>", digestB
+	second, err := store.RecordReply(t.Context(), junk)
+	if err != nil || second.Duplicate || second.Reply.State != queue.Queued || second.Reply.Seq == first.Reply.Seq {
+		t.Errorf("Junk 中同一 UID 的另一封邮件: RecordReply = %+v, %v; want 新入队且序号不同于 %d", second, err, first.Reply.Seq)
+	}
+	if first.Duplicate || first.Reply.State != queue.Queued {
+		t.Errorf("INBOX 中的邮件: RecordReply = %+v; want 新入队", first)
+	}
+	requireRows(t, store, 2, 2)
+}
+
+// TestRecordReplySameMessageInTwoFolders 验证同一封信在 INBOX 与 Junk 各有一份时按 Message-ID 判为重复：
+// 先以 (INBOX, uv 7, uid 1)、再以 (Junk, uv 7, uid 5) 记录同一 Message-ID、摘要与任务，第二次返回第一次的回复且
+// Duplicate 为 true，不新增任何行；从 Junk 取回的同一 Message-ID 摘要不同时返回 ErrMessageConflict。
+// 按 Message-ID 查找时加上文件夹的实现会漏掉已有记录，第二封因 UNIQUE (account, message_id) 插入失败。
+func TestRecordReplySameMessageInTwoFolders(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	running := startTask(t, store)
+	first := recordReply(t, store, inbound(running.ID))
+	junk := inbound(running.ID)
+	junk.Folder, junk.UID = "Junk", 5
+	if got, err := store.RecordReply(t.Context(), junk); err != nil || got != (RecordResult{Reply: first.Reply, Duplicate: true}) {
+		t.Errorf("Junk 中的副本: RecordReply = %+v, %v; want 原回复且 Duplicate=true", got, err)
+	}
+	requireRows(t, store, 1, 1)
+	junk.BodySHA256 = digestB
+	if got, err := store.RecordReply(t.Context(), junk); !errors.Is(err, ErrMessageConflict) {
+		t.Errorf("Junk 中同一 Message-ID 摘要不同: RecordReply = %+v, %v; want ErrMessageConflict", got, err)
+	}
+	requireRows(t, store, 1, 1)
 }
 
 // TestRecordReplyAtomic 用测试内创建的触发器让回复队列项写入失败，验证入站记录随事务一起回滚；

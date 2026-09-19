@@ -721,7 +721,7 @@ func TestInFlightUniqueIndex(t *testing.T) {
 		// 每次先插入独立的入站记录，使新回复满足 inbound_id 的外键与唯一约束。
 		var inboundID int64
 		if err := store.db.QueryRowContext(t.Context(),
-			"INSERT INTO inbound_messages (account, uid_validity, uid, message_id, body_sha256, task_id, received_at) VALUES (?, 7, ?, ?, ?, ?, 0) RETURNING id",
+			"INSERT INTO inbound_messages (account, folder, uid_validity, uid, message_id, body_sha256, task_id, received_at) VALUES (?, 'INBOX', 7, ?, ?, ?, ?, 0) RETURNING id",
 			botAccount, 100+i, fmt.Sprintf("<direct-%d@example.invalid>", i), digestA[:], completed.ID).Scan(&inboundID); err != nil {
 			t.Fatalf("插入入站记录失败: %v", err)
 		}
