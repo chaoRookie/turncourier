@@ -643,7 +643,8 @@ func TestWatcherAuthFailure(t *testing.T) {
 	}
 }
 
-// TestBackoffDefaults 覆盖生产默认值：Backoff{} 的有效 AuthPause 为 15 分钟，5 分钟按 10 分钟下限处理，MaxLogins 12，LoginWindow 1 小时。
+// TestBackoffDefaults 覆盖生产默认值：Backoff{} 的有效 AuthPause 为 15 分钟，5 分钟按 10 分钟下限处理，MaxLogins 12，LoginWindow 1 小时；
+// 负值与越界的 Jitter 同样取默认值。
 func TestBackoffDefaults(t *testing.T) {
 	want := Backoff{Initial: 15 * time.Second, Max: 10 * time.Minute, AuthPause: 15 * time.Minute, Jitter: 0.2, MaxLogins: 12, LoginWindow: time.Hour}
 	if got := (Backoff{}).withDefaults(); got != want {
@@ -655,6 +656,14 @@ func TestBackoffDefaults(t *testing.T) {
 	custom := Backoff{Initial: 1, Max: 2, AuthPause: time.Hour, Jitter: 0.1, MaxLogins: 3, LoginWindow: 4}
 	if got := custom.withDefaults(); got != custom {
 		t.Errorf("custom Backoff with defaults = %+v", got)
+	}
+	// 负值与越界的 Jitter 按未设置处理，避免登录频率限制越界 panic 或退避等待为负。
+	negative := Backoff{Initial: -1, Max: -1, AuthPause: -1, Jitter: -0.5, MaxLogins: -1, LoginWindow: -1}
+	if got := negative.withDefaults(); got != want {
+		t.Errorf("negative Backoff with defaults = %+v, want %+v", got, want)
+	}
+	if got := (Backoff{Jitter: 1.5}).withDefaults().Jitter; got != 0.2 {
+		t.Errorf("Jitter 1.5 with defaults = %v, want 0.2", got)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-sasl"
 	gosmtp "github.com/emersion/go-smtp"
@@ -1246,5 +1247,24 @@ func TestTimeouts(t *testing.T) {
 	}
 	if got := (Timeouts{Submission: time.Second}).withDefaults(); got != (Timeouts{Command: 30 * time.Second, Submission: time.Second}) {
 		t.Errorf("partial Timeouts = %+v", got)
+	}
+}
+
+// TestTruncateRuneBoundary 确认响应文本截断时不会把多字节 UTF-8 字符截成半个。
+func TestTruncateRuneBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"abc", 5, "abc"},
+		{"abcdef", 3, "abc"},
+		{"ab队列", 3, "ab"},
+		{"ab队列", 5, "ab队"},
+		{"队列", 1, ""},
+	} {
+		if got := truncate(tc.in, tc.n); got != tc.want || !utf8.ValidString(got) {
+			t.Errorf("truncate(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+		}
 	}
 }

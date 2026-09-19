@@ -53,25 +53,26 @@ var (
 	relistInterval = time.Hour
 )
 
-// withDefaults 把零值字段替换为默认值，并把 AuthPause 提高到下限。
+// withDefaults 把零值或负值字段替换为默认值，并把 AuthPause 提高到下限；Jitter 须在 (0, 1) 内，否则取默认值，
+// 使退避等待不会变成负数。负的 MaxLogins 若原样使用，登录频率限制会越界 panic。
 func (b Backoff) withDefaults() Backoff {
-	if b.Initial == 0 {
+	if b.Initial <= 0 {
 		b.Initial = 15 * time.Second
 	}
-	if b.Max == 0 {
+	if b.Max <= 0 {
 		b.Max = 10 * time.Minute
 	}
-	if b.AuthPause == 0 {
+	if b.AuthPause <= 0 {
 		b.AuthPause = 15 * time.Minute
 	}
 	b.AuthPause = max(b.AuthPause, minAuthPause)
-	if b.Jitter == 0 {
+	if b.Jitter <= 0 || b.Jitter >= 1 {
 		b.Jitter = 0.2
 	}
-	if b.MaxLogins == 0 {
+	if b.MaxLogins <= 0 {
 		b.MaxLogins = 12
 	}
-	if b.LoginWindow == 0 {
+	if b.LoginWindow <= 0 {
 		b.LoginWindow = time.Hour
 	}
 	return b

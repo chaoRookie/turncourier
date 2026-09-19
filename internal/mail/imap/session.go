@@ -77,14 +77,14 @@ func DefaultTimeouts() Timeouts {
 	}
 }
 
-// withDefaults 把零值字段替换为 DefaultTimeouts 中的对应值。
+// withDefaults 把零值或负值字段替换为 DefaultTimeouts 中的对应值；负的期限会让每条命令立即超时。
 func (t Timeouts) withDefaults() Timeouts {
 	def := DefaultTimeouts()
 	for _, f := range []struct{ v, d *time.Duration }{
 		{&t.Dial, &def.Dial}, {&t.Greeting, &def.Greeting}, {&t.Command, &def.Command}, {&t.Fetch, &def.Fetch},
 		{&t.IdleAck, &def.IdleAck}, {&t.IdleMax, &def.IdleMax}, {&t.IdleStop, &def.IdleStop}, {&t.Poll, &def.Poll},
 	} {
-		if *f.v == 0 {
+		if *f.v <= 0 {
 			*f.v = *f.d
 		}
 	}

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-sasl"
 	gosmtp "github.com/emersion/go-smtp"
@@ -60,7 +61,7 @@ type Envelope struct {
 
 // Result 是服务器接受邮件后的结果。
 type Result struct {
-	Response string // 结束标记后 250 响应的文本（不含状态码），至多 512 字节；L1 用它查找服务器分配的 ID
+	Response string // 结束标记后 250 响应的文本（不含三位状态码，可含增强状态码），至多 512 字节，不截断在 UTF-8 字符中间；L1 用它查找服务器分配的 ID
 }
 
 // MaxMessageSize 是单封邮件的字节上限。
@@ -251,12 +252,16 @@ func replyOf(step string, err error) *ReplyError {
 	return &ReplyError{Step: step, Code: smtpErr.Code, Enhanced: [3]int(smtpErr.EnhancedCode)}
 }
 
-// truncate 把 s 截到至多 n 字节。
+// truncate 把 s 截到至多 n 字节，截断点落在 UTF-8 字符中间时退到该字符之前。
 func truncate(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	if len(s) <= n {
+		return s
 	}
-	return s
+	// 退到字符边界，避免把多字节 UTF-8 字符截成半个。
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // watchdog 在一个后台 goroutine 中等待 ctx 结束或当前步骤的计时器到期，任一发生即关闭连接，使阻塞的读写返回；

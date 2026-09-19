@@ -877,7 +877,7 @@ func TestShutdownBoundedWait(t *testing.T) {
 	}
 }
 
-// TestTimeoutsDefaults 覆盖默认期限与零值字段的补齐。
+// TestTimeoutsDefaults 覆盖默认期限与零值、负值字段的补齐。
 func TestTimeoutsDefaults(t *testing.T) {
 	want := Timeouts{
 		Dial: 15 * time.Second, Greeting: 15 * time.Second, Command: 30 * time.Second, Fetch: 60 * time.Second,
@@ -892,6 +892,10 @@ func TestTimeoutsDefaults(t *testing.T) {
 	custom := Timeouts{Dial: 1, Greeting: 2, Command: 3, Fetch: 4, IdleAck: 5, IdleMax: 6, IdleStop: 7, Poll: 8}
 	if got := custom.withDefaults(); got != custom {
 		t.Errorf("custom Timeouts with defaults = %+v", got)
+	}
+	negative := Timeouts{Dial: -1, Greeting: -1, Command: -1, Fetch: -1, IdleAck: -1, IdleMax: -1, IdleStop: -1, Poll: -1}
+	if got := negative.withDefaults(); got != want {
+		t.Errorf("negative Timeouts with defaults = %+v, want %+v", got, want)
 	}
 }
 
