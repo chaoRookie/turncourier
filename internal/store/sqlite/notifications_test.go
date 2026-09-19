@@ -549,7 +549,8 @@ func TestClaimNextNotification(t *testing.T) {
 
 // TestClaimNextNotificationUnreadablePayload 验证内容无法读出时不领取：密文被篡改返回包装 payload.ErrDecrypt 的错误，
 // 正文行缺失返回 ErrPayloadMissing，没有正文密钥、密文的 key_id 与当前密钥不符或该 kid 已不是 active 时返回
-// ErrPayloadKeyUnavailable；各情况都不改动任何行，通知仍为 PENDING，错误文本不含内容。
+// ErrPayloadKeyUnavailable；各情况都不改动任何行，通知仍为 PENDING，错误文本不含内容；领取返回该通知未改动的快照，
+// 调用方据此取得 id 以便告警或放弃。
 func TestClaimNextNotificationUnreadablePayload(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -599,8 +600,8 @@ func TestClaimNextNotificationUnreadablePayload(t *testing.T) {
 			tt.setup(t, store, created.ID)
 			notifications, payloads := allNotifications(t, store), payloadRows(t, store)
 			claimed, content, err := store.ClaimNextNotification(t.Context())
-			if !errors.Is(err, tt.want) || content != nil {
-				t.Errorf("ClaimNextNotification = %+v, %q, %v; want %v", claimed, content, err, tt.want)
+			if !errors.Is(err, tt.want) || content != nil || claimed != notifications[0] {
+				t.Errorf("ClaimNextNotification = %+v, %q, %v; want 未改动的快照 %+v、nil 与 %v", claimed, content, err, notifications[0], tt.want)
 			}
 			if err != nil && strings.Contains(err.Error(), notificationCanary) {
 				t.Errorf("错误文本含通知内容: %v", err)
@@ -935,9 +936,40 @@ func TestNotificationsAfterTaskClosed(t *testing.T) {
 	})
 }
 
+// TestClaimNotificationsOfOpenTasks 验证领取前的 task_closed 兜底只放弃 CLOSED 任务的通知：任务进入 WAITING_INPUT、
+// WAITING_APPROVAL、COMPLETED 或 FAILED 后创建的对应事件通知按创建顺序依次被领取，标记 SENT 后正文行被删除。
+func TestClaimNotificationsOfOpenTasks(t *testing.T) {
+	store, _, _ := newNotificationStore(t)
+	cases := []struct {
+		event        task.Event
+		notification string
+	}{
+		{task.InputRequested, "waiting_input"},
+		{task.ApprovalRequested, "waiting_approval"},
+		{task.TurnCompleted, "turn_completed"},
+		{task.Fail, "failed"},
+	}
+	var ids []int64
+	for _, c := range cases {
+		current := applyEvents(t, store, startTask(t, store), c.event)
+		in := notificationFor(current.ID, c.notification)
+		in.Event = c.notification
+		ids = append(ids, mustCreateNotification(t, store, in).ID)
+	}
+	for i, id := range ids {
+		if claimed, _ := mustClaimNotification(t, store); claimed.ID != id {
+			t.Fatalf("第 %d 次领取 = 通知 %d; want %s 通知 %d", i+1, claimed.ID, cases[i].notification, id)
+		}
+		must(t, "MarkNotificationSent")(store.MarkNotificationSent(t.Context(), id))
+		requireNotification(t, store, id, queue.OutboxSent, "", 0)
+	}
+	requireNoSendable(t, store)
+}
+
 // TestClaimAbandonsExpiringNotifications 验证领取前放弃令牌将在 10 分钟内过期的 PENDING 通知：有效期 1 小时的通知在时钟推进
 // 49 分 59 秒后仍被领取；推进 50 分钟后（距过期恰 10 分钟）改为 ABANDONED(expired)、正文行被删除并执行检查点，
-// 领取返回之后创建的通知，只有它时返回 ErrNoSendableNotification。
+// 领取返回之后创建的通知，只有它时返回 ErrNoSendableNotification。第一个事务读到的时刻距过期还多 1 毫秒、第二个事务读到恰 10 分钟时，
+// 该通知既不被放弃也不被领取，下一次领取时放弃。
 func TestClaimAbandonsExpiringNotifications(t *testing.T) {
 	hourly := func(taskID, label string) NewNotification {
 		in := notificationFor(taskID, label)
@@ -972,6 +1004,20 @@ func TestClaimAbandonsExpiringNotifications(t *testing.T) {
 		requireNoSendable(t, store)
 		requireNotification(t, store, expiring.ID, queue.OutboxAbandoned, "expired", 0)
 		requireWALEmpty(t, store, "领取前放弃")
+	})
+	t.Run("两个事务之间进入 10 分钟", func(t *testing.T) {
+		store, clock, running := newNotificationStore(t)
+		boundary := mustCreateNotification(t, store, hourly(running.ID, "boundary"))
+		// 每次读取时钟前进 1 毫秒：领取的第一个事务读到 50 分钟差 1 毫秒，第二个事务读到恰 50 分钟。
+		*clock = clock.Add(50*time.Minute - 2*time.Millisecond)
+		store.now = func() time.Time {
+			*clock = clock.Add(time.Millisecond)
+			return *clock
+		}
+		requireNoSendable(t, store)
+		requireNotification(t, store, boundary.ID, queue.OutboxPending, "", 1)
+		requireNoSendable(t, store)
+		requireNotification(t, store, boundary.ID, queue.OutboxAbandoned, "expired", 0)
 	})
 }
 
@@ -1231,6 +1277,42 @@ func TestNotificationOperationsRollBackOnFailure(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestClaimAbandonRollsBackOnFailure 用只在放弃原因为 expired 或 task_closed 时触发的故障触发器，让领取前放弃（第一个事务）的
+// 对应一步失败：领取返回注入的错误且不进入第二个事务；在 task_closed 一步失败时，已由 expired 一步放弃的通知随事务回滚。
+// 准备一条距过期恰 10 分钟的通知、一条被绕过 API 改回 PENDING 的已关闭任务的通知和一条正常通知，所有通知与正文行都保持原状。
+func TestClaimAbandonRollsBackOnFailure(t *testing.T) {
+	for _, reason := range []string{"expired", "task_closed"} {
+		t.Run(reason, func(t *testing.T) {
+			store, clock, running := newNotificationStore(t)
+			expiring := notificationFor(running.ID, "expiring")
+			expiring.TTL = time.Hour
+			mustCreateNotification(t, store, expiring)
+			closed := startTask(t, store)
+			bypassed := mustCreateNotification(t, store, notificationFor(closed.ID, "bypass"))
+			applyEvents(t, store, closed, task.Close)
+			if _, err := store.db.ExecContext(t.Context(), "UPDATE notifications SET state = 'PENDING', abandon_reason = NULL WHERE id = ?", bypassed.ID); err != nil {
+				t.Fatalf("改回 PENDING 失败: %v", err)
+			}
+			*clock = clock.Add(50 * time.Minute)
+			mustCreateNotification(t, store, notificationFor(running.ID, "normal"))
+			if _, err := store.db.ExecContext(t.Context(), "CREATE TRIGGER fault BEFORE UPDATE ON notifications WHEN NEW.abandon_reason = '"+reason+
+				"' BEGIN SELECT RAISE(ABORT, 'boom'); END"); err != nil {
+				t.Fatalf("创建触发器失败: %v", err)
+			}
+			notifications, payloads := allNotifications(t, store), payloadRows(t, store)
+			if claimed, content, err := store.ClaimNextNotification(t.Context()); err == nil || !strings.Contains(err.Error(), "boom") {
+				t.Errorf("ClaimNextNotification = %+v, %q, %v; want 含 boom 的错误", claimed, content, err)
+			}
+			if after := allNotifications(t, store); !slices.Equal(after, notifications) {
+				t.Errorf("通知未回滚: %+v; want %+v", after, notifications)
+			}
+			if after := payloadRows(t, store); !slices.Equal(after, payloads) {
+				t.Errorf("正文行未回滚: %q; want %q", after, payloads)
+			}
+		})
 	}
 }
 

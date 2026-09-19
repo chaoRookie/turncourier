@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -37,37 +38,57 @@ func readDataFiles(t *testing.T, dataDir string) (db, wal []byte) {
 	return db, wal
 }
 
-// assertAbsentOnDisk 读取数据目录中的数据库文件与 -wal 文件，断言都不含 needle；可一次传入多个 needle，文件只读取一次。
+// assertAbsentOnDisk 读取数据目录中的数据库文件与 -wal 文件，断言都不含 needle：needle 不短于 32 字节时，它逐字节滑动得到的
+// 任何一个 32 字节片段都不能出现，短于 32 字节时按整体查找。可一次传入多个 needle，文件只读取一次。
 func assertAbsentOnDisk(t *testing.T, dataDir string, needles ...[]byte) {
 	t.Helper()
 	db, wal := readDataFiles(t, dataDir)
 	for i, needle := range needles {
-		if bytes.Contains(db, needle) || bytes.Contains(wal, needle) {
-			t.Fatalf("第 %d 个 %d 字节的片段仍在数据库文件或 WAL 文件中", i, len(needle))
+		if found := fragmentsIn(db, needle) + fragmentsIn(wal, needle); found > 0 {
+			t.Fatalf("第 %d 个 needle（%d 字节）有 %d 个片段仍在数据库文件或 WAL 文件中", i, len(needle), found)
 		}
 	}
 }
 
-// sealedFragments 把 sealed 切成连续的 32 字节片段，末尾不足 32 字节时改取最后 32 字节，使每个字节都落在某个片段中；
-// 任何不短于 63 字节的连续残留都至少完整包含一个片段。
-func sealedFragments(sealed []byte) [][]byte {
-	var fragments [][]byte
-	for start := 0; start < len(sealed); start += fragmentLen {
-		start = min(start, len(sealed)-fragmentLen)
-		fragments = append(fragments, sealed[start:start+fragmentLen])
+// fragmentsIn 把 needle 逐字节滑动得到的全部 32 字节片段（needle 短于 32 字节时只有它本身）放进集合，再逐字节扫描 data 查表，
+// 返回出现在 data 中的不同片段个数。64 KiB 密文约 6.5 万个片段，扫描数百 KB 的文件只需数毫秒。
+func fragmentsIn(data, needle []byte) int {
+	size := min(fragmentLen, len(needle))
+	fragments := make(map[string]bool, len(needle)-size+1)
+	for i := 0; i+size <= len(needle); i++ {
+		fragments[string(needle[i:i+size])] = false
 	}
-	return fragments
-}
-
-// countFragments 返回 fragments 中出现在 data 里的片段个数。
-func countFragments(data []byte, fragments [][]byte) int {
 	found := 0
-	for _, fragment := range fragments {
-		if bytes.Contains(data, fragment) {
+	for i := 0; i+size <= len(data); i++ {
+		if seen, ok := fragments[string(data[i:i+size])]; ok && !seen {
+			fragments[string(data[i:i+size])] = true
 			found++
 		}
 	}
 	return found
+}
+
+// TestFragmentsIn 验证残留检查逐字节滑动：从 needle 任意位置开始、不短于 32 字节的残留都能发现，片段数为残留长度减 31；
+// 31 字节的残留不算命中；短于 32 字节的 needle 按整体查找。
+func TestFragmentsIn(t *testing.T) {
+	// 37 与 256 互素，前 93 个字节互不相同，也都不是填充字节 0xff，所有片段互不相同。
+	needle := make([]byte, 93)
+	for i := range needle {
+		needle[i] = byte(i*37 + 11)
+	}
+	padding := bytes.Repeat([]byte{0xff}, 40)
+	for _, tt := range []struct{ start, end, want int }{{10, 42, 1}, {10, 60, 19}, {61, 93, 1}, {10, 41, 0}} {
+		data := slices.Concat(padding, needle[tt.start:tt.end], padding)
+		if got := fragmentsIn(data, needle); got != tt.want {
+			t.Errorf("残留 needle[%d:%d]: fragmentsIn = %d; want %d", tt.start, tt.end, got, tt.want)
+		}
+	}
+	if got := fragmentsIn([]byte("xx"+notificationCanary+"xx"), []byte(notificationCanary)); got != 1 {
+		t.Errorf("短 needle 整体出现: fragmentsIn = %d; want 1", got)
+	}
+	if got := fragmentsIn([]byte(notificationCanary[1:]), []byte(notificationCanary)); got != 0 {
+		t.Errorf("短 needle 只出现一部分: fragmentsIn = %d; want 0", got)
+	}
 }
 
 // sealAndSend 为任务创建内容为 size 字节的通知，读出其密文，再领取并标记 SENT，返回密文；内容进入 SENT 时由触发器删除，
@@ -101,7 +122,7 @@ func TestNotificationPayloadResidue(t *testing.T) {
 			if len(sealed) != size+payload.Overhead {
 				t.Fatalf("密文长度 = %d; want %d", len(sealed), size+payload.Overhead)
 			}
-			assertAbsentOnDisk(t, storeDir(t, store), sealedFragments(sealed)...)
+			assertAbsentOnDisk(t, storeDir(t, store), sealed)
 		})
 	}
 }
@@ -153,9 +174,8 @@ func TestNotificationPayloadResidueControls(t *testing.T) {
 				}
 				sealed := sealAndSend(t, store, running.ID, size)
 				db, wal := readDataFiles(t, dir)
-				fragments := sealedFragments(sealed)
-				inDB := countFragments(db, fragments)
-				t.Logf("secure_delete %s、内容 %d 字节：数据库文件含 %d/%d 个密文片段，WAL %d 字节", mode.name, size, inDB, len(fragments), len(wal))
+				inDB := fragmentsIn(db, sealed)
+				t.Logf("secure_delete %s、内容 %d 字节：数据库文件含 %d/%d 个密文片段，WAL %d 字节", mode.name, size, inDB, len(sealed)-fragmentLen+1, len(wal))
 				if mode.mustFind(size) && inDB == 0 {
 					t.Errorf("对照组应能在数据库文件中找到密文片段，实际一个也没有")
 				}

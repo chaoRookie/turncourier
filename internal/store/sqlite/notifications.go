@@ -180,9 +180,11 @@ func (s *Store) CreateNotification(ctx context.Context, n NewNotification) (Noti
 
 // ClaimNextNotification 分两个事务执行。第一个事务把以下 PENDING 通知改为 ABANDONED（经 queue.NextOutbox 校验）：
 // token_expires_at 不晚于当前时间加 10 分钟的（expired，令牌发出后已来不及回复）；所属任务已 CLOSED 的（task_closed，
-// 正常路径不会产生这种行，这是兜底）。有改动时提交后执行检查点。第二个事务：已有 SENDING 通知时返回
-// ErrNoSendableNotification；取 not_before 不晚于当前时间、按 (not_before, id) 最早的 PENDING 通知；读出并解密内容，
-// 失败时不领取（返回 ErrPayloadMissing、ErrPayloadKeyUnavailable 或包装 payload.ErrDecrypt 的错误）；
+// 正常路径不会产生这种行，这是兜底）。有改动时提交后执行检查点；第一个事务出错时整体回滚并返回错误，不进行领取。
+// 第二个事务：已有 SENDING 通知时返回 ErrNoSendableNotification；取 not_before 不晚于当前时间、token_expires_at 晚于当前时间
+// 加 10 分钟、按 (not_before, id) 最早的 PENDING 通知（两个事务之间被放回 PENDING 的将过期通知因此不会被领取，留待下次领取时放弃）；
+// 读出并解密内容，失败时不领取，返回该通知未改动的 PENDING 快照（内容为 nil，调用方可据此告警或调用
+// AbandonNotification(manual)）与 ErrPayloadMissing、ErrPayloadKeyUnavailable 或包装 payload.ErrDecrypt 的错误；
 // 成功时改为 SENDING、attempts 加 1，返回快照与明文内容。从不领取 UNCERTAIN 通知。
 // IMMEDIATE 事务使多个进程的并发领取串行执行，加上 notifications_one_sending 索引，全局至多一条 SENDING。
 func (s *Store) ClaimNextNotification(ctx context.Context) (Notification, []byte, error) {
@@ -204,8 +206,8 @@ func (s *Store) ClaimNextNotification(ctx context.Context) (Notification, []byte
 	}
 	now := s.now().UnixMilli()
 	var id int64
-	err = tx.QueryRowContext(ctx, "SELECT id FROM notifications WHERE state = ? AND not_before <= ? ORDER BY not_before, id LIMIT 1",
-		string(queue.OutboxPending), now).Scan(&id)
+	err = tx.QueryRowContext(ctx, "SELECT id FROM notifications WHERE state = ? AND not_before <= ? AND token_expires_at > ? ORDER BY not_before, id LIMIT 1",
+		string(queue.OutboxPending), now, now+expiryMargin.Milliseconds()).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Notification{}, nil, fmt.Errorf("%w: no pending notification is due", ErrNoSendableNotification)
 	}
@@ -218,7 +220,7 @@ func (s *Store) ClaimNextNotification(ctx context.Context) (Notification, []byte
 	}
 	content, err := s.openNotificationPayload(ctx, tx, pending)
 	if err != nil {
-		return Notification{}, nil, err
+		return pending, nil, err
 	}
 	next, err := nextNotification(pending, queue.OutboxPending, queue.OutboxClaim)
 	if err != nil {
