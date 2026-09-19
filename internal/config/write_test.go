@@ -95,8 +95,11 @@ func TestRenderRejects(t *testing.T) {
 
 // TestCreateFile 验证新建文件权限 0600、缺失的父目录以 0700 创建、内容一致且目录中没有残留的临时文件；
 // 目标已存在时返回 fs.ErrExist，原文件内容与修改时间不变，同样不留临时文件。
+// 系统临时目录指向不存在的路径：临时文件必须建在目标所在目录，改建到系统临时目录时创建失败
+// （否则目标在另一个卷上时 os.Link 会以 EXDEV 失败，而同一卷上的测试察觉不到）。
 func TestCreateFile(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("TMPDIR", filepath.Join(root, "missing"))
 	dir := filepath.Join(root, "a", "b")
 	path := filepath.Join(dir, "turncourier.toml")
 	data := []byte("first\n")

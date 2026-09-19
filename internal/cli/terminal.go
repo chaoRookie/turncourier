@@ -1,4 +1,4 @@
-// Package cli 的交互终端基于 x/term：提示写到输出终端，逐字节回显读入一行，或以 term.ReadPassword 不回显读入机密；
+// Package cli 的交互终端基于 x/term：提示写到输出终端，逐字节回显读入一行，或关闭回显后读入机密；
 // 读取在后台协程中进行，ctx 结束（Ctrl-C）时恢复终端回显并立即返回 ctx.Err()。
 package cli
 
@@ -42,29 +42,29 @@ func (t *fileTerminal) ReadLine(ctx context.Context, prompt string) (string, err
 	return await(ctx, func() (string, error) { return readLine(t.in) })
 }
 
-// ReadSecret 写出提示后用 term.ReadPassword 不回显读入一行；标准输入不是终端时返回错误且不读取。
-// ctx 先结束时用事先保存的状态恢复终端回显再返回；被放弃的读取协程在进程退出前一直阻塞。
+// ReadSecret 写出提示后关闭回显读入一行，与 ReadLine 一样逐字节读取、至多 1024 字节；标准输入不是终端时返回错误且不读取。
+// 回显在启动读取协程之前同步关闭，返回前（包括 ctx 先结束时）用事先保存的状态恢复，恢复因此一定发生在关闭之后。
+// 不在协程中调用 term.ReadPassword：它在协程里才关闭回显，ctx 恰在此前结束时，恢复会先于关闭发生，进程退出后终端停留在不回显的状态。
+// 被放弃的读取协程只读取、不改动终端设置，在进程退出前一直阻塞。
 func (t *fileTerminal) ReadSecret(ctx context.Context, prompt string) (string, error) {
 	fd := int(t.in.Fd())
 	state, err := term.GetState(fd)
 	if err != nil {
 		return "", fmt.Errorf("cannot read a secret: %w", err)
 	}
-	// ctx 已结束时不再启动读取：否则 ReadPassword 可能在恢复之后才关闭回显，使终端停留在不回显的状态。
+	// ctx 已结束时不关闭回显、不写提示，也不启动读取。
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if err := disableEcho(fd); err != nil {
+		return "", fmt.Errorf("cannot read a secret: %w", err)
+	}
+	defer term.Restore(fd, state)
 	if _, err := io.WriteString(t.out, prompt); err != nil {
 		return "", err
 	}
-	secret, err := await(ctx, func() (string, error) {
-		secret, err := term.ReadPassword(fd)
-		return string(secret), err
-	})
-	if ctx.Err() != nil {
-		term.Restore(fd, state)
-	}
-	// ReadPassword 不回显用户按下的换行，补一个换行使下一行输出另起一行。
+	secret, err := await(ctx, func() (string, error) { return readLine(t.in) })
+	// 回显关闭时终端不显示用户按下的换行，补一个换行使下一行输出另起一行。
 	io.WriteString(t.out, "\n")
 	return secret, err
 }

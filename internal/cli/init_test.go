@@ -426,6 +426,12 @@ func TestInitRerun(t *testing.T) {
 		{"Y", "Y", true, false},
 		{"yes", "yes", false, true},
 		{"粘贴了授权码", canary(), false, true},
+		// 只比较去掉结尾换行后的原样回答，不去掉空白：带空白的 y 按 N 处理并提示。
+		{"前导空格", " y", false, true},
+		{"结尾空格", "y ", false, true},
+		{"结尾制表符", "Y\t", false, true},
+		// 按字符而不是字节计数：单个多字节字符按 N 处理，不提示。
+		{"单个多字节字符", "是", false, false},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -484,7 +490,8 @@ func TestInitRerun(t *testing.T) {
 			if strings.Contains(stdout+stderr, warning) != testCase.warned {
 				t.Errorf("提示出现与否不符: stdout=%q stderr=%q", stdout, stderr)
 			}
-			if testCase.warned && strings.Contains(stdout+stderr, testCase.answer) {
+			// 提示本身含「 y 」，先去掉提示再检查回答是否被回显。
+			if testCase.warned && strings.Contains(strings.ReplaceAll(stdout+stderr, warning, ""), testCase.answer) {
 				t.Error("输出回显了回答")
 			}
 			e.requireNoLeak(t, stdout, stderr)
@@ -671,7 +678,7 @@ func TestInitAuthCodeValidation(t *testing.T) {
 }
 
 // TestInitAddressValidation 验证地址逐项校验：带显示名的地址与含机器人地址的白名单被重问，大写输入被规范化；
-// 同一项连续 3 次无效时退出码 1，配置文件不存在，Keychain 未被访问。
+// 各项的无效次数分别计算；同一项连续 3 次无效时退出码 1，配置文件不存在，Keychain 未被访问。
 func TestInitAddressValidation(t *testing.T) {
 	e := newInitEnv(t)
 	terminal := &scriptTerminal{
@@ -694,6 +701,17 @@ func TestInitAddressValidation(t *testing.T) {
 	}
 	if got, err := os.ReadFile(e.configFile); err != nil || !bytes.Equal(got, want) {
 		t.Errorf("配置文件 = %q, %v; want %q", got, err, want)
+	}
+
+	// 每一项各有 3 次机会，无效次数不跨项累计：机器人地址与接收地址各无效 2 次后输入有效值，仍然成功。
+	e = newInitEnv(t)
+	terminal = &scriptTerminal{interactive: true, lines: []string{"a", "b", botAddress, "c", "d", meAddress, ""}, secrets: []string{canary(), canary()}}
+	if code, stdout, stderr := e.run(t, t.Context(), terminal); code != 0 {
+		t.Fatalf("各项无效 2 次后 init 失败: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	wantPrompts = []string{promptMailbox, promptMailbox, promptMailbox, promptReceiver, promptReceiver, promptReceiver, promptSenders}
+	if !slices.Equal(terminal.linePrompts, wantPrompts) {
+		t.Errorf("ReadLine 提示 = %q; want %q", terminal.linePrompts, wantPrompts)
 	}
 
 	for _, lines := range [][]string{
@@ -765,7 +783,8 @@ func TestInitEnvironment(t *testing.T) {
 	})
 }
 
-// TestInitExistingData 验证已有配置含未知键时不修改它、输出含键名不含路径；数据目录权限为 0755 时退出且 Keychain 未写入。
+// TestInitExistingData 验证已有配置含未知键时不修改它、输出含键名不含路径；配置路径是悬空的符号链接时不询问即退出，
+// 不创建链接目标；数据目录权限为 0755 时退出且 Keychain 未写入。
 func TestInitExistingData(t *testing.T) {
 	t.Run("配置含未知键", func(t *testing.T) {
 		e := newInitEnv(t)
@@ -795,6 +814,30 @@ func TestInitExistingData(t *testing.T) {
 		if e.keychain.sets+e.keychain.adds != 0 || len(terminal.linePrompts) != 0 {
 			t.Error("配置无效时不应询问或写入 Keychain")
 		}
+		requireNotExist(t, e.dataDir, "数据目录")
+		e.requireNoLeak(t, stdout, stderr)
+	})
+	t.Run("配置路径是悬空的符号链接", func(t *testing.T) {
+		e := newInitEnv(t)
+		target := filepath.Join(e.root, "dotfiles", "turncourier.toml")
+		if err := os.Mkdir(filepath.Dir(e.configFile), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, e.configFile); err != nil {
+			t.Fatal(err)
+		}
+		terminal := firstRunTerminal(canary())
+		code, stdout, stderr := e.run(t, t.Context(), terminal)
+		if code != 1 || stderr != "配置文件的位置已存在但无法读取（可能是悬空的符号链接）；init 不会修改它，请检查后重新运行 turncourier init。\n" {
+			t.Errorf("code=%d stderr=%q", code, stderr)
+		}
+		if len(terminal.linePrompts)+len(terminal.secretPrompts) != 0 || e.keychain.sets+e.keychain.adds != 0 {
+			t.Error("不应询问任何输入或写入 Keychain")
+		}
+		if got, err := os.Readlink(e.configFile); err != nil || got != target {
+			t.Errorf("符号链接被改动: %q, %v", got, err)
+		}
+		requireNotExist(t, target, "链接目标")
 		requireNotExist(t, e.dataDir, "数据目录")
 		e.requireNoLeak(t, stdout, stderr)
 	})

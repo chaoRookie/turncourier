@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -31,7 +32,7 @@ type InitDeps struct {
 type Terminal interface {
 	Interactive() bool                                             // 标准输入与标准输出都是终端
 	ReadLine(ctx context.Context, prompt string) (string, error)   // 回显读入一行，至多 1024 字节，去掉结尾换行
-	ReadSecret(ctx context.Context, prompt string) (string, error) // 用 term.ReadPassword 不回显读入一行
+	ReadSecret(ctx context.Context, prompt string) (string, error) // 关闭回显读入一行，标志与 term.ReadPassword 相同
 }
 
 // maxAttempts 是同一项输入连续无效的次数上限，达到即退出。
@@ -97,6 +98,11 @@ func initialize(ctx context.Context, stderr io.Writer, deps InitDeps) (string, e
 	_, err = config.Load(paths, deps.Getenv)
 	switch {
 	case errors.Is(err, config.ErrNotFound):
+		// Load 跟随符号链接，os.Link 不跟随：路径本身存在（例如悬空的符号链接）时 CreateFile 永远无法创建，
+		// 在询问之前退出，免得用户每次重新运行都要再输入一遍授权码。
+		if _, err := os.Lstat(paths.ConfigFile); err == nil {
+			return "", errors.New("配置文件的位置已存在但无法读取（可能是悬空的符号链接）；init 不会修改它，请检查后重新运行 turncourier init。")
+		}
 		if rendered, err = askConfig(ctx, stderr, deps.Terminal); err != nil {
 			return "", err
 		}
