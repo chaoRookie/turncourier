@@ -14,3 +14,5 @@ dist/
 coverage.out
 turncourier.toml
 /turncourier
+state.json
+samples.jsonl

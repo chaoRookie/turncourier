@@ -1980,7 +1980,7 @@ init 不联网，不验证授权码能否登录（L1 第 1 步验证）。按设
 | `TestL1Replies` | 读取 `state.json`，以只读方式补扫 INBOX 与 Junk（游标存于输出目录），对引用了探测邮件的来信（线程头含 `state.json` 中记录的任一 ID、主题含合成任务 ID，或正文含探测令牌）输出上述样本；自动回复与退信同样输出，`kind` 为 `auto` 或 `bounce` | 否 |
 | `TestL1Idle` | 分三个独立会话进行，每个会话只做一件事，互不影响统计。**预检会话**：`Examine(INBOX)` 记下邮件数 N0 与 UIDNEXT U0；U0 为 0（服务器未报告 UIDNEXT）时记录 `uidnext_missing`，预检结论记为「未知」并跳过其余预检步骤，不以回绕的游标继续；否则以返回的 UIDVALIDITY 与 U0−1 构造游标（不取回已有邮件），连续 `Scan(INBOX)` 两次，再 `Examine(INBOX)` 记下 N1、U1，随后以 10 秒期限的 ctx 调用一次 `Idle`，记录返回值与耗时，会话随即关闭。判定：10 秒内返回 true、耗时远小于 IDLE 与 DONE 两次往返，且 N0 = N1、U0 = U1，记为「UID SEARCH 的响应附带 EXISTS」；ctx 到期（说明已真正发出 IDLE）记为「未附带」；其余情况记为「未知」并保留原始值。EXAMINE 响应中的 EXISTS 归入命令结果，不留下信号。**测量会话**：新建连接，`Examine(INBOX)` 后连续调用 `Idle`，时长 `TURNCOURIER_LIVE_IDLE_MINUTES`（默认 30，至多 60），`IdleMax` 放宽到该时长；各次 `Idle` 之间不调用 `Scan`，本会话的每次返回都计入推送统计，记录每次 EXISTS 推送的时刻与服务器断开连接的时刻。设置 `TURNCOURIER_LIVE_IDLE_SELF_SEND=1` 时，自发邮件在开始测量之前逐封确认，确认后于测量会话第一次 `Idle` 开始 10 秒时自动发给机器人自己，记录从 250 响应到该次 `Idle` 返回 true 的延迟。**FETCH 检查会话**（仅在设置了 `TURNCOURIER_LIVE_IDLE_SELF_SEND=1`、测量结束后进行）：新建连接，`Examine(INBOX)`，以预检的游标 `Scan(INBOX)` 一次（取回这封自发邮件，不输出其内容），再 `Examine(INBOX)`，随后以 10 秒期限调用 `Idle`，按预检的规则判定并单独记录；与预检结果对照即可分辨 EXISTS 是随 UID SEARCH 还是随 UID FETCH 附带。预检未能进行时本检查照常执行，结论相应记为「未知或随 UID FETCH」。预检与 FETCH 检查中的 `Idle` 返回只单独记录，不计入推送统计 | 可选，逐封确认 |
 
-- [ ] **Step 1：** `go get github.com/emersion/go-message@v0.18.2 golang.org/x/text@v0.42.0`；修改 Makefile 与 `.gitignore`：
+- [x] **Step 1：** `go get github.com/emersion/go-message@v0.18.2 golang.org/x/text@v0.42.0`；修改 Makefile 与 `.gitignore`：
 
 ```make
 vet:
@@ -1991,21 +1991,21 @@ lint: $(STATICCHECK)
 	goroot="$$($(GO) env GOROOT)" && PATH="$$goroot/bin:$$PATH" $(STATICCHECK) ./... && PATH="$$goroot/bin:$$PATH" $(STATICCHECK) -tags live ./tests/live/
 ```
 
-- [ ] **Step 2：写失败的离线测试（`sample_test.go`，不带标签）。** 用合成的 `.invalid` 邮件字节（含 GB18030 base64 正文、带令牌的 QQ A 格式引用、`Auto-Submitted: auto-replied` 自动回复）调用样本函数，断言：
+- [x] **Step 2：写失败的离线测试（`sample_test.go`，不带标签）。** 用合成的 `.invalid` 邮件字节（含 GB18030 base64 正文、带令牌的 QQ A 格式引用、`Auto-Submitted: auto-replied` 自动回复）调用样本函数，断言：
   - 输出中不含合成正文里的金丝雀句子、显示名、地址与日期；令牌识别正确；自动回复 `kind` 为 `auto`；
   - `In-Reply-To` 等于 `state.json` 中「已发送」副本 ID 的回复归类为 `delivered_sent`；同时等于 DATA 响应 ID 时为 `delivered_sent+delivered_data`；形如 `tencent_…@qq.com` 但不等于任何记录的 ID 为 `other_tencent`；
   - 主题 `回复：[TC …] …` 的前缀为 `回复：`；主题 `关于合同 13800138000 [TC …]` 的前缀为 `"other"`；主题被改写为 `关于合同 13800138000`（没有标签）时 `prefix` 为 `null`、`tag_intact` 为 false；三种情况的输出都不含 `13800138000`；
   - DATA 响应文本依次含我方 ID、抄送 ID、一个不带尖括号且不等于任何记录的 `tencent_…@qq.com` 形式的 ID、一个普通地址，并把我方 ID 重复一次：前三者依次换成 `<ours>`、`<delivered_cc>`、`<other_tencent>`，普通地址换成 `<addr>`；`delivered_data` 恰为按出现顺序的三个元素（第三个补上尖括号，重复的我方 ID 只记一次）；`In-Reply-To` 等于其中第三个元素的回复归类为 `delivered_data`；
   - 输出目录校验：仓库根目录内的子目录、以大小写变体书写的同一目录（在不区分大小写的文件系统上它存在，校验按 inode 拒绝；在区分大小写的文件系统上它不存在，同样被拒绝）、位于仓库外但指向仓库内子目录的符号链接、权限 0755 的目录、相对路径与不存在的目录都被拒绝；仓库外权限 0700 的目录通过，指向它的符号链接也通过，且返回解析后的真实路径。去掉「先解析符号链接」的变异使符号链接用例失败。
-- [ ] **Step 3：写探测工具。** 按上表与输出规则实现 `sample.go` 与三个带标签的文件；写中文包注释。带标签的文件只做 I/O 与确认，脱敏与归类全部调用 `sample.go` 的纯函数。
-- [ ] **Step 4：验证开关。**
+- [x] **Step 3：写探测工具。** 按上表与输出规则实现 `sample.go` 与三个带标签的文件；写中文包注释。带标签的文件只做 I/O 与确认，脱敏与归类全部调用 `sample.go` 的纯函数。
+- [x] **Step 4：验证开关。**
   - `go test ./...`、`make check` 与 `make secrets` 通过；`tests/live` 只运行 `sample_test.go` 的离线测试，不读取配置、Keychain 或网络；`sample_test.go` 中的合成令牌在运行时构造（例如用 `bytes.Repeat` 构造的密钥与按下标填充的 nid 签发后取 `Reveal()`），测试向量遵循「测试向量与密钥扫描」的约定；
   - `env -u TURNCOURIER_LIVE go test -count=1 -tags live ./tests/live/` 输出「跳过」并通过，没有读取配置、Keychain 或网络（在临时 HOME 下运行，确认没有新建任何文件）；
   - `CI=1 TURNCOURIER_LIVE=1 go test -count=1 -tags live ./tests/live/` 失败并输出「拒绝在 CI 中运行」；
   - `grep -rn 'tags live\|TURNCOURIER_LIVE' .github/` 无结果。
-- [ ] **Step 5：** `git add .gitignore Makefile go.mod go.sum tests/live && git commit -m "test(live): add manual L1 probes guarded by build tag and explicit consent"`
+- [x] **Step 5：** `git add .gitignore Makefile go.mod go.sum tests/live && git commit -m "test(live): add manual L1 probes guarded by build tag and explicit consent"`
 
-**实施说明：** 待实施后填写。
+**实施说明：** Step 1 的 `go get` 把 go-message 固定在 v0.18.2、x/text 由模块图中的 v0.14.0 升到 v0.42.0；写完代码后的 `go mod tidy` 把两者由间接改为直接依赖，`go.sum` 另有 x/mod、x/sync、x/tools 三行哈希随 x/text v0.42.0 的模块图更新，它们只在模块图中，产品二进制仍不链接邮件依赖。Makefile 的 `vet` 与 `lint` 按清单增加 live 标签的检查。Step 2 先写 `sample_test.go` 并运行 `go test -count=1 ./tests/live/`，失败基线为 `no non-test Go files in …/tests/live`（`sample.go` 尚不存在）；Step 3 实现后这 13 个顶层离线用例全部通过，不带标签部分的语句覆盖率为 87.6%。不带标签的 `sample.go` 提供 `Analyze`（来信脱敏归类）、`ClassifyID`、`RedactDataResponse`、`ComposeNotification`、`CopyHeaders`、`JudgeIdleCheck`、`IdleConclusion`、`RepoRoot`、`ValidateOutputDir` 与状态、样本文件的读写；带标签的三个文件只做 I/O 与确认。清单没有给出 QQ A/B/C 等分隔线的正则，本任务按公开可见的形式定了一张表：A 为长破折号包围「原始邮件」或 Original、B 为短破折号、C 为单独一行，另有「写道」与 `wrote:` 行、没有分隔线就直接开始的引用头块（Foxmail 式）和 `>` 引用；HTML 标记表同理。这些类别名只是观测标记，L1 之后由维护者把类别与客户端对应起来。样本在清单给出的字段之外多了两项：`folder`（来信所在文件夹，这正是同时补扫 Junk 与 INBOX 的原因）与 `received`（清单要求 Received 头「只计数」）。预检与 FETCH 检查的判定以同一连接上一次 EXAMINE 的往返耗时为尺子，要求 Idle 耗时的两倍仍小于一次往返，才算「远小于 IDLE 与 DONE 两次往返」。钥匙串往返中，合成条目的删除是本用例自己所建条目的清理，写在第一次确认的文案里，并由 Cleanup 在中途失败时兜底；对已存在条目直接调用 `security -i` 以记录退出码之前另有一次确认。`sample.go` 中令牌字母表的常量名为 `crockfordAlphabet` 而不是 `tokenAlphabet`：后者会让 gitleaks 默认的 generic-api-key 规则因「token」关键字加 32 个字符的高熵值而报泄漏（已实测）。偏差一项：`go test` 在包列表模式下会丢弃通过的包的输出，`env -u TURNCOURIER_LIVE go test -count=1 -tags live ./tests/live/` 通过但看不到「跳过」，加 `-v` 才显示，本任务因此在验证中同时运行了带 `-v` 的命令；`CI=1 TURNCOURIER_LIVE=1 …` 的失败输出不受影响，直接可见。Step 4 验证全部通过：`go test -count=1 ./tests/live/`、`make check`（总覆盖率 93.3%，含 `go vet -tags live ./tests/live/` 与 `staticcheck -tags live ./tests/live/`）、`make secrets`（无泄漏）、`GOOS=windows go vet ./...`、`GOOS=linux go vet ./...`；在临时 HOME 下 `env -u TURNCOURIER_LIVE go test -count=1 -tags live ./tests/live/` 通过，且该 HOME 下只留下 Go 工具链自己的缓存，没有任何 TurnCourier 文件；`CI=1 TURNCOURIER_LIVE=1 …` 失败并输出「拒绝在 CI 中运行」；`grep -rn 'tags live\|TURNCOURIER_LIVE' .github/` 无结果。另用只含 example.invalid 地址的合成配置，在没有控制终端的环境下跑通 TestMain 的流程：输出目录合法时停在总确认并报「打不开 /dev/tty」，输出目录在仓库内、权限不是 0700、配置缺失时分别给出对应的错误，全程不访问钥匙串与网络。变异测试：去掉「先解析符号链接」使符号链接用例失败；去掉主题前缀白名单后主题中的数字进入样本；DATA 响应不替换普通地址、来源标签顺序颠倒，都被离线用例拦截。本任务没有运行任何真机探测：没有登录邮箱、没有发信，也没有读写任何真实钥匙串条目；开关验证中虽然设置过 TURNCOURIER_LIVE=1，但每次都停在总确认之前（CI 拒绝运行、打不开 /dev/tty、配置或输出目录无效），不曾访问钥匙串与网络。
 
 ### Task 14：文档同步
 

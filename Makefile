@@ -27,6 +27,7 @@ fmt-check:
 
 vet:
 	$(GO) vet ./...
+	$(GO) vet -tags live ./tests/live/
 
 comments:
 	$(GO) run ./tools/commentcheck .
@@ -37,7 +38,7 @@ test:
 
 # staticcheck 与 govulncheck 会从 PATH 查找 go，把 $(GO) 所属工具链放到最前面，GO 覆盖才对它们生效。
 lint: $(STATICCHECK)
-	goroot="$$($(GO) env GOROOT)" && PATH="$$goroot/bin:$$PATH" $(STATICCHECK) ./...
+	goroot="$$($(GO) env GOROOT)" && PATH="$$goroot/bin:$$PATH" $(STATICCHECK) ./... && PATH="$$goroot/bin:$$PATH" $(STATICCHECK) -tags live ./tests/live/
 
 # go.sum 记录的依赖哈希须与模块缓存一致，防止被篡改的依赖进入构建。
 modverify:
