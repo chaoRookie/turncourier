@@ -937,9 +937,18 @@ func TestNotificationsAfterTaskClosed(t *testing.T) {
 }
 
 // TestClaimNotificationsOfOpenTasks 验证领取前的 task_closed 兜底只放弃 CLOSED 任务的通知：任务进入 WAITING_INPUT、
-// WAITING_APPROVAL、COMPLETED 或 FAILED 后创建的对应事件通知按创建顺序依次被领取，标记 SENT 后正文行被删除。
+// WAITING_APPROVAL、COMPLETED 或 FAILED 后创建的对应事件通知，COMPLETED 时创建、任务随后因回复不确定进入 DELIVERY_UNCERTAIN
+// 的 turn_completed 通知，以及 CREATED 任务的通知，按创建顺序依次被领取，标记 SENT 后正文行被删除。
 func TestClaimNotificationsOfOpenTasks(t *testing.T) {
 	store, _, _ := newNotificationStore(t)
+	var ids []int64
+	var taskIDs []string
+	notify := func(current Task, event string) {
+		in := notificationFor(current.ID, event)
+		in.Event = event
+		ids = append(ids, mustCreateNotification(t, store, in).ID)
+		taskIDs = append(taskIDs, current.ID)
+	}
 	cases := []struct {
 		event        task.Event
 		notification string
@@ -949,16 +958,19 @@ func TestClaimNotificationsOfOpenTasks(t *testing.T) {
 		{task.TurnCompleted, "turn_completed"},
 		{task.Fail, "failed"},
 	}
-	var ids []int64
 	for _, c := range cases {
-		current := applyEvents(t, store, startTask(t, store), c.event)
-		in := notificationFor(current.ID, c.notification)
-		in.Event = c.notification
-		ids = append(ids, mustCreateNotification(t, store, in).ID)
+		notify(applyEvents(t, store, startTask(t, store), c.event), c.notification)
 	}
+	completed, _ := completedTask(t, store, 1)
+	notify(completed, "turn_completed")
+	reply, _ := claim(t, store, completed.ID)
+	if _, current := mustMarkUncertain(t, store, reply.Seq); current.State != task.DeliveryUncertain {
+		t.Fatalf("MarkReplyUncertain 后任务状态 = %s; want %s", current.State, task.DeliveryUncertain)
+	}
+	notify(createTask(t, store), "turn_completed")
 	for i, id := range ids {
 		if claimed, _ := mustClaimNotification(t, store); claimed.ID != id {
-			t.Fatalf("第 %d 次领取 = 通知 %d; want %s 通知 %d", i+1, claimed.ID, cases[i].notification, id)
+			t.Fatalf("第 %d 次领取 = 通知 %d; want %s 任务的通知 %d", i+1, claimed.ID, mustGetTask(t, store, taskIDs[i]).State, id)
 		}
 		must(t, "MarkNotificationSent")(store.MarkNotificationSent(t.Context(), id))
 		requireNotification(t, store, id, queue.OutboxSent, "", 0)
