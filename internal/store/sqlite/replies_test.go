@@ -663,7 +663,7 @@ func TestRecordReplyBodyValidation(t *testing.T) {
 
 // TestRecordReplyRequiresPayloadKey 验证没有可用的正文密钥时不记录回复：PayloadKey 为 nil 时在开始事务前返回
 // ErrPayloadKeyUnavailable（上下文已取消时同样如此）；正文密钥的 kid 未登记或已不是 active 时在事务内返回同一错误。
-// 三种情况对新邮件与已记录过的同一邮件都成立，且不写入任何行。
+// 三种情况对入队为 QUEUED 的新邮件、发往 CLOSED 任务而将被记为 REJECTED 的新邮件与已记录过的同一邮件都成立，且不写入任何行。
 func TestRecordReplyRequiresPayloadKey(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -686,6 +686,9 @@ func TestRecordReplyRequiresPayloadKey(t *testing.T) {
 			recordReply(t, store, recorded)
 			fresh := withBody(inbound(running.ID), "synthetic reply without key")
 			fresh.UID, fresh.MessageID = 2, "<b@example.invalid>"
+			closed := applyEvents(t, store, startTask(t, store), task.Close)
+			rejected := withBody(inbound(closed.ID), "synthetic reply to a closed task")
+			rejected.UID, rejected.MessageID = 3, "<c@example.invalid>"
 			tt.setup(t, store)
 			ctx := t.Context()
 			if tt.canceled {
@@ -693,7 +696,7 @@ func TestRecordReplyRequiresPayloadKey(t *testing.T) {
 				cancel()
 				ctx = canceled
 			}
-			for name, in := range map[string]InboundReply{"新邮件": fresh, "已记录的邮件": recorded} {
+			for name, in := range map[string]InboundReply{"新邮件": fresh, "将被拒绝的邮件": rejected, "已记录的邮件": recorded} {
 				if got, err := store.RecordReply(ctx, in); !errors.Is(err, ErrPayloadKeyUnavailable) {
 					t.Errorf("%s: RecordReply = %+v, %v; want ErrPayloadKeyUnavailable", name, got, err)
 				}
