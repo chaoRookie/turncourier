@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -976,6 +977,60 @@ func TestInitMissingRegisteredKey(t *testing.T) {
 	}
 	if check, err := e.openStore(t).KeyCheckOf(t.Context(), sqlite.KeyPurposePayload, 1); err != nil || check != payloadCheck {
 		t.Error("正文密钥元数据被改动")
+	}
+}
+
+// setKeyState 直接把 crypto_keys 中该用途密钥的状态改成 state：4a 的存储只登记 active，密钥轮换的接口留给以后的版本，
+// 只能以独立连接改写数据库（驱动由存储包注册）。
+func (e *initEnv) setKeyState(t *testing.T, purpose sqlite.KeyPurpose, state string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(e.dataDir, "turncourier.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(t.Context(), "UPDATE crypto_keys SET state = ? WHERE purpose = ?", state, string(purpose)); err != nil {
+		t.Fatalf("改写密钥状态失败: %v", err)
+	}
+}
+
+// keyState 读取 crypto_keys 中该用途密钥的状态。
+func (e *initEnv) keyState(t *testing.T, purpose sqlite.KeyPurpose) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(e.dataDir, "turncourier.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer db.Close()
+	var state string
+	if err := db.QueryRowContext(t.Context(), "SELECT state FROM crypto_keys WHERE purpose = ?", string(purpose)).Scan(&state); err != nil {
+		t.Fatalf("读取密钥状态失败: %v", err)
+	}
+	return state
+}
+
+// TestInitKeyNotActive 验证该用途登记的密钥状态不是 active 时 init 退出：不生成新密钥、不改动 Keychain 与元数据。
+// retired 与 destroyed 下 ActiveKeyID 都返回 ErrNotFound，按它判断存在性的实现会走进「尚未登记」分支，
+// 生成或沿用一把新密钥后再被 RegisterKey 的 ErrKeyExists 拦下，与「密钥条目从不覆盖」的说法不符。
+func TestInitKeyNotActive(t *testing.T) {
+	for _, state := range []string{"retired", "destroyed"} {
+		e := newInitEnv(t)
+		id := e.mustFirstRun(t)
+		e.setKeyState(t, sqlite.KeyPurposeToken, state)
+		before := maps.Clone(e.keychain.items)
+		e.keychain.resetCounts()
+		code, stdout, stderr := e.run(t, t.Context(), &scriptTerminal{interactive: true, lines: []string{""}})
+		if code != 1 || stderr != errKeyNotActive.Error()+"\n" {
+			t.Errorf("%s: code=%d stderr=%q", state, code, stderr)
+		}
+		if e.keychain.adds+e.keychain.sets != 0 || !maps.Equal(e.keychain.items, before) {
+			t.Errorf("%s: Add = %d, Set = %d; want 0 且条目不变", state, e.keychain.adds, e.keychain.sets)
+		}
+		if got := e.keyState(t, sqlite.KeyPurposeToken); got != state {
+			t.Errorf("%s: 令牌密钥状态 = %q; want 不变", state, got)
+		}
+		e.requireKeyRegistered(t, e.openStore(t), id, sqlite.KeyPurposePayload)
+		e.requireNoLeak(t, stdout, stderr)
 	}
 }
 

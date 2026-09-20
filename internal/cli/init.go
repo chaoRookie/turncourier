@@ -53,6 +53,7 @@ const (
 var (
 	errTooManyAttempts = errors.New("同一项连续 3 次输入无效，init 已退出。")
 	errKeyMissing      = errors.New("密钥元数据存在，但 Keychain 中缺少对应条目；init 不会重新生成，否则待处理数据将无法解密。")
+	errKeyNotActive    = errors.New("密钥元数据存在，但登记的密钥状态不是 active；init 不会生成新密钥，也不会改动任何条目。")
 	//lint:ignore ST1005 这是原样打印给用户的完整中文句子，文案由实施清单规定，以产品名 Keychain 开头
 	errKeyMismatch = errors.New("Keychain 中的密钥与数据库登记的不符；init 不会覆盖它。")
 	//lint:ignore ST1005 同上，文案由实施清单规定
@@ -297,13 +298,18 @@ func validAuthCode(code string) bool {
 
 // ensureKey 确保 purpose 用途的密钥在 Keychain 中且已登记，返回摘要中的状态「已生成」或「已存在」。密钥条目从不覆盖：
 // 已有元数据时只核对 Keychain 中的条目与登记的校验值；没有元数据时沿用或新建 kid 1 的条目，再登记它的校验值。
+// 「已有元数据」按 RegisteredKey 判断，与 RegisterKey 的唯一性域一致：该用途登记过任何状态的密钥就不再生成新的，
+// 状态不是 active 时退出，否则 init 会走进「尚未登记」分支，而 RegisterKey 随后必然返回 ErrKeyExists。
 func ensureKey(ctx context.Context, db *sqlite.Store, kc keychain.Store, random io.Reader, id string, purpose sqlite.KeyPurpose) (string, error) {
 	account := keychain.TokenKeyAccount
 	if purpose == sqlite.KeyPurposePayload {
 		account = keychain.PayloadKeyAccount
 	}
-	kid, err := db.ActiveKeyID(ctx, purpose)
+	kid, state, err := db.RegisteredKey(ctx, purpose)
 	if err == nil {
+		if state != sqlite.KeyActive {
+			return "", errKeyNotActive
+		}
 		return "已存在", verifyKey(ctx, db, kc, account(id, kid), purpose, kid)
 	}
 	if !errors.Is(err, sqlite.ErrNotFound) {

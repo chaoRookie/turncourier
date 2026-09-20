@@ -226,15 +226,19 @@ func TestRecordReplyValidation(t *testing.T) {
 		{"Account 含全角空格", func(in *InboundReply) { in.Account = "bot\u3000@example.invalid" }},
 		{"Account 少于 3 个非 ASCII 字符", func(in *InboundReply) { in.Account = "中@" }},
 		{"Account 含 NUL", func(in *InboundReply) { in.Account = "bot\x00@example.invalid" }},
+		{"Account 含非法 UTF-8", func(in *InboundReply) { in.Account = "bot\xff@example.invalid" }},
 		{"Folder 为空", func(in *InboundReply) { in.Folder = "" }},
 		{"Folder 超过 255 字符", func(in *InboundReply) { in.Folder = strings.Repeat("f", 256) }},
 		{"Folder 含 NUL", func(in *InboundReply) { in.Folder = "IN\x00BOX" }},
+		{"Folder 含非法 UTF-8", func(in *InboundReply) { in.Folder = "IN\xffBOX" }},
+		{"Folder 含非法 UTF-8 续字节", func(in *InboundReply) { in.Folder = "IN\x80BOX" }},
 		{"UIDValidity 为 0", func(in *InboundReply) { in.UIDValidity = 0 }},
 		{"UID 为 0", func(in *InboundReply) { in.UID = 0 }},
 		{"MessageID 为空", func(in *InboundReply) { in.MessageID = "" }},
 		{"MessageID 少于 3 字符", func(in *InboundReply) { in.MessageID = "<a" }},
 		{"MessageID 少于 3 个非 ASCII 字符", func(in *InboundReply) { in.MessageID = "<é" }},
 		{"MessageID 含 NUL", func(in *InboundReply) { in.MessageID = "<\x00>" }},
+		{"MessageID 含非法 UTF-8", func(in *InboundReply) { in.MessageID = "<\xff>" }},
 		{"MessageID 超过 998 字符", func(in *InboundReply) { in.MessageID = "<" + strings.Repeat("a", 997) + ">" }},
 		{"任务不存在时仍先校验字段", func(in *InboundReply) { in.TaskID, in.UID = "missing", 0 }},
 	}
@@ -291,6 +295,36 @@ func TestRecordReplyValidation(t *testing.T) {
 		t.Errorf("255 个字符的 Folder: RecordReply = %+v; want 新入队", got)
 	}
 	requireRows(t, store, 6, 6)
+}
+
+// TestRecordReplyMatchesMailboxRule 验证账户与文件夹在 RecordReply 与游标接口中按同一规则判定：
+// 同一取值要么两处都接受，要么两处都拒绝。不一致时同一个文件夹名可以记录回复却无法推进游标，
+// 或者非法 UTF-8 的取值只在其中一处被拦下，另一处要到执行 SQL 之后才被 CHECK 约束拒绝。
+func TestRecordReplyMatchesMailboxRule(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	running := startTask(t, store)
+	tests := []struct {
+		name    string
+		account string
+		folder  string
+	}{
+		{"合法取值", botAccount, "Sent Messages"},
+		{"账户含非法 UTF-8", "bot\xff@example.invalid", "INBOX"},
+		{"文件夹含非法 UTF-8", botAccount, "IN\xffBOX"},
+		{"文件夹含非法 UTF-8 续字节", botAccount, "IN\x80BOX"},
+		{"文件夹为空", botAccount, ""},
+		{"文件夹超过 255 字符", botAccount, strings.Repeat("f", 256)},
+		{"账户含空格", "bot @example.invalid", "INBOX"},
+	}
+	for _, tt := range tests {
+		cursorErr := store.AdvanceCursor(t.Context(), tt.account, tt.folder, Cursor{UIDValidity: 7, LastUID: 1})
+		in := inbound(running.ID)
+		in.Account, in.Folder = tt.account, tt.folder
+		_, replyErr := store.RecordReply(t.Context(), in)
+		if (cursorErr == nil) != (replyErr == nil) {
+			t.Errorf("%s: AdvanceCursor = %v，RecordReply = %v; want 两处判定一致", tt.name, cursorErr, replyErr)
+		}
+	}
 }
 
 // TestRecordReplySameUIDInDifferentFolders 验证 UID 只在同一文件夹内唯一：INBOX 与 Junk 中 UIDVALIDITY 与 UID 都相同、

@@ -374,6 +374,37 @@ func TestCreateNotificationValidation(t *testing.T) {
 	}
 }
 
+// setTaskOwner 直接改写任务的 owner：存储没有修改 owner 的接口，只有外部工具能把它改成令牌签不出来的取值。
+func setTaskOwner(t *testing.T, s *Store, taskID, owner string) {
+	t.Helper()
+	if _, err := s.db.ExecContext(t.Context(), "UPDATE tasks SET owner = ? WHERE id = ?", owner, taskID); err != nil {
+		t.Fatalf("改写任务 owner 失败: %v", err)
+	}
+}
+
+// TestCreateNotificationChecksOwner 验证 owner 不在 token.Claims 要求的 1–255 字节内时不创建通知：
+// 否则会建出一条永远签不出令牌、因而永远发不出去的通知。长度按字节计，255 个字节合法、256 个字节不合法。
+func TestCreateNotificationChecksOwner(t *testing.T) {
+	store, _, running := newNotificationStore(t)
+	for _, owner := range []string{"", strings.Repeat("o", 256), strings.Repeat("代", 86)} {
+		setTaskOwner(t, store, running.ID, owner)
+		got, err := store.CreateNotification(t.Context(), notificationFor(running.ID, "owner"))
+		if err == nil || !strings.Contains(err.Error(), "invalid notification") {
+			t.Errorf("owner %d 字节: CreateNotification = %+v, %v; want 含 \"invalid notification\" 的错误", len(owner), got, err)
+		}
+	}
+	if n, p := countRows(t, store.db, "notifications"), countRows(t, store.db, "notification_payloads"); n != 0 || p != 0 {
+		t.Fatalf("owner 不合法时通知 %d 行、正文 %d 行; want 0、0", n, p)
+	}
+	for _, owner := range []string{"o", strings.Repeat("o", 255), strings.Repeat("代", 85)} {
+		setTaskOwner(t, store, running.ID, owner)
+		created := mustCreateNotification(t, store, notificationFor(running.ID, fmt.Sprintf("owner %d", len(owner))))
+		if created.Owner != owner {
+			t.Errorf("owner %d 字节: 通知的 Owner = %q; want 与任务一致", len(owner), created.Owner)
+		}
+	}
+}
+
 // TestCreateNotificationChecksTaskAndKeys 验证事务内的检查：任务不存在返回 ErrNotFound；任务 CLOSED 返回 ErrTaskNotNotifiable；
 // CREATED 与 FAILED 任务可以创建；没有 active 令牌密钥返回包装 ErrNotFound 的错误；没有正文密钥、正文密钥的 kid 未登记、
 // 已不是 active，或与登记的 kid 不符时返回 ErrPayloadKeyUnavailable。失败时不写入任何行。
@@ -1140,10 +1171,21 @@ func TestRecordDeliveredMessageID(t *testing.T) {
 		t.Errorf("不存在的通知: err = %v; want ErrNotFound", err)
 	}
 
-	for _, bad := range []string{"", "<a", "<é", "<a\x00b>", "<" + strings.Repeat("a", 997) + ">"} {
+	// 非法 UTF-8 的两种情形：0xff 不是续字节，SQLite 的 length() 与 Go 的字符数相同，CHECK 约束放行，值会落盘；
+	// 0x80 是续字节，length() 不计入，事务开始之后才被 CHECK 拒绝。两者都应在开始事务之前拒绝。
+	for _, bad := range []string{"", "<a", "<é", "<a\x00b>", "<\xff\xfe>", "<\x80>", "<" + strings.Repeat("a", 997) + ">"} {
 		if got, err := store.RecordDeliveredMessageID(ctx, second.ID, bad); err == nil || !strings.Contains(err.Error(), "invalid notification") {
 			t.Errorf("值 %q: RecordDeliveredMessageID = %+v, %v; want 含 \"invalid notification\" 的错误", bad, got, err)
 		}
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if got, err := store.RecordDeliveredMessageID(canceled, second.ID, "<\xff\xfe>"); err == nil ||
+		!strings.Contains(err.Error(), "invalid notification") || errors.Is(err, context.Canceled) {
+		t.Errorf("上下文已取消: RecordDeliveredMessageID = %+v, %v; want 含 \"invalid notification\" 的错误而不是 context.Canceled", got, err)
+	}
+	if got := mustGetNotification(t, store, second.ID); got != second {
+		t.Errorf("非法取值后第二条通知 = %+v; want 不变 %+v", got, second)
 	}
 	for _, good := range []string{"<a>", "<" + strings.Repeat("é", 996) + ">"} {
 		next := sentNotification(good[:3])

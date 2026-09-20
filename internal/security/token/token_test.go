@@ -465,7 +465,7 @@ func TestRedaction(t *testing.T) {
 
 // TestBodyDigest 确认键控摘要与直接调用 crypto/hmac 的参考实现一致，依赖密钥，且不同于无键摘要与不带前缀的 HMAC。
 func TestBodyDigest(t *testing.T) {
-	k, _ := fixture(t)
+	k, issued := fixture(t)
 	body := []byte("new reply body\n")
 	reference := hmac.New(sha256.New, sequence(KeyLen, 1))
 	reference.Write([]byte("turncourier/body-digest/v1\x00"))
@@ -488,6 +488,17 @@ func TestBodyDigest(t *testing.T) {
 	macDomain, digestDomain := "turncourier/reply-token/v1\x00", "turncourier/body-digest/v1\x00"
 	if strings.HasPrefix(macDomain, digestDomain) || strings.HasPrefix(digestDomain, macDomain) {
 		t.Error("domain prefixes overlap")
+	}
+	// 钉住 BodyDigest 注释所写的已知局限与它的边界：零值 Key 不被拒绝，算出的是全零密钥的摘要；
+	// 同一个零值 Key 在 Verify 中只会得到 ErrKeyMismatch，因此这种摘要在设计的调用顺序中到不了存储。
+	zeroKey := hmac.New(sha256.New, make([]byte, KeyLen))
+	zeroKey.Write([]byte(digestDomain))
+	zeroKey.Write(body)
+	if (&Key{}).BodyDigest(body) != [32]byte(zeroKey.Sum(nil)) {
+		t.Error("the zero Key no longer digests with an all-zero key; update the known limitation in BodyDigest")
+	}
+	if !errors.Is(Verify(&Key{}, issued, testClaims(), testNow), ErrKeyMismatch) {
+		t.Error("Verify with the zero Key must reject the token before any digest is computed")
 	}
 }
 

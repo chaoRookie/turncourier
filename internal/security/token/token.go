@@ -193,6 +193,10 @@ func (t Token) LogValue() slog.Value {
 }
 
 // BodyDigest 返回 HMAC-SHA256(k, "turncourier/body-digest/v1\x00" ‖ body)，用作 inbound_messages.body_sha256（D5 第 2 条）。
+// 已知局限：契约规定的签名没有错误返回，直接构造的零值 Key（kid 0、密钥全零）在这里不会被拒绝，会算出以全零密钥求得的摘要，
+// 而 Issue 对同一个零值 Key 返回 ErrInvalidKey。NewKey 出错时返回 nil，忽略它的调用方在这里 panic，不会得到坏摘要；
+// 能算出坏摘要的只有直接构造零值 Key 的调用方。摘要的调用顺序把这种摘要挡在存储之外：密钥按通知行的 token_kid 取出，
+// 令牌先经 Verify，零值 Key 只会得到 ErrKeyMismatch。TestBodyDigest 钉住这条边界。
 func (k *Key) BodyDigest(body []byte) [32]byte {
 	mac := hmac.New(sha256.New, k.secret[:])
 	mac.Write([]byte(digestPrefix))

@@ -114,6 +114,22 @@ func (s *Store) RegisterKey(ctx context.Context, purpose KeyPurpose, kid uint8, 
 	return nil
 }
 
+// RegisteredKey 返回该用途已登记的密钥的 kid 与状态；该用途没有任何密钥时返回 ErrNotFound。
+// 判定域与 RegisterKey 的唯一性域相同——该用途是否已有任何状态的密钥——因此调用方可以据此判断是否还需要生成密钥，
+// 不会在密钥已 retired 或 destroyed 时把它当作尚未登记。4a 每个用途至多登记一条，按 kid 升序只是为了结果确定。
+func (s *Store) RegisteredKey(ctx context.Context, purpose KeyPurpose) (uint8, KeyState, error) {
+	var kid uint8
+	var state KeyState
+	err := s.db.QueryRowContext(ctx, "SELECT kid, state FROM crypto_keys WHERE purpose = ? ORDER BY kid LIMIT 1", string(purpose)).Scan(&kid, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", fmt.Errorf("%s key: %w", purpose, ErrNotFound)
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf("cannot read key metadata: %w", err)
+	}
+	return kid, state, nil
+}
+
 // KeyCheckOf 返回 (purpose, kid) 登记的校验值；未登记时返回 ErrNotFound。
 func (s *Store) KeyCheckOf(ctx context.Context, purpose KeyPurpose, kid uint8) ([8]byte, error) {
 	var check [8]byte

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/chaoRookie/turncourier/internal/queue"
@@ -23,7 +22,7 @@ import (
 type InboundReply struct {
 	TaskID      string
 	Account     string // 调用方已用 config.NormalizeAddress 规范化的机器人邮箱地址
-	Folder      string // 取回该邮件的文件夹，4b 传入 imap.Batch.Folder；1–255 个字符（按字符计，与表约束一致），不含 NUL，可以含空格
+	Folder      string // 取回该邮件的文件夹，4b 传入 imap.Batch.Folder；1–255 个字符（按字符计，与表约束一致），合法 UTF-8、不含 NUL，可以含空格
 	UIDValidity uint32
 	UID         uint32
 	MessageID   string   // 与邮件头一致的原样字符串
@@ -169,23 +168,23 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 }
 
 // validate 在事务开始前检查与表约束对应的长度、空白与取值范围；存储层不导入 config，地址规范化由调用方负责。
-// 长度按 Unicode 字符计，与表约束中 SQLite 的 length() 一致；length() 遇到 NUL 即停止计数，因此含 NUL 的值一律拒绝。
+// Account 与 Folder 经 checkMailbox 校验，与游标、被拒来信用同一条规则：同一个账户或文件夹名在这三处的判定必须一致，
+// 否则一个文件夹名可以记录回复却推不动它的游标。长度按 Unicode 字符计，与表约束中 SQLite 的 length() 一致；
+// MessageID 同样须为合法 UTF-8 且不含 NUL，理由见 checkMailbox。
 // IMAP 文件夹名可以含空格（例如 Sent Messages），因此 Folder 不按空白拒绝；取值由调用方决定，存储层不限定。
 // Body 按字节计长度，须为 1 字节到 payload.MaxPlaintext 的合法 UTF-8；错误文本不含正文。
 func (in InboundReply) validate() error {
-	accountLen, messageIDLen := utf8.RuneCountInString(in.Account), utf8.RuneCountInString(in.MessageID)
-	folderLen := utf8.RuneCountInString(in.Folder)
+	if err := checkMailbox(in.Account, in.Folder); err != nil {
+		return fmt.Errorf("invalid inbound reply: %w", err)
+	}
+	messageIDLen := utf8.RuneCountInString(in.MessageID)
 	switch {
-	case accountLen < 3 || accountLen > 254 || strings.ContainsFunc(in.Account, unicode.IsSpace):
-		return errors.New("invalid inbound reply: account must be 3-254 characters without whitespace")
-	case folderLen < 1 || folderLen > 255:
-		return errors.New("invalid inbound reply: folder must be 1-255 characters")
 	case in.UIDValidity == 0 || in.UID == 0:
 		return errors.New("invalid inbound reply: uid validity and uid must be positive")
 	case messageIDLen < 3 || messageIDLen > 998:
 		return errors.New("invalid inbound reply: message id must be 3-998 characters")
-	case strings.ContainsRune(in.Account, 0) || strings.ContainsRune(in.Folder, 0) || strings.ContainsRune(in.MessageID, 0):
-		return errors.New("invalid inbound reply: account, folder and message id must not contain NUL")
+	case !utf8.ValidString(in.MessageID) || strings.ContainsRune(in.MessageID, 0):
+		return errors.New("invalid inbound reply: message id must be valid UTF-8 without NUL")
 	case len(in.Body) == 0 || len(in.Body) > payload.MaxPlaintext || !utf8.Valid(in.Body):
 		return errors.New("invalid inbound reply: body must be 1 byte to 1 MiB of valid UTF-8")
 	}

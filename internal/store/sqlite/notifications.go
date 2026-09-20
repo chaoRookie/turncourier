@@ -71,6 +71,9 @@ const (
 	// nidLen 是通知 ID（nid）的字节数；messageIDRandomLen 是我方 Message-ID 随机部分的字节数，编码为 24 位 base32。
 	nidLen             = 12
 	messageIDRandomLen = 15
+	// maxOwnerLen 是 owner 的字节数上限，与 token.Claims 要求的 1–255 字节一致：令牌 MAC 以 uint16 记下 owner 的字节数，
+	// 超出这个范围的 owner 签不出令牌。存储不导入 token 包，这里重复它的取值。
+	maxOwnerLen = 255
 )
 
 const (
@@ -120,7 +123,8 @@ func (n NewNotification) validate() error {
 	return nil
 }
 
-// CreateNotification 在一个事务中：确认任务存在且未关闭（FAILED 任务允许，用于发送失败通知）；读取令牌用途的 active kid
+// CreateNotification 在一个事务中：确认任务存在且未关闭（FAILED 任务允许，用于发送失败通知）；确认任务的 owner 在
+// token.Claims 要求的 1–255 字节内，否则这条通知永远签不出令牌；读取令牌用途的 active kid
 // （没有时返回包装 ErrNotFound 的错误）；确认正文密钥的 kid 已登记为 active；从随机源生成 12 字节 nid 与 15 字节
 // Message-ID 随机部分；以 PENDING、attempts 0、not_before 与 created_at 为当前时间、token_expires_at 为当前时间加 TTL
 // 插入通知行；再用 (KindNotification, TaskID, id) 加密内容并插入 notification_payloads。nid 或 Message-ID 冲突时报错，不重试。
@@ -140,6 +144,11 @@ func (s *Store) CreateNotification(ctx context.Context, n NewNotification) (Noti
 	}
 	if current.State == task.Closed {
 		return Notification{}, fmt.Errorf("%w: task %q is %s", ErrTaskNotNotifiable, n.TaskID, current.State)
+	}
+	// owner 来自任务行，不在 NewNotification 中；它超出令牌 Claims 的范围时这条通知永远签不出令牌，因此不创建。
+	// 错误文本不含 owner。
+	if length := len(current.Owner); length == 0 || length > maxOwnerLen {
+		return Notification{}, fmt.Errorf("invalid notification: owner of task %q must be 1-%d bytes", n.TaskID, maxOwnerLen)
 	}
 	tokenKID, err := activeKeyID(ctx, tx, KeyPurposeToken)
 	if err != nil {
@@ -350,10 +359,13 @@ func (s *Store) ResolveUncertainNotification(ctx context.Context, id int64, deli
 
 // RecordDeliveredMessageID 为 SENT 通知记录实际投递的 Message-ID（3–998 个字符，不含 NUL）；同值重复记录不改动，
 // 已有不同值或该值已属于另一条通知时返回 ErrDeliveredMessageIDConflict；通知不是 SENT 时返回 queue.ErrInvalidOutboxTransition。
-// 值的长度按 Unicode 字符计，与表约束一致，不合法时在开始事务前报错。
+// 值的长度按 Unicode 字符计，与表约束一致，并须为合法 UTF-8（理由同 checkMailbox：SQLite 的 length() 对非法 UTF-8
+// 的计数与 Go 不同，否则 Go 端判为合规的取值会在开始事务之后才被 CHECK 约束拒绝，或者带着非法字节落盘）；
+// 不合法时在开始事务前报错。
 func (s *Store) RecordDeliveredMessageID(ctx context.Context, id int64, messageID string) (Notification, error) {
-	if length := utf8.RuneCountInString(messageID); length < 3 || length > 998 || strings.ContainsRune(messageID, 0) {
-		return Notification{}, errors.New("invalid notification delivered message id: must be 3-998 characters without NUL")
+	if length := utf8.RuneCountInString(messageID); length < 3 || length > 998 ||
+		strings.ContainsRune(messageID, 0) || !utf8.ValidString(messageID) {
+		return Notification{}, errors.New("invalid notification delivered message id: must be 3-998 characters of valid UTF-8 without NUL")
 	}
 	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, _ Task, now int64) error {
 		if n.State != queue.OutboxSent {
