@@ -1,6 +1,6 @@
 // Package imap 的长连接收取循环：登录后 LIST，依次补扫 INBOX 与 Junk，在 INBOX 上 IDLE（不支持或已降级时按 Poll 轮询），
 // 连接失败时按退避重连，并限制登录频率；认证失败暂停，本地处理失败在同一连接内按退避重试。
-// Junk 的失败不影响 INBOX：它排在 INBOX 之后，本轮跳过即可；连续失败到阈值后本次 Run 不再扫描它。
+// Junk 的失败不影响 INBOX：它排在 INBOX 之后，本轮跳过即可；连续失败到阈值后降级，满 relistInterval 后重新扫描。
 package imap
 
 import (
@@ -51,7 +51,8 @@ type Backoff struct {
 var (
 	// minAuthPause 是 AuthPause 的下限（官方建议认证失败后暂停 10–15 分钟），测试可在包内降低。
 	minAuthPause = 10 * time.Minute
-	// relistInterval 是同一连接上重新 LIST 的间隔，测试可在包内降低。
+	// relistInterval 是同一连接上重新 LIST 的间隔，也是 Junk 降级的恢复窗口（见 junkRetryAt）：
+	// 改它会同时改变两者的节奏。测试可在包内降低。
 	relistInterval = time.Hour
 	// junkFailLimit 是 Junk 连续失败多少次后在 junkRetryAt 之前不再扫描它，也是一轮 Junk 补扫中允许的本地失败次数上限，
 	// 测试可在包内降低。INBOX 没有这个上限：它按契约在同一连接上无限重试。

@@ -791,7 +791,7 @@ func assertInboxFirst(t *testing.T, fs *fakeServer) {
 }
 
 // TestWatcherDegradesJunkAfterRepeatedFailures 覆盖 Junk 持续失败时的降级：每轮先补扫 INBOX 再补扫 Junk，
-// Junk 连续失败 junkFailLimit 次后在本次 Run 内跳过它并发出一次 folder_disabled，INBOX 的新邮件照常交付。
+// Junk 连续失败 junkFailLimit 次后在降级窗口内跳过它并发出一次 folder_disabled，INBOX 的新邮件照常交付。
 // 三种持续失败各一例：服务器以带标签 BAD 拒绝 EXAMINE（连接仍可用）、无标签 BAD 使 EXAMINE 超时（连接被关闭）、
 // Junk 批次的 Handle 一直失败（本地失败，同一连接内重试有上限）。第四例是反面：会自行消失的连接层失败不触发降级。
 func TestWatcherDegradesJunkAfterRepeatedFailures(t *testing.T) {
@@ -918,9 +918,9 @@ func TestWatcherDegradesJunkAfterRepeatedFailures(t *testing.T) {
 	})
 }
 
-// TestWatcherRetriesJunkAfterRelist 覆盖降级的解除：Junk 的 EXAMINE 先被持续拒绝而降级，故障消失后，
+// TestWatcherRetriesJunkAfterRetryWindow 覆盖降级的解除：Junk 的 EXAMINE 先被持续拒绝而降级，故障消失后，
 // 距降级满 relistInterval 即恢复补扫并交付；期间不重新登录。
-func TestWatcherRetriesJunkAfterRelist(t *testing.T) {
+func TestWatcherRetriesJunkAfterRetryWindow(t *testing.T) {
 	// 闸门要长于攒满 junkFailLimit 次失败所需的时间，否则降级还没发生就被解除。
 	setVar(t, &relistInterval, 800*time.Millisecond)
 	fs := newFakeServer(t, proxyOptions{})
