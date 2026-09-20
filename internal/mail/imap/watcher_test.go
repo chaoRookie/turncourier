@@ -918,6 +918,29 @@ func TestWatcherDegradesJunkAfterRepeatedFailures(t *testing.T) {
 	})
 }
 
+// TestWatcherRetriesJunkAfterRelist 覆盖降级的解除：Junk 的 EXAMINE 先被持续拒绝而降级，故障消失后，
+// 同一连接上的下一次重新 LIST 解除降级，Junk 重新被补扫并交付；期间不重新登录。
+func TestWatcherRetriesJunkAfterRelist(t *testing.T) {
+	// 重新 LIST 的间隔要长于攒满 junkFailLimit 次失败所需的时间，否则降级还没发生就被复位。
+	setVar(t, &relistInterval, 800*time.Millisecond)
+	fs := newFakeServer(t, proxyOptions{})
+	fs.appendMessage(FolderInbox, testMessage(1, 100))
+	fs.appendMessage(FolderJunk, testMessage(1, 100))
+	fs.addRule(&rule{command: "EXAMINE", contains: FolderJunk, kind: faultRejectBAD})
+	tm := testTimeouts()
+	tm.IdleMax = 50 * time.Millisecond
+	h := newHarness(t, fs, tm, testBackoff())
+	h.start()
+	h.waitDelivered(FolderInbox, 1)
+	h.waitStatus(StatusFolderDisabled, 1)
+	fs.clearRules()
+	h.waitDelivered(FolderJunk, 1)
+	h.stop()
+	if n := fs.count("LOGIN"); n != 1 {
+		t.Errorf("LOGIN count = %d, want 1; the retry must stay on the same connection", n)
+	}
+}
+
 // TestWatcherRelists 覆盖同一连接上定期重新 LIST：间隔在测试中降低后，LIST 次数增加而没有重新登录。
 func TestWatcherRelists(t *testing.T) {
 	setVar(t, &relistInterval, 200*time.Millisecond)

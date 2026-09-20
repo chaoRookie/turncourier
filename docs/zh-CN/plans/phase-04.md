@@ -2132,6 +2132,8 @@ git diff --check
 
 验证（复查后重跑）：`make check`（含中文注释检查、`-race`、staticcheck 与覆盖率门槛，总覆盖率 93.5160%）、`GOOS=windows go vet ./...`、`GOOS=linux go vet ./...`、`CGO_ENABLED=0 go test -count=1 ./...`、`make secrets`、`git diff --check` 均通过。另跑了两处针对性验证：`go test -race -count=3` 跑 `TestWatcherDelivers`、`TestWatcherJunkFolder` 与 `TestWatcherDegradesJunkAfterRepeatedFailures`，以及上述四个变异各自被对应用例杀死。本次未运行的项如实记录：没有以 `-tags live` 运行 `tests/live` 的真机探测。本次修正不涉及钥匙串与网络：没有读写、创建或删除任何真实钥匙串条目，没有登录真实邮箱、连接 `imap.qq.com` 或 `smtp.qq.com`、发信；测试只在 macOS 上运行，Linux 上的测试由 CI 运行。
 
+**第二轮复查后修正：** ① RECHECK2-1（minor）：上一轮只排除了连接层失败（`ErrClosed`），`junkOff` 仍然没有复位路径，超时或暂时性的 `NO [UNAVAILABLE]` 累计三次后，本次 Run 余下时间照样永久停扫 Junk，被误判为垃圾邮件的回复会被静默丢弃。现改为在同一连接上定期重新 LIST 时清零 `junkFails` 与 `junkOff`（`watcher.go` 的 relist 分支），恢复上限为 `relistInterval`（1 小时）；登录后的首次 LIST 不复位，避免「Junk 的失败拆掉连接、重连后再试」形成重连风暴——把复位放进 `list()` 时 `untagged BAD` 子用例立即失败，因为每次重连都会清零计数、永远达不到降级。新增 `TestWatcherRetriesJunkAfterRelist`：Junk 的 EXAMINE 先被持续拒绝而降级，故障消失后下一次重新 LIST 解除降级、Junk 被交付且不重新登录；`-race -count=3` 稳定，去掉复位一行的变异使它失败（等待 Junk 交付超时）。② RECHECK2-2（nit）：覆盖率逐次运行会变（同一机器上先后测得 93.4426%、93.5095%、93.5160%、93.5225%），因此本清单不再把它当作确定值记录：门槛是 `covercheck` 的 80%，实测约 93.5%，具体数字以每次 `make check` 的输出为准。
+
 - [ ] **Step 3：提交 PR。** 推送 `feat/phase-04a-mail` 并开 PR 前，须由维护者在当次对话中确认（对外发布动作的既有规则）。等待 `quality (ubuntu-24.04)`、`quality (macos-15)`、`security` 三项检查通过，记录 CI 耗时。经维护者确认后，在该分支上手动触发 Candidate build（`gh workflow run build.yml --ref feat/phase-04a-mail`），确认 arm64 runner 以 `CGO_ENABLED=0` 交叉编译 amd64 成功，结果写入验证记录。
 - [ ] **Step 4：合并与记录。** 按维护者选择的方式合并；在本文件末尾追加「4a 验证记录」（本地、审查、远端分开记录，未运行的项写明原因）；更新 `HANDOFF.md`：基线提交、`go version -m` 的新期望（链接配置、存储与 x/term，不链接邮件依赖）、下一步为 L1 真机探测、「待维护者确认」各项的状态。
 
