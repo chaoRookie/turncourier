@@ -257,6 +257,12 @@ func (s *session) Data(r io.Reader) error {
 	s.b.dataEntered.fire()
 	if s.b.dataStall {
 		<-s.b.release.ch
+		// 放行后读走剩余 DATA：客户端已关闭连接时这里读到错误，用它证明连接确实被关闭。
+		// 不用「服务端会话是否结束」判断：那取决于内核缓冲大小与 RST 的时机，各平台不同。
+		if _, err := io.ReadAll(r); err != nil {
+			s.b.connClosed.fire()
+			return err
+		}
 		return reject(451, enhancedFor(451))
 	}
 	data, err := readPaced(r, s.b.dataPace)
@@ -270,6 +276,9 @@ func (s *session) Data(r io.Reader) error {
 	}
 	s.b.dataRead.fire()
 	if s.b.dataBlock {
+		// 先等用例放行再看连接是否关闭：直接读裸连接判断关闭在各平台的返回时机不同，
+		// 服务器可能抢在客户端取消之前发出 451，用例就看不到本要验证的「提交阶段被取消」。
+		<-s.b.release.ch
 		s.waitClosed()
 		return reject(451, enhancedFor(451))
 	}
@@ -852,6 +861,7 @@ func TestSendUncertainWhenSubmissionStalls(t *testing.T) {
 	if got := b.snapshot(); !bytes.Equal(got.data, msg) {
 		t.Errorf("DATA = %q, want %q", got.data, msg)
 	}
+	b.release.fire()
 	b.connClosed.wait(t, "the client to close the connection")
 }
 
@@ -865,9 +875,9 @@ func TestSendBodyWriteStall(t *testing.T) {
 	elapsed, err := sendTimed(context.Background(), cfg, testEnvelope(), bigMessage(MaxMessageSize))
 	checkTimedOut(t, err, ErrNotSent, "body", elapsed)
 	b.dataEntered.wait(t, "the server to send 354")
-	// 放行后，服务端丢弃剩余 DATA 时读到连接已关闭，随即结束会话；连接若仍打开，它会一直等待结束标记。
+	// 放行后服务端读走剩余 DATA，读到错误即说明客户端已关闭连接；连接若仍打开，它会一直等待结束标记。
 	b.release.fire()
-	b.ended.wait(t, "the session to end after the client closed the connection")
+	b.connClosed.wait(t, "the client to close the connection")
 }
 
 // TestSendSlowReaderWithinChunkDeadlines 验证 Command 期限按 64 KiB 分块计时：服务器慢速但持续读取，
@@ -875,9 +885,11 @@ func TestSendBodyWriteStall(t *testing.T) {
 func TestSendSlowReaderWithinChunkDeadlines(t *testing.T) {
 	serverTLS, pool := testCerts(t)
 	b := newBackend()
-	b.dataPace = 10 * time.Millisecond
+	// 每次读取至多 64 KiB 停顿一次，而实际读到的字节数取决于内核缓冲：同一块正文在不同平台上的停顿次数不同。
+	// 因此把停顿取小、期限取大，使一块（64 KiB）无论分几次读完都远在 Command 之内，而整封正文远超它。
+	b.dataPace = 2 * time.Millisecond
 	lis := startServer(t, b, serverTLS, serverOptions{readBuffer: 4096})
-	cfg := testConfig(lis, pool, Timeouts{Command: 200 * time.Millisecond, Submission: 10 * time.Second})
+	cfg := testConfig(lis, pool, Timeouts{Command: time.Second, Submission: 10 * time.Second})
 	msg := bigMessage(MaxMessageSize)
 	if _, err := Send(context.Background(), cfg, testPassword, testEnvelope(), msg); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -1163,6 +1175,7 @@ func TestSendCanceled(t *testing.T) {
 			if elapsed > 2*time.Second {
 				t.Errorf("Send took %v", elapsed)
 			}
+			b.release.fire()
 			b.connClosed.wait(t, "the client to close the connection")
 			b.ended.wait(t, "the session to end")
 		})
