@@ -243,6 +243,8 @@ func (s *session) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 	s.b.mu.Unlock()
 	if s.b.rcptBlock {
 		s.b.rcptEntered.fire()
+		// 与 dataBlock 同理：先等用例放行再看连接是否关闭，否则服务器可能抢在客户端取消之前发出 451。
+		<-s.b.release.ch
 		s.waitClosed()
 		return reject(451, enhancedFor(451))
 	}
@@ -873,14 +875,15 @@ func TestSendBodyWriteStall(t *testing.T) {
 	b := newBackend()
 	b.dataStall = true
 	// 接收缓冲压到 4 KiB，使正文一定写不完：服务器不读时内核缓冲会满，客户端在写正文时阻塞。
-	lis := startServer(t, b, serverTLS, serverOptions{readBuffer: 4096, record: true})
+	lis := startServer(t, b, serverTLS, serverOptions{readBuffer: 4096})
 	cfg := testConfig(lis, pool, Timeouts{Command: 200 * time.Millisecond, Submission: 10 * time.Second})
 	elapsed, err := sendTimed(context.Background(), cfg, testEnvelope(), bigMessage(MaxMessageSize))
 	checkTimedOut(t, err, ErrNotSent, "body", elapsed)
 	b.dataEntered.wait(t, "the server to send 354")
-	// 放行后服务端拒绝本封并继续读下一条命令，此时读到连接已结束，记录器发出信号；连接若仍打开，它会一直等待。
 	b.release.fire()
-	lis.rec.eof.wait(t, "the client to close the connection")
+	// 这里不断言服务端观察到连接关闭：客户端在 DATA 中途关闭时，缓冲中还压着几 MiB 未读数据，
+	// 服务端看到的是 EOF、读错误还是 RST 各平台不同（曾只在 macOS 上成立）。
+	// 「超时即关闭连接」由 TestSendCanceled 在服务端可靠观察到的时点断言。
 }
 
 // TestSendSlowReaderWithinChunkDeadlines 验证 Command 期限按 64 KiB 分块计时：每块写入都慢但都在期限内，
