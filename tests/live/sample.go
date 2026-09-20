@@ -25,7 +25,7 @@ import (
 )
 
 // Schema 是样本与状态文件的格式标识。
-const Schema = "turncourier-l1/2"
+const Schema = "turncourier-l1/3"
 
 const (
 	// ProbeHeader 是探测邮件自带的标识头，用来在「已发送」与抄送副本中找回同一封邮件。
@@ -211,15 +211,16 @@ type Notification struct {
 
 // IdleCheck 是预检或 FETCH 检查会话中一次 10 秒 Idle 的原始观测值。
 type IdleCheck struct {
-	Messages0        uint32        `json:"messages_before"`
-	Messages1        uint32        `json:"messages_after"`
-	UIDNext0         uint32        `json:"uidnext_before"`
-	UIDNext1         uint32        `json:"uidnext_after"`
-	NewMail          bool          `json:"new_mail"`
-	Returned         bool          `json:"returned"`
-	DeadlineExceeded bool          `json:"deadline_exceeded"`
-	Elapsed          time.Duration `json:"elapsed_ms"`
-	RoundTrip        time.Duration `json:"round_trip_ms"`
+	Messages0        uint32 `json:"messages_before"`
+	Messages1        uint32 `json:"messages_after"`
+	UIDNext0         uint32 `json:"uidnext_before"`
+	UIDNext1         uint32 `json:"uidnext_after"`
+	NewMail          bool   `json:"new_mail"`
+	Returned         bool   `json:"returned"`
+	DeadlineExceeded bool   `json:"deadline_exceeded"`
+	// Elapsed 与 RoundTrip 是 time.Duration，JSON 编码为纳秒，字段名因此用 _ns；schema/2 中误名为 _ms。
+	Elapsed   time.Duration `json:"elapsed_ns"`
+	RoundTrip time.Duration `json:"round_trip_ns"`
 }
 
 var (

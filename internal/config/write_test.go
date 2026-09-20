@@ -59,7 +59,7 @@ func TestRenderLoadRoundTrip(t *testing.T) {
 		if cfg.Mailbox != wantMailbox || cfg.Recipient.Address != draft.RecipientAddress || !slices.Equal(cfg.Recipient.AllowedSenders, draft.AllowedSenders) {
 			t.Errorf("草稿 %d: Load = %+v; want %+v", i, cfg, draft)
 		}
-		if !slices.Equal(cfg.Notify.Events, defaultNotifyEvents) || cfg.Security.TokenTTL != 168*time.Hour {
+		if !slices.Equal(cfg.Notify.Events, defaultNotifyEvents) || cfg.Security.TokenTTL != 72*time.Hour {
 			t.Errorf("草稿 %d: 通知事件或令牌有效期不是默认值: %+v", i, cfg)
 		}
 	}

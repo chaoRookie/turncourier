@@ -407,7 +407,7 @@ func ResolvePaths(getenv func(string) string, userConfigDir func() (string, erro
 func Load(paths Paths, getenv func(string) string) (Config, error)
 ```
 
-默认值：`imap_host = imap.qq.com`、`imap_port = 993`、`smtp_host = smtp.qq.com`、`smtp_port = 465`、`events = [waiting_input, failed, turn_completed]`、`token_ttl = 168h`。
+默认值：`imap_host = imap.qq.com`、`imap_port = 993`、`smtp_host = smtp.qq.com`、`smtp_port = 465`、`events = [waiting_input, failed, turn_completed]`、`token_ttl = 168h`（Phase 4 的 D4 定稿后改为 `72h`，见 `phase-04.md`）。
 
 - [x] **Step 1：写失败的测试（`paths_test.go`）。**
   - 未设置环境变量、`userConfigDir` 返回 `/home/u/.config` → `ConfigFile=/home/u/.config/TurnCourier/turncourier.toml`，`DataDir=/home/u/.config/TurnCourier`，`Database=.../turncourier.db`；

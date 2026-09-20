@@ -21,4 +21,4 @@ events = ["waiting_input", "failed", "turn_completed"]
 
 [security]
 # 回复令牌有效期，1h 到 720h
-token_ttl = "168h"
+token_ttl = "72h"

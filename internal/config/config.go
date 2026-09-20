@@ -67,7 +67,7 @@ const (
 	defaultSMTPHost = "smtp.qq.com"
 	defaultSMTPPort = 465
 	// defaultTokenTTL 是未配置时的回复令牌有效期。
-	defaultTokenTTL = 168 * time.Hour
+	defaultTokenTTL = 72 * time.Hour
 )
 
 // defaultNotifyEvents 是未配置 notify.events 时的默认通知事件。
@@ -376,7 +376,7 @@ func resolveEvents(fileEvents *[]string, env string) ([]string, []error) {
 	return events, problems
 }
 
-// resolveTokenTTL 解析回复令牌有效期，缺省 168h，允许范围 1h 到 720h。
+// resolveTokenTTL 解析回复令牌有效期，缺省 72h，允许范围 1h 到 720h。
 func resolveTokenTTL(raw *string) (time.Duration, error) {
 	if raw == nil {
 		return defaultTokenTTL, nil
