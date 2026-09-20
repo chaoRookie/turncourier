@@ -1200,6 +1200,29 @@ func TestSendCanceledDuringBody(t *testing.T) {
 	b.ended.wait(t, "the session to end")
 }
 
+// TestSendBodyTimedOut 验证写正文的步骤超时时分类为 ErrNotSent：与 ctx 结束同理，看门狗的计时器到期也会关闭连接，
+// 而仍在库的 4 KiB 缓冲里的写入照样返回 nil，失败要到提交阶段才暴露。若提交一步之前只检查 ctx，
+// 这种确定未投递（结束标记从未写出）会被误判为 ErrUncertain。
+func TestSendBodyTimedOut(t *testing.T) {
+	serverTLS, pool := testCerts(t)
+	b := newBackend()
+	lis := startServer(t, b, serverTLS, serverOptions{})
+	original := writeChunk
+	t.Cleanup(func() { writeChunk = original })
+	writeChunk = func(data *gosmtp.DataCommand, p []byte) (int, error) {
+		// 等到写正文这一步的计时器到期、看门狗关闭了连接，写入仍落进缓冲并返回 nil。
+		b.connClosed.wait(t, "the watchdog timer to close the connection during the body")
+		return original(data, p)
+	}
+	cfg := testConfig(lis, pool, Timeouts{Command: 300 * time.Millisecond, Submission: 10 * time.Second})
+	elapsed, err := sendTimed(context.Background(), cfg, testEnvelope(), testMessage())
+	checkTimedOut(t, err, ErrNotSent, "body", elapsed)
+	if b.dataRead.fired() {
+		t.Error("the server received the end-of-data marker; the message could have been accepted")
+	}
+	b.ended.wait(t, "the session to end")
+}
+
 // TestWatchdogHalt 验证 halt 返回时看门狗的 goroutine 已退出，之后 ctx 结束也不会再关闭连接。
 func TestWatchdogHalt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

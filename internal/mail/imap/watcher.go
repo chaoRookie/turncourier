@@ -107,8 +107,9 @@ type Watcher struct {
 // 再发出一次；重连不重置这一结论，Junk 一直缺失时不会每次重连都重复发出。
 //
 // INBOX 排在 Junk 之前，Junk 的任何失败都不影响本次连接已交付的 INBOX 新邮件。Junk 本轮补扫失败（EXAMINE 被拒绝、
-// 命令失败或超时、连续 junkFailLimit 次本地处理失败）时只发出 folder_unavailable 并跳过本轮，不因此断开连接；
+// 命令失败或超时、本轮累计 junkFailLimit 次本地处理失败）时只发出 folder_unavailable 并跳过本轮，不因此断开连接；
 // 连续失败达到 junkFailLimit 次后发出一次 folder_disabled，本次 Run 余下时间不再扫描 Junk，成功一次即清零计数。
+// 连接层失败（ErrClosed）不计入这个次数：它与 Junk 是否可用无关，重连后 Junk 照常补扫。
 // INBOX 的失败仍按原有方式处理：命令失败关闭连接并重连，本地处理失败在同一连接内按退避无限重试。
 //
 // 退避只在连接自登录起保持健康达到 IdleMax、或一次 IDLE 正常结束后复位；补扫成功不复位。每次等待取退避与登录频率限制
@@ -248,7 +249,9 @@ func (r *runner) list(ctx context.Context, s *Session) error {
 // drainJunk 在 INBOX 之后补扫 Junk（调用方已确认 Junk 存在且本次 Run 未降级）。本轮失败只发出 folder_unavailable
 // 并跳过本轮，不把错误交给 serve，因此不会拆掉本次连接；连接确实已断开时，紧接着重新 EXAMINE INBOX 就会发现并按原有方式重连。
 // 连续失败达到 junkFailLimit 次后发出一次 folder_disabled，本次 Run 余下时间不再扫描 Junk；成功一次即清零计数。
-// 只有 ctx 结束时才返回错误。
+// 连接层失败（ErrClosed）不算 Junk 的失败：它与 Junk 是否可用无关，重连后 Junk 照常补扫，否则几次恰好落在补扫 Junk
+// 窗口内的断连就会让本次 Run 余下时间再也不扫描 Junk，而 junkOff 没有复位路径。这类失败也不发 folder_unavailable，
+// 由紧随其后的 Examine(INBOX) 触发原有的重连与 disconnected 状态。只有 ctx 结束时才返回错误。
 func (r *runner) drainJunk(ctx context.Context, s *Session) error {
 	// INBOX 补扫期间到达的 EXISTS 留在通道里，而 Junk 的 Scan 会在 EXAMINE 之前排空它。补扫结束后放回这个信号，
 	// wait 才能立即回到 INBOX 再补扫一轮，INBOX 的新邮件不必等到 IdleMax。
@@ -262,6 +265,8 @@ func (r *runner) drainJunk(ctx context.Context, s *Session) error {
 		return nil
 	case ctx.Err() != nil:
 		return err
+	case errors.Is(err, ErrClosed):
+		return nil
 	}
 	r.junkFails++
 	r.emit(Status{Kind: StatusFolderUnavailable, Folder: FolderJunk})
@@ -274,7 +279,8 @@ func (r *runner) drainJunk(ctx context.Context, s *Session) error {
 
 // drain 以持久化的游标反复补扫 folder，把有内容或游标有变化的批次交给 Handle，直到 More 为 false。
 // Cursor 或 Handle 失败时发出 handle_failed，按退避等待后在同一连接上重新补扫；Scan 的错误原样返回。
-// maxLocal 是本轮允许的连续本地失败次数，达到即返回最后一个错误；0 表示不限，INBOX 按契约取 0。
+// maxLocal 是本轮允许的本地失败次数（本次调用内累计，成功不清零，只复位退避），达到即返回最后一个错误；
+// 0 表示不限，INBOX 按契约取 0。
 func (r *runner) drain(ctx context.Context, s *Session, folder string, maxLocal int) error {
 	local := 0
 	for {

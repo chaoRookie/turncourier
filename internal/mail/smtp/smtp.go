@@ -179,10 +179,14 @@ func Send(ctx context.Context, cfg Config, password string, env Envelope, msg []
 			return Result{}, w.fail(ErrNotSent, "body", err)
 		}
 	}
-	// 写正文的分块经库的 4 KiB 缓冲，小邮件或末尾数据仍在缓冲里时，看门狗因 ctx 结束关闭连接后这些写入照样返回 nil，
-	// 失败要到提交阶段才暴露。ctx 已结束就在这里返回：结束标记一定尚未写出，服务器不可能已接受，分类与 Send 的契约一致。
+	// 写正文的分块经库的 4 KiB 缓冲，小邮件或末尾数据仍在缓冲里时，看门狗关闭连接后这些写入照样返回 nil，
+	// 失败要到提交阶段才暴露。看门狗关闭连接的两个原因（ctx 结束、某一步的计时器到期）在这里都要拦：结束标记一定尚未
+	// 写出，服务器不可能已接受，分类与 Send 的契约一致。计时器到期的错误文本与 fail 的超时分类一致。
 	if err := ctx.Err(); err != nil {
 		return Result{}, fmt.Errorf("%w: body: %w", ErrNotSent, err)
+	}
+	if w.expired.Load() {
+		return Result{}, fmt.Errorf("%w: body timed out", ErrNotSent)
 	}
 	// 提交阶段：从这里起连接中断都可能发生在服务器接受之后，只能报告结果不确定。
 	var resp *gosmtp.DataResponse

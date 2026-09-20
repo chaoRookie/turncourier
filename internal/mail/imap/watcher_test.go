@@ -179,6 +179,8 @@ func TestWatcherDelivers(t *testing.T) {
 	h := newHarness(t, fs, tm, testBackoff())
 	h.start()
 	h.waitDelivered(FolderInbox, 3)
+	// Junk 排在 INBOX 之后，等到 INBOX 的最后一封并不意味着 Junk 的批次已经入列，必须单独等它。
+	h.waitDelivered(FolderJunk, 1)
 	h.mu.Lock()
 	first := slices.Clone(h.batches)
 	h.mu.Unlock()
@@ -791,7 +793,7 @@ func assertInboxFirst(t *testing.T, fs *fakeServer) {
 // TestWatcherDegradesJunkAfterRepeatedFailures 覆盖 Junk 持续失败时的降级：每轮先补扫 INBOX 再补扫 Junk，
 // Junk 连续失败 junkFailLimit 次后在本次 Run 内跳过它并发出一次 folder_disabled，INBOX 的新邮件照常交付。
 // 三种持续失败各一例：服务器以带标签 BAD 拒绝 EXAMINE（连接仍可用）、无标签 BAD 使 EXAMINE 超时（连接被关闭）、
-// Junk 批次的 Handle 一直失败（本地失败，同一连接内重试有上限）。
+// Junk 批次的 Handle 一直失败（本地失败，同一连接内重试有上限）。第四例是反面：会自行消失的连接层失败不触发降级。
 func TestWatcherDegradesJunkAfterRepeatedFailures(t *testing.T) {
 	t.Run("tagged BAD", func(t *testing.T) {
 		fs := newFakeServer(t, proxyOptions{})
@@ -888,6 +890,30 @@ func TestWatcherDegradesJunkAfterRepeatedFailures(t *testing.T) {
 		}
 		if n := fs.count("LOGIN"); n != 1 {
 			t.Errorf("LOGIN count = %d, want 1", n)
+		}
+	})
+
+	t.Run("transient disconnects", func(t *testing.T) {
+		fs := newFakeServer(t, proxyOptions{})
+		fs.appendMessage(FolderInbox, testMessage(1, 100))
+		fs.appendMessage(FolderJunk, testMessage(1, 100))
+		// 只在补扫 Junk 时断连，且只断 junkFailLimit 次：断连与 Junk 是否可用无关，故障耗尽后 Junk 必须照常被补扫。
+		fs.addRule(&rule{command: "EXAMINE", contains: FolderJunk, kind: faultDisconnect, limit: junkFailLimit})
+		tm := testTimeouts()
+		tm.IdleMax = 150 * time.Millisecond
+		h := newHarness(t, fs, tm, testBackoff())
+		h.start()
+		h.waitDelivered(FolderInbox, 1)
+		h.waitDelivered(FolderJunk, 1)
+		h.stop()
+		if n := len(h.statusesOf(StatusDisconnected)); n != junkFailLimit {
+			t.Errorf("disconnected count = %d, want %d; the faults must be connection-layer failures", n, junkFailLimit)
+		}
+		if n := len(h.statusesOf(StatusFolderDisabled)); n != 0 {
+			t.Errorf("folder_disabled count = %d, want 0; a dropped connection is not a Junk failure", n)
+		}
+		if n := len(h.statusesOf(StatusFolderUnavailable)); n != 0 {
+			t.Errorf("folder_unavailable count = %d, want 0", n)
 		}
 	})
 }
