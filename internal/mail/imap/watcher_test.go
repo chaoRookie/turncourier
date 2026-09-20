@@ -1,5 +1,6 @@
 // Package imap 用离线假服务器验证长连接收取循环：交付与游标、处理失败时同一连接内重试、断开与半开后的退避重连与复位、
-// 只在 IDLE 阶段出现的故障下登录间隔增长与登录频率上限、IDLE 降级为轮询、认证失败暂停、凭据不可用、Junk 缺失与暂时不可用、取消。
+// 只在 IDLE 阶段出现的故障下登录间隔增长与登录频率上限、IDLE 降级为轮询、认证失败暂停、凭据不可用、
+// Junk 缺失与暂时不可用、Junk 连续失败后降级而 INBOX 照常收信、取消。
 package imap
 
 import (
@@ -166,7 +167,7 @@ func assertNear(t *testing.T, d, want time.Duration, what string) {
 	}
 }
 
-// TestWatcherDelivers 覆盖正常收取：依次交付 Junk 与 INBOX 的批次，IDLE 期间放入的邮件在 1 秒内交付，每封只交付一次。
+// TestWatcherDelivers 覆盖正常收取：依次交付 INBOX 与 Junk 的批次，IDLE 期间放入的邮件在 1 秒内交付，每封只交付一次。
 func TestWatcherDelivers(t *testing.T) {
 	fs := newFakeServer(t, proxyOptions{})
 	fs.appendMessage(FolderJunk, testMessage(1, 100))
@@ -181,7 +182,7 @@ func TestWatcherDelivers(t *testing.T) {
 	h.mu.Lock()
 	first := slices.Clone(h.batches)
 	h.mu.Unlock()
-	if len(first) != 2 || first[0].Folder != FolderJunk || first[1].Folder != FolderInbox || !slices.Equal(uids(first[1]), []uint32{1, 2, 3}) {
+	if len(first) != 2 || first[0].Folder != FolderInbox || first[1].Folder != FolderJunk || !slices.Equal(uids(first[0]), []uint32{1, 2, 3}) {
 		t.Fatalf("first batches = %+v", first)
 	}
 	waitFor(t, "IDLE", func() bool { return fs.count("IDLE") == 1 })
@@ -759,6 +760,136 @@ func TestWatcherJunkFolder(t *testing.T) {
 			t.Errorf("folder_missing folder = %q", s.Folder)
 		}
 	}
+}
+
+// examineCount 返回代理记录的、对 folder 发出的 EXAMINE 次数。
+func examineCount(fs *fakeServer, folder string) int {
+	n := 0
+	for _, cmd := range fs.commands() {
+		if cmd.Name == "EXAMINE" && strings.Contains(cmd.Args, folder) {
+			n++
+		}
+	}
+	return n
+}
+
+// assertInboxFirst 断言本次运行中第一条 EXAMINE 是对 INBOX 发出的：INBOX 先补扫，Junk 的失败才不会连累本轮 INBOX 的交付。
+func assertInboxFirst(t *testing.T, fs *fakeServer) {
+	t.Helper()
+	for _, cmd := range fs.commands() {
+		if cmd.Name != "EXAMINE" {
+			continue
+		}
+		if !strings.Contains(cmd.Args, FolderInbox) {
+			t.Errorf("first EXAMINE was %q, want INBOX before Junk", cmd.Args)
+		}
+		return
+	}
+	t.Error("no EXAMINE was sent")
+}
+
+// TestWatcherDegradesJunkAfterRepeatedFailures 覆盖 Junk 持续失败时的降级：每轮先补扫 INBOX 再补扫 Junk，
+// Junk 连续失败 junkFailLimit 次后在本次 Run 内跳过它并发出一次 folder_disabled，INBOX 的新邮件照常交付。
+// 三种持续失败各一例：服务器以带标签 BAD 拒绝 EXAMINE（连接仍可用）、无标签 BAD 使 EXAMINE 超时（连接被关闭）、
+// Junk 批次的 Handle 一直失败（本地失败，同一连接内重试有上限）。
+func TestWatcherDegradesJunkAfterRepeatedFailures(t *testing.T) {
+	t.Run("tagged BAD", func(t *testing.T) {
+		fs := newFakeServer(t, proxyOptions{})
+		fs.appendMessage(FolderInbox, testMessage(1, 100))
+		fs.addRule(&rule{command: "EXAMINE", contains: FolderJunk, kind: faultRejectBAD})
+		tm := testTimeouts()
+		tm.IdleMax = 150 * time.Millisecond
+		h := newHarness(t, fs, tm, testBackoff())
+		h.start()
+		h.waitDelivered(FolderInbox, 1)
+		h.waitStatus(StatusFolderDisabled, 1)
+		fs.appendMessage(FolderInbox, testMessage(2, 100))
+		h.waitDelivered(FolderInbox, 2)
+		h.stop()
+		assertInboxFirst(t, fs)
+		if n := examineCount(fs, FolderJunk); n != junkFailLimit {
+			t.Errorf("EXAMINE Junk count = %d, want %d; Junk must not be examined after the degradation", n, junkFailLimit)
+		}
+		if n := len(h.statusesOf(StatusFolderUnavailable)); n != junkFailLimit {
+			t.Errorf("folder_unavailable count = %d, want %d", n, junkFailLimit)
+		}
+		if n := fs.count("LOGIN"); n != 1 {
+			t.Errorf("LOGIN count = %d, want 1; a rejected Junk must not tear the connection down", n)
+		}
+		if n := len(h.statusesOf(StatusDisconnected)); n != 0 {
+			t.Errorf("disconnected %d times", n)
+		}
+		for _, s := range h.statusesOf(StatusFolderDisabled) {
+			if s.Folder != FolderJunk {
+				t.Errorf("folder_disabled folder = %q", s.Folder)
+			}
+		}
+	})
+
+	t.Run("untagged BAD", func(t *testing.T) {
+		fs := newFakeServer(t, proxyOptions{})
+		fs.appendMessage(FolderInbox, testMessage(1, 100))
+		fs.addRule(&rule{command: "EXAMINE", contains: FolderJunk, kind: faultBAD})
+		h := newHarness(t, fs, testTimeouts(), testBackoff())
+		h.start()
+		h.waitDelivered(FolderInbox, 1)
+		// Junk 的 EXAMINE 要到 Command 期限才超时，此时本轮 INBOX 早已交付，仍是第一条连接。
+		if n := fs.count("LOGIN"); n != 1 {
+			t.Errorf("LOGIN count at the first INBOX delivery = %d, want 1; INBOX must be drained before Junk", n)
+		}
+		h.waitStatus(StatusFolderDisabled, 1)
+		// 降级前每次 Junk 超时都关闭连接，降级后连接稳定：新邮件在同一连接上交付，不再登录，也不再碰 Junk。
+		fs.appendMessage(FolderInbox, testMessage(2, 100))
+		h.waitDelivered(FolderInbox, 2)
+		logins, examines := fs.count("LOGIN"), examineCount(fs, FolderJunk)
+		fs.appendMessage(FolderInbox, testMessage(3, 100))
+		h.waitDelivered(FolderInbox, 3)
+		h.stop()
+		assertInboxFirst(t, fs)
+		if examines != junkFailLimit {
+			t.Errorf("EXAMINE Junk count = %d, want %d", examines, junkFailLimit)
+		}
+		if n := examineCount(fs, FolderJunk); n != examines {
+			t.Errorf("EXAMINE Junk count grew to %d after the degradation", n)
+		}
+		if n := fs.count("LOGIN"); n != logins {
+			t.Errorf("LOGIN count grew from %d to %d after the degradation", logins, n)
+		}
+		if got := h.delivered(FolderInbox); !slices.Equal(got, []uint32{1, 2, 3}) {
+			t.Errorf("INBOX deliveries = %v, want each message once", got)
+		}
+	})
+
+	t.Run("handle keeps failing", func(t *testing.T) {
+		fs := newFakeServer(t, proxyOptions{})
+		fs.appendMessage(FolderJunk, testMessage(1, 100))
+		fs.appendMessage(FolderInbox, testMessage(1, 100))
+		b := testBackoff()
+		b.Initial, b.Max = 20*time.Millisecond, 40*time.Millisecond
+		h := newHarness(t, fs, testTimeouts(), b)
+		h.failFolder, h.failNext = FolderJunk, 1000
+		h.start()
+		h.waitDelivered(FolderInbox, 1)
+		h.waitStatus(StatusFolderDisabled, 1)
+		fs.appendMessage(FolderInbox, testMessage(2, 100))
+		h.waitDelivered(FolderInbox, 2)
+		h.stop()
+		// 每轮至多 junkFailLimit 次本地失败：前 junkFailLimit-1 次发出 handle_failed 并在同一连接内重试，最后一次结束本轮。
+		if n, want := len(h.statusesOf(StatusHandleFailed)), junkFailLimit*(junkFailLimit-1); n != want {
+			t.Errorf("handle_failed count = %d, want %d", n, want)
+		}
+		if n := len(h.statusesOf(StatusFolderUnavailable)); n != junkFailLimit {
+			t.Errorf("folder_unavailable count = %d, want %d", n, junkFailLimit)
+		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if cur := h.cursors[FolderJunk]; cur != (Cursor{}) {
+			t.Errorf("Junk cursor = %+v, want no progress while Handle fails", cur)
+		}
+		if n := fs.count("LOGIN"); n != 1 {
+			t.Errorf("LOGIN count = %d, want 1", n)
+		}
+	})
 }
 
 // TestWatcherRelists 覆盖同一连接上定期重新 LIST：间隔在测试中降低后，LIST 次数增加而没有重新登录。

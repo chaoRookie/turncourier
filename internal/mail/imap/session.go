@@ -217,6 +217,8 @@ func (s *Session) login(ctx context.Context, username, password string) error {
 	if err := s.do(ctx, "login", s.t.Command, func() error {
 		return s.client.Login(username, password).Wait()
 	}); err != nil {
+		// 任何带标签的 NO 都按认证失败处理。本包不保留服务器响应文本与响应码，无法区分授权码错误与「暂时不可用」等原因；
+		// 而调用方对认证失败的处置（暂停 AuthPause 再重试）在两种原因下都安全，反过来把认证失败当作临时错误会反复登录。
 		if isNo(err) {
 			return ErrAuthFailed
 		}

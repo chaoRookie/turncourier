@@ -1169,6 +1169,37 @@ func TestSendCanceled(t *testing.T) {
 	}
 }
 
+// TestSendCanceledDuringBody 验证 ctx 在写正文期间结束时分类为 ErrNotSent：小邮件的写入还留在库的 4 KiB 缓冲里，
+// 看门狗因 ctx 结束关闭连接后这些写入仍返回 nil，失败要到提交阶段才暴露。若不在提交一步之前补一次 ctx 检查，
+// 这种确定未投递（结束标记从未写出）会被误判为 ErrUncertain，调用方将永远不再自动重发。
+func TestSendCanceledDuringBody(t *testing.T) {
+	serverTLS, pool := testCerts(t)
+	b := newBackend()
+	lis := startServer(t, b, serverTLS, serverOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	original := writeChunk
+	t.Cleanup(func() { writeChunk = original })
+	writeChunk = func(data *gosmtp.DataCommand, p []byte) (int, error) {
+		cancel()
+		// 等到看门狗真的关闭了连接，写入仍落进缓冲并返回 nil。
+		b.connClosed.wait(t, "the watchdog to close the connection during the body")
+		return original(data, p)
+	}
+	elapsed, err := sendTimed(ctx, testConfig(lis, pool, generous), testEnvelope(), testMessage())
+	checkOutcome(t, err, ErrNotSent)
+	if !errors.Is(err, context.Canceled) || !strings.HasSuffix(err.Error(), ": body: context canceled") {
+		t.Errorf("err = %v, want context.Canceled at body", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Send took %v", elapsed)
+	}
+	if b.dataRead.fired() {
+		t.Error("the server received the end-of-data marker; the message could have been accepted")
+	}
+	b.ended.wait(t, "the session to end")
+}
+
 // TestWatchdogHalt 验证 halt 返回时看门狗的 goroutine 已退出，之后 ctx 结束也不会再关闭连接。
 func TestWatchdogHalt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

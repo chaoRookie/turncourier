@@ -62,6 +62,7 @@ const (
 	faultFreeze                           // 不转发，冻结两个方向
 	faultFreezeAfter                      // 转发命令，响应转发 bytes 字节后冻结两个方向
 	faultReject                           // 不转发，回 <标签> NO [UNAVAILABLE]
+	faultRejectBAD                        // 不转发，回 <标签> BAD，模拟服务器以带标签 BAD 拒绝一条命令而连接仍可用
 	faultInject                           // 先向客户端写入 exists 中每个 N 的 * N EXISTS，再转发命令
 	faultDisconnect                       // 不转发，立即关闭两侧连接
 	faultEmpty                            // 不转发，直接回 <标签> OK，模拟服务器没有返回任何数据
@@ -499,6 +500,8 @@ func (pc *proxyConn) clientToServer() {
 				err = pc.send([]byte("* BAD Command!\r\n"))
 			case faultReject:
 				err = pc.send([]byte(tag + " NO [UNAVAILABLE] Folder is temporarily unavailable\r\n"))
+			case faultRejectBAD:
+				err = pc.send([]byte(tag + " BAD Command is not supported for this mailbox\r\n"))
 			case faultEmpty:
 				err = pc.send([]byte(tag + " OK completed\r\n"))
 			case faultFreeze:

@@ -179,6 +179,11 @@ func Send(ctx context.Context, cfg Config, password string, env Envelope, msg []
 			return Result{}, w.fail(ErrNotSent, "body", err)
 		}
 	}
+	// 写正文的分块经库的 4 KiB 缓冲，小邮件或末尾数据仍在缓冲里时，看门狗因 ctx 结束关闭连接后这些写入照样返回 nil，
+	// 失败要到提交阶段才暴露。ctx 已结束就在这里返回：结束标记一定尚未写出，服务器不可能已接受，分类与 Send 的契约一致。
+	if err := ctx.Err(); err != nil {
+		return Result{}, fmt.Errorf("%w: body: %w", ErrNotSent, err)
+	}
 	// 提交阶段：从这里起连接中断都可能发生在服务器接受之后，只能报告结果不确定。
 	var resp *gosmtp.DataResponse
 	if err := w.step(timeouts.Submission, func() (err error) {
