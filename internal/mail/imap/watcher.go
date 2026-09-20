@@ -35,7 +35,7 @@ const (
 	StatusIdleDisabled           StatusKind = "idle_disabled"           // IDLE 连续超时，本次 Run 改为轮询
 	StatusFolderMissing          StatusKind = "folder_missing"          // LIST 中没有 Junk
 	StatusFolderUnavailable      StatusKind = "folder_unavailable"      // Junk 在 LIST 中，但本轮补扫未能完成，已跳过本轮
-	StatusFolderDisabled         StatusKind = "folder_disabled"         // Junk 连续失败达到 junkFailLimit，到下次重新 LIST 前不扫描它
+	StatusFolderDisabled         StatusKind = "folder_disabled"         // Junk 连续失败达到 junkFailLimit，降级满 relistInterval 前不扫描它
 )
 
 // Backoff 是重连退避参数；零值字段使用默认值。
@@ -53,7 +53,7 @@ var (
 	minAuthPause = 10 * time.Minute
 	// relistInterval 是同一连接上重新 LIST 的间隔，测试可在包内降低。
 	relistInterval = time.Hour
-	// junkFailLimit 是 Junk 连续失败多少次后在下一次重新 LIST 之前不再扫描它，也是一轮 Junk 补扫中允许的本地失败次数上限，
+	// junkFailLimit 是 Junk 连续失败多少次后在 junkRetryAt 之前不再扫描它，也是一轮 Junk 补扫中允许的本地失败次数上限，
 	// 测试可在包内降低。INBOX 没有这个上限：它按契约在同一连接上无限重试。
 	junkFailLimit = 3
 )
@@ -108,7 +108,7 @@ type Watcher struct {
 //
 // INBOX 排在 Junk 之前，Junk 的任何失败都不影响本次连接已交付的 INBOX 新邮件。Junk 本轮补扫失败（EXAMINE 被拒绝、
 // 命令失败或超时、本轮累计 junkFailLimit 次本地处理失败）时只发出 folder_unavailable 并跳过本轮，不因此断开连接；
-// 连续失败达到 junkFailLimit 次后发出一次 folder_disabled，在下一次重新 LIST 之前不再扫描 Junk，成功一次即清零计数。
+// 连续失败达到 junkFailLimit 次后发出一次 folder_disabled，降级满 relistInterval 后才重新扫描 Junk，成功一次即清零计数。
 // 连接层失败（ErrClosed）不计入这个次数：它与 Junk 是否可用无关，重连后 Junk 照常补扫。
 // INBOX 的失败仍按原有方式处理：命令失败关闭连接并重连，本地处理失败在同一连接内按退避无限重试。
 //
@@ -168,8 +168,9 @@ type runner struct {
 	b            Backoff
 	t            Timeouts
 	junk         bool        // 上一次 LIST 是否含 Junk，初值为存在
-	junkOff      bool        // Junk 已连续失败 junkFailLimit 次，在下一次重新 LIST 之前不再扫描它
+	junkOff      bool        // Junk 已连续失败 junkFailLimit 次，在 junkRetryAt 之前不再扫描它
 	junkFails    int         // Junk 连续补扫失败的次数（跨重连累计），成功一次即清零
+	junkRetryAt  time.Time   // 降级解除的时刻：降级时置为 now+relistInterval，到点后清零计数并恢复补扫
 	idleOff      bool        // IDLE 已连续超时 2 次，本次 Run 余下时间改为轮询
 	idleTimeouts int         // Idle 连续返回 ErrTimeout 的次数
 	logins       []time.Time // 登录时刻（拨号返回时），只保留最近一个 LoginWindow 内的
@@ -209,9 +210,12 @@ func (r *runner) serve(ctx context.Context, s *Session, loginAt time.Time) error
 				return err
 			}
 			listedAt = time.Now()
-			// 同一连接上定期重新 LIST 时解除 Junk 的降级：它的失败可能是暂时的（服务器忙、NO [UNAVAILABLE]、命令超时），
-			// 否则本次 Run 余下时间再也不扫描 Junk，被误判为垃圾邮件的回复会被静默丢弃。重试至多每 relistInterval 一次；
-			// 登录后的首次 LIST 不复位，免得「Junk 的失败拆掉连接、重连后再试」形成重连风暴。
+		}
+		// 降级满 relistInterval 后解除：Junk 的失败可能是暂时的（服务器忙、NO [UNAVAILABLE]、命令超时），
+		// 否则本次 Run 余下时间再也不扫描 Junk，被误判为垃圾邮件的回复会被静默丢弃。闸门按时刻判断而不是按
+		// 「又 LIST 了一次」：重连会让本次连接的 LIST 计时从头开始，连接活不到 relistInterval 时就永远轮不到复位。
+		// 重试仍被闸门压在每 relistInterval 至多一簇（junkFailLimit 次），不会形成命令或重连风暴。
+		if r.junkOff && !time.Now().Before(r.junkRetryAt) {
 			r.junkFails, r.junkOff = 0, false
 		}
 		if err := r.drain(ctx, s, FolderInbox, 0); err != nil {
@@ -252,9 +256,9 @@ func (r *runner) list(ctx context.Context, s *Session) error {
 
 // drainJunk 在 INBOX 之后补扫 Junk（调用方已确认 Junk 存在且本次 Run 未降级）。本轮失败只发出 folder_unavailable
 // 并跳过本轮，不把错误交给 serve，因此不会拆掉本次连接；连接确实已断开时，紧接着重新 EXAMINE INBOX 就会发现并按原有方式重连。
-// 连续失败达到 junkFailLimit 次后发出一次 folder_disabled，在下一次重新 LIST 之前不再扫描 Junk；成功一次即清零计数。
+// 连续失败达到 junkFailLimit 次后发出一次 folder_disabled，降级满 relistInterval 后才重新扫描 Junk；成功一次即清零计数。
 // 连接层失败（ErrClosed）不算 Junk 的失败：它与 Junk 是否可用无关，重连后 Junk 照常补扫，否则几次恰好落在补扫 Junk
-// 窗口内的断连就会让本次 Run 余下时间再也不扫描 Junk，而 junkOff 没有复位路径。这类失败也不发 folder_unavailable，
+// 窗口内的断连就会让 Junk 被反复误判为不可用，而降级的解除要等到 junkRetryAt。这类失败也不发 folder_unavailable，
 // 由紧随其后的 Examine(INBOX) 触发原有的重连与 disconnected 状态。只有 ctx 结束时才返回错误。
 func (r *runner) drainJunk(ctx context.Context, s *Session) error {
 	// INBOX 补扫期间到达的 EXISTS 留在通道里，而 Junk 的 Scan 会在 EXAMINE 之前排空它。补扫结束后放回这个信号，
@@ -275,7 +279,7 @@ func (r *runner) drainJunk(ctx context.Context, s *Session) error {
 	r.junkFails++
 	r.emit(Status{Kind: StatusFolderUnavailable, Folder: FolderJunk})
 	if r.junkFails >= junkFailLimit {
-		r.junkOff = true
+		r.junkOff, r.junkRetryAt = true, time.Now().Add(relistInterval)
 		r.emit(Status{Kind: StatusFolderDisabled, Folder: FolderJunk})
 	}
 	return nil

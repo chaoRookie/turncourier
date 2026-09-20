@@ -919,9 +919,9 @@ func TestWatcherDegradesJunkAfterRepeatedFailures(t *testing.T) {
 }
 
 // TestWatcherRetriesJunkAfterRelist 覆盖降级的解除：Junk 的 EXAMINE 先被持续拒绝而降级，故障消失后，
-// 同一连接上的下一次重新 LIST 解除降级，Junk 重新被补扫并交付；期间不重新登录。
+// 距降级满 relistInterval 即恢复补扫并交付；期间不重新登录。
 func TestWatcherRetriesJunkAfterRelist(t *testing.T) {
-	// 重新 LIST 的间隔要长于攒满 junkFailLimit 次失败所需的时间，否则降级还没发生就被复位。
+	// 闸门要长于攒满 junkFailLimit 次失败所需的时间，否则降级还没发生就被解除。
 	setVar(t, &relistInterval, 800*time.Millisecond)
 	fs := newFakeServer(t, proxyOptions{})
 	fs.appendMessage(FolderInbox, testMessage(1, 100))
@@ -938,6 +938,54 @@ func TestWatcherRetriesJunkAfterRelist(t *testing.T) {
 	h.stop()
 	if n := fs.count("LOGIN"); n != 1 {
 		t.Errorf("LOGIN count = %d, want 1; the retry must stay on the same connection", n)
+	}
+}
+
+// TestWatcherResetsJunkBudget 覆盖解除降级时重试额度也恢复：Junk 持续不可用时，每个闸门窗口都重新失败满
+// junkFailLimit 次才再次降级；只解除 junkOff 而不清零计数的实现，第二个窗口只会失败一次就重新降级。
+func TestWatcherResetsJunkBudget(t *testing.T) {
+	setVar(t, &relistInterval, 500*time.Millisecond)
+	fs := newFakeServer(t, proxyOptions{})
+	fs.appendMessage(FolderInbox, testMessage(1, 100))
+	fs.addRule(&rule{command: "EXAMINE", contains: FolderJunk, kind: faultRejectBAD})
+	tm := testTimeouts()
+	tm.IdleMax = 50 * time.Millisecond
+	h := newHarness(t, fs, tm, testBackoff())
+	h.start()
+	h.waitDelivered(FolderInbox, 1)
+	h.waitStatus(StatusFolderDisabled, 2)
+	h.stop()
+	if n := len(h.statusesOf(StatusFolderUnavailable)); n != 2*junkFailLimit {
+		t.Errorf("folder_unavailable count = %d, want %d; each window must get a full retry budget", n, 2*junkFailLimit)
+	}
+	if n := fs.count("LOGIN"); n != 1 {
+		t.Errorf("LOGIN count = %d, want 1; a rejected Junk must not tear the connection down", n)
+	}
+}
+
+// TestWatcherRetriesJunkOnReconnectingLink 覆盖闸门按时刻而不是按「又 LIST 了一次」判断：连接不断被切断时，
+// 每条连接的 LIST 计时都从头开始，永远轮不到定期重新 LIST；降级仍须在 relistInterval 之后解除，Junk 照常交付。
+func TestWatcherRetriesJunkOnReconnectingLink(t *testing.T) {
+	setVar(t, &relistInterval, 400*time.Millisecond)
+	fs := newFakeServer(t, proxyOptions{})
+	fs.appendMessage(FolderInbox, testMessage(1, 100))
+	fs.appendMessage(FolderJunk, testMessage(1, 100))
+	// Junk 的 EXAMINE 只被拒绝 junkFailLimit 次（故障会自行消失）；IDLE 每次都被切断，使连接活不到一次重新 LIST。
+	fs.addRule(&rule{command: "EXAMINE", contains: FolderJunk, kind: faultRejectBAD, limit: junkFailLimit})
+	fs.addRule(&rule{command: "IDLE", kind: faultDisconnect})
+	tm := testTimeouts()
+	tm.IdleMax = 60 * time.Millisecond
+	b := testBackoff()
+	b.Initial, b.Max = 10*time.Millisecond, 20*time.Millisecond
+	// 本例要在闸门到期前后不断重连，登录次数远多于生产节奏，因此放宽登录频率限制（它由 TestWatcherLimitsLogins 覆盖）。
+	b.MaxLogins, b.LoginWindow = 1000, time.Second
+	h := newHarness(t, fs, tm, b)
+	h.start()
+	h.waitStatus(StatusFolderDisabled, 1)
+	h.waitDelivered(FolderJunk, 1)
+	h.stop()
+	if n := fs.count("LIST"); n != fs.count("LOGIN") {
+		t.Errorf("LIST count = %d, LOGIN count = %d; no periodic relist must happen on such short connections", n, fs.count("LOGIN"))
 	}
 }
 
