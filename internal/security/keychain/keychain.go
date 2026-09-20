@@ -52,6 +52,8 @@ const (
 	// maxOutput 是 Get 接受的标准输出字节数上限；多读 1 字节用来发现超长输出。
 	maxOutput = 4096
 	// exitItemNotFound 与 exitInteractionNotAllowed 是 security 的退出码，即对应 OSStatus 的低 8 位。
+	// 另有一个不在此列的观测值：对已存在的条目执行不带 -U 的 add-generic-password 时 security 退出 45
+	// （errSecDuplicateItem 的低 8 位，L1 第 5 步实测）。Add 先 Get 再写入，不依赖这个码，因此不单列常量。
 	exitItemNotFound          = 44
 	exitInteractionNotAllowed = 36
 	// keyCheckPrefix 是 KeyCheck 的域分隔前缀，与令牌 MAC、正文键控摘要的前缀互不为前缀。
