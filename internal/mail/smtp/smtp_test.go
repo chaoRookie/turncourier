@@ -257,9 +257,8 @@ func (s *session) Data(r io.Reader) error {
 	s.b.dataEntered.fire()
 	if s.b.dataStall {
 		<-s.b.release.ch
-		// 放行后直接读裸连接到结束：客户端已关闭时读到 EOF，用它证明连接确实被关闭。
-		// 不读 DATA 流也不看「服务端会话是否结束」：客户端中途关闭在各平台上有时报错、有时只是 EOF。
-		s.waitClosed()
+		// 放行后直接拒绝：客户端是否已关闭连接由监听器的记录器在下一次读取时观察到（见 recordingConn.Read），
+		// 不在这里读 DATA 流或裸连接——客户端中途关闭在各平台上有时报错、有时只是 EOF，时机也不同。
 		return reject(451, enhancedFor(451))
 	}
 	data, err := readPaced(r, s.b.dataPace)
@@ -873,26 +872,34 @@ func TestSendBodyWriteStall(t *testing.T) {
 	serverTLS, pool := testCerts(t)
 	b := newBackend()
 	b.dataStall = true
-	lis := startServer(t, b, serverTLS, serverOptions{readBuffer: 4096})
+	// 接收缓冲压到 4 KiB，使正文一定写不完：服务器不读时内核缓冲会满，客户端在写正文时阻塞。
+	lis := startServer(t, b, serverTLS, serverOptions{readBuffer: 4096, record: true})
 	cfg := testConfig(lis, pool, Timeouts{Command: 200 * time.Millisecond, Submission: 10 * time.Second})
 	elapsed, err := sendTimed(context.Background(), cfg, testEnvelope(), bigMessage(MaxMessageSize))
 	checkTimedOut(t, err, ErrNotSent, "body", elapsed)
 	b.dataEntered.wait(t, "the server to send 354")
-	// 放行后服务端读走剩余 DATA，读到错误即说明客户端已关闭连接；连接若仍打开，它会一直等待结束标记。
+	// 放行后服务端拒绝本封并继续读下一条命令，此时读到连接已结束，记录器发出信号；连接若仍打开，它会一直等待。
 	b.release.fire()
-	b.connClosed.wait(t, "the client to close the connection")
+	lis.rec.eof.wait(t, "the client to close the connection")
 }
 
-// TestSendSlowReaderWithinChunkDeadlines 验证 Command 期限按 64 KiB 分块计时：服务器慢速但持续读取，
-// 每块都在期限内写完而整封正文的写入远超 Command 时仍投递成功。
+// TestSendSlowReaderWithinChunkDeadlines 验证 Command 期限按 64 KiB 分块计时：每块写入都慢但都在期限内，
+// 整封正文的写入总时长远超 Command 时仍投递成功。写入的慢速由包内 writeChunk 钩子制造，不依赖内核缓冲与
+// 服务器读取节奏——那两者在各平台上相差很大，曾让本用例只在 macOS 上通过。
 func TestSendSlowReaderWithinChunkDeadlines(t *testing.T) {
 	serverTLS, pool := testCerts(t)
 	b := newBackend()
-	// 服务器每读走 64 KiB 停顿 dataPace（按字节数而不是读取次数，见 readPaced）：一块正好一次停顿，
-	// 远在 Command 之内；整封 1 MiB 共 16 块、约 16 倍停顿，远超 Command。若期限改按整封计时，本用例必然超时。
-	b.dataPace = 60 * time.Millisecond
-	lis := startServer(t, b, serverTLS, serverOptions{readBuffer: 4096})
-	cfg := testConfig(lis, pool, Timeouts{Command: 300 * time.Millisecond, Submission: 10 * time.Second})
+	lis := startServer(t, b, serverTLS, serverOptions{})
+	original := writeChunk
+	t.Cleanup(func() { writeChunk = original })
+	// 每写 64 KiB 停顿 100 ms（按字节数，不是按调用次数）：一块正好一次停顿，远在 Command（500 ms）之内；
+	// 整封 1 MiB 共 16 块，合计约 1.6 s，远超 Command。期限若改按整封计时（例如分块大小改成整封长度），
+	// 那一次写入要停顿 1.6 s，必然超时。
+	writeChunk = func(data *gosmtp.DataCommand, p []byte) (int, error) {
+		time.Sleep(time.Duration(len(p)) * 100 * time.Millisecond / (64 << 10))
+		return original(data, p)
+	}
+	cfg := testConfig(lis, pool, Timeouts{Command: 500 * time.Millisecond, Submission: 10 * time.Second})
 	msg := bigMessage(1 << 20)
 	if _, err := Send(context.Background(), cfg, testPassword, testEnvelope(), msg); err != nil {
 		t.Fatalf("Send: %v", err)
