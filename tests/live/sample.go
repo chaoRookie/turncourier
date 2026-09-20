@@ -279,6 +279,9 @@ var authPatterns = map[string]*regexp.Regexp{
 	"dmarc": regexp.MustCompile(`(?i)\bdmarc=([a-zA-Z]+)`),
 }
 
+// authValues 是 Authentication-Results 中各方法的已知结果取值（RFC 8601 第 2.7 节），其余记为 other。
+var authValues = []string{"pass", "fail", "none", "neutral", "softfail", "temperror", "permerror", "policy"}
+
 // replyPrefixes 是主题前缀白名单；前缀可以重复出现，去掉空白后只由它们组成时才原样输出。
 var replyPrefixes = []string{"回复：", "回复:", "答复：", "答复:", "转发：", "转发:", "Re:", "RE:", "re:", "Fwd:", "FW:", "Fw:"}
 
@@ -294,13 +297,42 @@ type bodies struct {
 	html  string
 }
 
+// 解析失败时返回的哨兵错误。go-message 在头部畸形时会把整行来信原文放进错误文本
+// （本地实验：`message: malformed MIME header line: <整行原文>`、`… header key: <字段名>`），
+// 而调用处会把错误打印到测试输出，包装底层错误就绕过了「只输出脱敏的结构样本」。
+// 因此 Analyze 与 CopyHeaders 只返回下面这些不携带任何来信字节的错误。
+var (
+	// ErrMalformedHeader 表示来信头部无法解析：首行、某个头行或字段名不合规范。
+	ErrMalformedHeader = errors.New("cannot parse the message header")
+	// ErrHeaderTooLarge 表示来信头部超过解析器的上限，整封邮件都没有解析。
+	ErrHeaderTooLarge = errors.New("message header exceeds the parser limit")
+)
+
+// headerTooLargeText 是 go-message v0.18.2 在头部超限时返回的固定错误文本，其中不含来信字节。
+// 该错误未导出也没有包装，只能按文本比对；上游改写文本时这一类退回 ErrMalformedHeader，仍不会泄露来信字节。
+const headerTooLargeText = "message: header exceeds maximum size"
+
+// parseMessage 解析一封来信的头部，失败时只返回哨兵错误。go-message 只在读取头部失败时返回 nil 实体，
+// 此时按原因归类；未知字符集与传输编码不算失败（实体仍可读，而这类错误文本同样含来信字节），照常继续归类。
+// MIME 结构畸形不在这里报错：describePart 保留已解析出的部件，样本记录到哪一层为止。
+func parseMessage(raw []byte) (*message.Entity, error) {
+	entity, err := message.Read(bytes.NewReader(raw))
+	if entity != nil {
+		return entity, nil
+	}
+	if err != nil && err.Error() == headerTooLargeText {
+		return nil, ErrHeaderTooLarge
+	}
+	return nil, ErrMalformedHeader
+}
+
 // Analyze 解析一封来信并返回脱敏样本。ok 为 false 表示它没有引用任何探测邮件，或它本身就是探测邮件的副本
 // （带 ProbeHeader，或 Message-ID 等于已记录的我方、已发送、抄送副本 ID）。
 // 样本只含结构特征：不输出正文、显示名、日期、完整主题与 Received 头，地址一律换成角色。
 func Analyze(raw []byte, st State, roles Roles) (Sample, bool, error) {
-	entity, err := message.Read(bytes.NewReader(raw))
-	if entity == nil {
-		return Sample{}, false, fmt.Errorf("cannot parse message: %w", err)
+	entity, err := parseMessage(raw)
+	if err != nil {
+		return Sample{}, false, err
 	}
 	h := mail.Header{Header: entity.Header}
 	ownID := bracket(headerMessageID(h))
@@ -324,7 +356,7 @@ func Analyze(raw []byte, st State, roles Roles) (Sample, bool, error) {
 	sample := Sample{
 		Schema:          Schema,
 		Kind:            classifyKind(root.Type, fromAddress, auto, b.plain),
-		Client:          truncateRunes(strings.TrimSpace(clientOf(h)), maxClientRunes),
+		Client:          safeClient(clientOf(h)),
 		FromRole:        roles.roleOf(fromAddress),
 		FromCaseVariant: fromAddress != strings.ToLower(fromAddress),
 		Received:        h.FieldsByKey("Received").Len(),
@@ -770,13 +802,18 @@ func authResultsOf(h mail.Header) AuthResults {
 	return results
 }
 
-// authResult 取出 Authentication-Results 中某一项的结果值。
+// authResult 取出 Authentication-Results 中某一项的结果值，并收敛到 authValues 中的已知取值，
+// 其余记为 other：这个位置同样取自来信可控的字节，取值长度没有上限，白名单之外的文字不进样本。
 func authResult(value, method string) string {
 	match := authPatterns[method].FindStringSubmatch(value)
 	if match == nil {
 		return ""
 	}
-	return strings.ToLower(match[1])
+	result := strings.ToLower(match[1])
+	if !slices.Contains(authValues, result) {
+		return "other"
+	}
+	return result
 }
 
 // clientOf 取 X-Mailer 或 User-Agent 作为客户端标识。
@@ -785,6 +822,20 @@ func clientOf(h mail.Header) string {
 		return value
 	}
 	return h.Get("User-Agent")
+}
+
+// safeClient 把客户端标识（X-Mailer 或 User-Agent）约束为形状后再输出：这两个头同样完全由来信控制，
+// 是样本中唯一原样输出来信文字的位置，畸形邮件可以把正文或主题塞进去，只截断拦不住。
+// 只接受可打印 ASCII（0x20–0x7e）且不含引号的取值，其余一律记为 other；合法取值仍按清单截到 40 个字符。
+// 取值为空表示两个头都没有，保留空串以便与「有客户端标识但形状不合」区分。
+func safeClient(value string) string {
+	value = strings.TrimSpace(value)
+	for i := range len(value) {
+		if c := value[i]; c < 0x20 || c > 0x7e || c == '"' || c == '\'' {
+			return "other"
+		}
+	}
+	return truncateRunes(value, maxClientRunes)
 }
 
 // firstAddress 取某个地址头中的第一个地址；解析失败时返回空串，样本据此记为 other。
@@ -910,9 +961,9 @@ func htmlBody(tokenText string) string {
 
 // CopyHeaders 从一封原始邮件中读取探测 ID、Message-ID 与 X-OQ-MSGID；两个 ID 都补上尖括号。
 func CopyHeaders(raw []byte) (Copy, error) {
-	entity, err := message.Read(bytes.NewReader(raw))
-	if entity == nil {
-		return Copy{}, fmt.Errorf("cannot parse message: %w", err)
+	entity, err := parseMessage(raw)
+	if err != nil {
+		return Copy{}, err
 	}
 	h := mail.Header{Header: entity.Header}
 	return Copy{

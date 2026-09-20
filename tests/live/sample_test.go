@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -648,6 +649,27 @@ func TestAnalyzeSkipsProbeCopies(t *testing.T) {
 	if _, ok, err := live.Analyze(copyRaw, st, testRoles()); err != nil || ok {
 		t.Errorf("探测邮件的副本不应输出样本: ok=%v err=%v", ok, err)
 	}
+	// 「已发送」与抄送副本经 QQ 转发后可能不带 X-TurnCourier-Probe 头（QQ 会改写头部），
+	// 这时只剩 Message-ID 等于已记录的副本 ID 这一条依据：两条依据各自独立成立。
+	for _, c := range []struct {
+		name string
+		id   string
+	}{
+		{name: "已发送副本", id: sentID},
+		{name: "抄送副本", id: ccID},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := rawMessage(t, []string{
+				"From: <bot@example.invalid>",
+				"To: <user.canary@example.invalid>",
+				"Subject: " + encodedSubject(t, "[TC "+taskID+"] TurnCourier L1 探测 1/1"),
+				"Message-Id: " + c.id,
+			}, qqPlainBody(tokenText), qqHTMLBody(tokenText))
+			if _, ok, err := live.Analyze(raw, st, testRoles()); err != nil || ok {
+				t.Errorf("不带探测头的副本不应输出样本: ok=%v err=%v", ok, err)
+			}
+		})
+	}
 	unrelated := rawMessage(t, []string{
 		"From: <" + canaryAddress + ">",
 		"To: <bot@example.invalid>",
@@ -799,14 +821,15 @@ func TestAnalyzePlainTokens(t *testing.T) {
 	}
 }
 
-// TestAnalyzeTruncatesLongValues 断言清单规定的两个上限：客户端标识截断到 40 个字符，主题前缀至多 20 个字符。
+// TestAnalyzeTruncatesLongValues 断言清单规定的两个上限：形状合法的客户端标识截断到 40 个字符，
+// 主题前缀至多 20 个字符。
 func TestAnalyzeTruncatesLongValues(t *testing.T) {
 	tokenText := testToken(t)
 	raw := rawMessage(t, []string{
 		"From: <" + canaryAddress + ">",
 		"To: <bot@example.invalid>",
 		"Message-Id: " + replySelfI,
-		"X-Mailer: " + strings.Repeat("超长客户端X", 12),
+		"X-Mailer: " + strings.Repeat("LongClient-X", 12),
 		"Subject: " + encodedSubject(t, strings.Repeat("Re:", 20)+"[TC "+taskID+"] 探测"),
 		"In-Reply-To: " + sentID,
 	}, qqPlainBody(tokenText), qqHTMLBody(tokenText))
@@ -817,6 +840,110 @@ func TestAnalyzeTruncatesLongValues(t *testing.T) {
 	want := strings.Repeat("Re:", 20)[:20]
 	if sample.Subject.Prefix == nil || *sample.Subject.Prefix != want {
 		t.Errorf("subject.prefix = %+v，期望 %q", sample.Subject.Prefix, want)
+	}
+}
+
+// TestAnalyzeRedactsClient 断言客户端标识同样有形状约束：X-Mailer 与 User-Agent 完全由来信控制，
+// 畸形邮件可以把正文或主题塞进去，只截断拦不住。合法取值原样输出，含非 ASCII、引号或控制字符的记为 other。
+func TestAnalyzeRedactsClient(t *testing.T) {
+	tokenText := testToken(t)
+	for _, c := range []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{name: "合法取值", header: "X-Mailer: Foxmail 7.2.25.148[cn]", want: "Foxmail 7.2.25.148[cn]"},
+		{name: "非 ASCII", header: "X-Mailer: 客户手机号 " + canaryPhone + " " + canarySentence, want: "other"},
+		{name: "含引号", header: `X-Mailer: "` + canaryPhone + `"`, want: "other"},
+		{name: "含控制字符", header: "User-Agent: QQMail\x01" + canaryPhone, want: "other"},
+		{name: "两个头都没有", header: "X-TurnCourier-Unused: 1", want: ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := rawMessage(t, []string{
+				"From: <" + canaryAddress + ">",
+				"To: <bot@example.invalid>",
+				"Message-Id: " + replySelfI,
+				c.header,
+				"Subject: " + encodedSubject(t, "回复：[TC "+taskID+"] 探测"),
+				"In-Reply-To: " + sentID,
+			}, qqPlainBody(tokenText), qqHTMLBody(tokenText))
+			sample := analyze(t, raw, testState(t))
+			if sample.Client != c.want {
+				t.Errorf("client = %q，期望 %q", sample.Client, c.want)
+			}
+			if output := marshal(t, sample); strings.Contains(output, canaryPhone) || strings.Contains(output, canarySentence) {
+				t.Errorf("样本中出现了客户端标识里的文字")
+			}
+		})
+	}
+}
+
+// TestAnalyzeFromRole 断言发件地址一律换成角色：机器人、白名单发件人与无法解析的地址各有一条分支，
+// 样本中只出现角色名，不出现地址。
+func TestAnalyzeFromRole(t *testing.T) {
+	tokenText := testToken(t)
+	for _, c := range []struct {
+		name string
+		from string
+		want string
+	}{
+		{name: "机器人自己", from: "<bot@example.invalid>", want: "bot"},
+		{name: "白名单发件人", from: "<other@example.invalid>", want: "allowed"},
+		{name: "无法解析的地址", from: canaryName, want: "other"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := rawMessage(t, []string{
+				"From: " + c.from,
+				"To: <bot@example.invalid>",
+				"Subject: " + encodedSubject(t, "回复：[TC "+taskID+"] 探测"),
+				"Message-Id: " + replySelfI,
+				"In-Reply-To: " + sentID,
+			}, qqPlainBody(tokenText), qqHTMLBody(tokenText))
+			sample := analyze(t, raw, testState(t))
+			if sample.FromRole != c.want {
+				t.Errorf("from_role = %q，期望 %q", sample.FromRole, c.want)
+			}
+			if output := marshal(t, sample); strings.Contains(output, "example.invalid") || strings.Contains(output, canaryName) {
+				t.Errorf("样本中出现了发件地址")
+			}
+		})
+	}
+}
+
+// TestAnalyzeConstrainsAuthResults 断言 Authentication-Results 的结果值收敛到已知取值：
+// 这个位置同样取自来信可控的字节，白名单之外的文字记为 other，不进样本。
+func TestAnalyzeConstrainsAuthResults(t *testing.T) {
+	tokenText := testToken(t)
+	for _, c := range []struct {
+		name   string
+		header string
+		want   live.AuthResults
+	}{
+		{
+			name:   "已知取值",
+			header: "Authentication-Results: mx.example.invalid; dkim=pass; spf=softfail; dmarc=temperror",
+			want:   live.AuthResults{Present: true, DKIM: "pass", SPF: "softfail", DMARC: "temperror"},
+		},
+		{
+			name:   "白名单之外",
+			header: "Authentication-Results: mx.example.invalid; dkim=" + strings.Repeat("Canary", 20) + "; spf=none",
+			want:   live.AuthResults{Present: true, DKIM: "other", SPF: "none"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := rawMessage(t, replyHeaders(t,
+				"Subject: "+encodedSubject(t, "回复：[TC "+taskID+"] 探测"),
+				"In-Reply-To: "+sentID,
+				c.header,
+			), qqPlainBody(tokenText), qqHTMLBody(tokenText))
+			sample := analyze(t, raw, testState(t))
+			if sample.AuthResults != c.want {
+				t.Errorf("auth_results = %+v，期望 %+v", sample.AuthResults, c.want)
+			}
+			if output := strings.ToLower(marshal(t, sample)); strings.Contains(output, "canary") {
+				t.Errorf("样本中出现了验证结果里的文字")
+			}
+		})
 	}
 }
 
@@ -878,9 +1005,109 @@ func TestAnalyzeBounce(t *testing.T) {
 	}
 }
 
-// TestAnalyzeRejectsMalformed 断言无法解析的字节返回错误而不是半个样本。
+// TestAnalyzeBounceGrounds 断言退信判定的两条依据各自独立成立：只有 multipart/report、
+// 或只有 MAILER-DAEMON/postmaster 发件人时都记为 bounce；两条都不成立时仍是 reply。
+// TestAnalyzeBounce 的那封退信同时满足两条，单独一条失效也拦不住。
+func TestAnalyzeBounceGrounds(t *testing.T) {
+	tokenText := testToken(t)
+	for _, c := range []struct {
+		name string
+		from string
+		want string
+	}{
+		{name: "只有 multipart/report", from: canaryAddress, want: "bounce"},
+		{name: "只有退信发件人", from: "postmaster@qq.com", want: "bounce"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			headers := []string{
+				"From: <" + c.from + ">",
+				"To: <bot@example.invalid>",
+				"Subject: " + encodedSubject(t, "回复：[TC "+taskID+"] 探测"),
+				"Message-Id: " + replySelfI,
+				"In-Reply-To: " + sentID,
+			}
+			var raw []byte
+			if c.name == "只有 multipart/report" {
+				raw = rawReport(t, headers)
+			} else {
+				raw = rawMessage(t, headers, qqPlainBody(tokenText), qqHTMLBody(tokenText))
+			}
+			sample := analyze(t, raw, testState(t))
+			if sample.Kind != c.want {
+				t.Errorf("kind = %q，期望 %q", sample.Kind, c.want)
+			}
+			// 两条依据都不成立的同一封信仍是 reply：没有它，把判定改成恒为 bounce 也能通过。
+			if c.want == "bounce" {
+				headers[0] = "From: <" + canaryAddress + ">"
+				plain := rawMessage(t, headers, qqPlainBody(tokenText), qqHTMLBody(tokenText))
+				if got := analyze(t, plain, testState(t)).Kind; got != "reply" {
+					t.Errorf("对照来信的 kind = %q，期望 reply", got)
+				}
+			}
+		})
+	}
+}
+
+// rawReport 组装一封 multipart/report 的合成退信；正文与退信报告都不含令牌。
+func rawReport(t *testing.T, headers []string) []byte {
+	t.Helper()
+	lines := append([]string{}, headers...)
+	return []byte(strings.Join(append(lines,
+		"MIME-Version: 1.0",
+		"Content-Type: multipart/report; report-type=delivery-status; boundary=\"b3\"",
+		"",
+		"--b3",
+		"Content-Type: text/plain; charset=\"us-ascii\"",
+		"",
+		"delivery failed",
+		"",
+		"--b3",
+		"Content-Type: message/delivery-status",
+		"",
+		"Final-Recipient: rfc822; user@example.invalid",
+		"Action: failed",
+		"",
+		"--b3--",
+		"",
+	), "\r\n"))
+}
+
+// TestAnalyzeRejectsMalformed 断言无法解析的字节返回哨兵错误而不是半个样本，并且错误文本不携带来信字节：
+// go-message 在头部畸形时会把整行来信原文放进错误文本，而探测工具会把错误打印到测试输出。
 func TestAnalyzeRejectsMalformed(t *testing.T) {
-	if _, _, err := live.Analyze([]byte("not a message"), testState(t), testRoles()); err == nil {
-		t.Errorf("无法解析的字节应返回错误")
+	// 畸形头行与畸形字段名各对应 go-message 的一条错误文本，两条都含整行来信原文。
+	badLine := []byte("Subject: " + canarySentence + "\r\n" + canarySentence + "\r\n\r\n" + canarySentence + "\r\n")
+	badKey := []byte("X-" + canarySentence + "\x01: 1\r\n\r\n" + canarySentence + "\r\n")
+	tooLarge := []byte("Subject: " + strings.Repeat(canarySentence, 1<<16) + "\r\n\r\n")
+	for _, c := range []struct {
+		name string
+		raw  []byte
+		want error
+	}{
+		{name: "畸形头行", raw: badLine, want: live.ErrMalformedHeader},
+		{name: "畸形字段名", raw: badKey, want: live.ErrMalformedHeader},
+		{name: "头部超限", raw: tooLarge, want: live.ErrHeaderTooLarge},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, ok, err := live.Analyze(c.raw, testState(t), testRoles())
+			assertSentinel(t, err, c.want)
+			if ok {
+				t.Errorf("无法解析的字节不应输出样本")
+			}
+			_, err = live.CopyHeaders(c.raw)
+			assertSentinel(t, err, c.want)
+		})
+	}
+}
+
+// assertSentinel 断言错误恰为给定的哨兵错误，且错误文本不含来信中的金丝雀。
+func assertSentinel(t *testing.T, err, want error) {
+	t.Helper()
+	if !errors.Is(err, want) {
+		t.Errorf("错误 = %v，期望 %v", err, want)
+		return
+	}
+	if strings.Contains(err.Error(), canarySentence) {
+		t.Errorf("错误文本中出现了来信字节")
 	}
 }

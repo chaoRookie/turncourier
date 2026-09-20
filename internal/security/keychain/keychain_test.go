@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -550,6 +551,61 @@ func TestTimeout(t *testing.T) {
 	if _, ok := f.items(t)[fresh]; ok {
 		t.Error("hanging write stored the item")
 	}
+}
+
+// TestClassifyPrefersContext 钉住 classify 的顺序契约：ctx 已取消或已过期时，即使子进程以「条目不存在」（44）
+// 或「不允许交互」（36）退出，也必须报告取消或超时。被 exec 结束的子进程同样以非 0 退出，先看退出码就会把
+// 「进程被我们杀掉」当成钥匙串的结论，Get 会把超时报成 ErrNotFound，调用方据此另生成一把密钥或覆盖条目。
+// 期限与退出码同时成立的情形靠真实往返撞不稳，因此直接对 classify 写用例。
+func TestClassifyPrefersContext(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	for _, c := range []struct {
+		code int
+		want error
+	}{
+		{code: exitItemNotFound, want: ErrNotFound},
+		{code: exitInteractionNotAllowed, want: ErrInteractionNotAllowed},
+	} {
+		t.Run(fmt.Sprint("exit", c.code), func(t *testing.T) {
+			exitErr := exitError(t, c.code)
+			err := classify(canceled, "get", exitErr)
+			if !errors.Is(err, context.Canceled) || err.Error() != "keychain get canceled: context canceled" {
+				t.Errorf("canceled: %v", err)
+			}
+			err = classify(expired, "get", exitErr)
+			if !errors.Is(err, context.DeadlineExceeded) || err.Error() != "keychain get timed out: context deadline exceeded" {
+				t.Errorf("expired: %v", err)
+			}
+			// 对照：ctx 正常时同一个退出码仍按退出码归类，否则把 classify 改成只看 ctx 也能通过。
+			if err := classify(context.Background(), "get", exitErr); !errors.Is(err, c.want) {
+				t.Errorf("live context: %v", err)
+			}
+		})
+	}
+}
+
+// exitError 取回一个真实的 *exec.ExitError：os.ProcessState 无法直接构造，只能让子进程以指定退出码结束。
+// 子进程仍是测试二进制扮演的假 security（空状态下查条目以 44 退出，exit36 模式恒以 36 退出），不接触真实钥匙串。
+func exitError(t *testing.T, code int) *exec.ExitError {
+	t.Helper()
+	mode := "normal"
+	if code == exitInteractionNotAllowed {
+		mode = "exit36"
+	}
+	f := newFake(t, mode)
+	command := exec.Command(f.security.path, "find-generic-password", "-s", Service, "-a", AuthCodeAccount(testInstance), "-w")
+	command.Stdin = strings.NewReader("")
+	var exitErr *exec.ExitError
+	if err := command.Run(); !errors.As(err, &exitErr) {
+		t.Fatalf("fake security did not exit with a status: %v", err)
+	}
+	if got := exitErr.ExitCode(); got != code {
+		t.Fatalf("fake security exited with %d, want %d", got, code)
+	}
+	return exitErr
 }
 
 // TestAdd 确认 Add 只创建：先读后以不带 -U 的命令写入并读回；已存在时不启动写入进程、原值不变；
