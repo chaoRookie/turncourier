@@ -1,10 +1,10 @@
 # HANDOFF
 
-**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）已完成，当前为 Phase 4 邮件闭环，清单已确认，下一步实施 4a。
-**更新于**：2026-09-19 · claude-code
+**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）与 Phase 4a（邮件闭环的离线实现）已完成，当前处于 L1 真机探测中段。
+**更新于**：2026-09-20 · claude-code
 **项目目录**：本仓库根目录（含 `go.mod` 的目录）
-**基线 commit**：`e046ff4`（Phase 3 最后一个 PR #9 合并后的 main，CI 与 Security 通过）；其后为记录 Phase 3 验证结果的文档提交。以 `git log --oneline -3` 与 `git status --short` 核对。
-**暂停原因**：Phase 4 实施清单 `docs/zh-CN/plans/phase-04.md` 已写成：D1–D5 与「文件夹列」方案 (a) 已由维护者确认，4a 的 15 个任务契约经两轮审查与复查。下一步在 `feat/phase-04a-mail` 分支从 4a Task 1 开始实施。
+**基线 commit**：`4f646c6`（Phase 4a 的 PR #12 合并后的 main，CI 与 Security 通过）。以 `git log --oneline -3` 与 `git status --short` 核对。
+**暂停原因**：L1 真机探测进行中。维护者已在本机开通 QQ 邮箱 IMAP/SMTP、录入授权码并跑通规程第 1–4 步；结果写在 `docs/zh-CN/plans/phase-04.md` 的「L1 结果」一节，D4 已据此定稿（令牌载体由正文页脚改为主题标签，维护者 2026-09-20 确认）。第 4 步（IDLE 测量）与第 5 步（Keychain 沙箱读取）未完成。
 
 ## 已完成
 
@@ -20,13 +20,19 @@
   - 文档同步，以及整阶段审查的修复。
 
   命令行尚未使用这些包，产品二进制不链接新依赖。验证记录见 `docs/zh-CN/plans/phase-03.md` 末尾。
+- [x] Phase 4a（PR #12，合并为 `4f646c6`）：Keychain 封装、`turncourier init`、回复令牌、正文加密、迁移 `0002`、待发通知状态机与存储、SMTP 与 IMAP 客户端及离线假服务器、只由人工执行的 `tests/live` 探测工具，以及文档同步。经 15 个任务逐任务实施、整阶段审查（20 条：1 主要、10 次要、9 细节）与四轮复查。本地 `make check` 覆盖率约 93.5%。
+- [x] L1 第 1–4 步（2026-09-20，维护者本机）：能力与文件夹、发信与实际投递 ID、两份 QQ 客户端回复样本、30 分钟 IDLE 测量。结论见 `docs/zh-CN/plans/phase-04.md`「L1 结果」；D4 定稿（令牌载体改主题标签、只接受最新通知的令牌、`TokenTTL` 默认 72h）并同步修改了 `design.md`、`docs/en/architecture.md` 与 `internal/config`。
 
 ## 未完成
 
-- [ ] Phase 4 邮件闭环：按 `docs/zh-CN/plans/phase-04.md` 分三段实施：4a 离线 → L1 真机探测（需维护者在本机录入授权码并授权发信）→ 4b。4a 从 Task 1 开始；Task 13 的 L1 工具只由维护者授权后人工运行。前置条件（均已写入 phase-03.md「风险与后续」，并在 phase-04 中落实）：
-  - D2 的正文加密与 Keychain 接入必须先于任何正文存储；
-  - 后台服务的单实例锁须覆盖 `RecoverInFlight` 与全部派发操作；
-  - 地址小写化须用真实 QQ 邮箱样本复核。
+- [ ] L1 余下部分（维护者本机执行，命令见下文「下一步」）：
+  - 第 5 步 Keychain 沙箱读取，须维护者另行授权；
+  - 假期自动回复与退信样本——令牌改到主题后这是 4b 的前置条件，不是可选项；
+  - 别名地址与大小写变体的回信样本——Phase 3 的小写化假设仍未复核；
+  - Foxmail / Apple Mail / Gmail 的回复样本，本轮只采到 QQ 邮箱自家两个客户端。
+- [ ] 4b：按 `docs/zh-CN/plans/phase-04.md`「4b 与 4a 的衔接」细化任务契约后实施。前置条件仍然成立：
+  - 后台服务的单实例锁须覆盖 `RecoverInFlight`、`RecoverSendingNotifications` 与全部派发和发送；
+  - 新主题格式（含令牌）须按同一规程做一次往返复核，再冻结主题解析器（D4「尚未验证」）。
 - [ ] macOS 断电持久性（`fullfsync`）留到安全与恢复阶段评估；接入命令行后须补齐链接模块的第三方许可声明。
 - [ ] 关注 actions/setup-go 补丁版本：7.0.0 打包的 undici、brace-expansion 有已公开安全公告（旧版同样受影响，本仓库输入不触及），上游已修复未发版；Dependabot 提出后按同样流程评审。
 - [ ] Codex、Claude 适配器与后台服务属于后续阶段。真实邮箱各十轮验收之前不打 `v0.1.0-alpha`。
@@ -35,8 +41,8 @@
 
 1. 读 `AGENTS.md`，核对 `git status --short`、`git log --oneline -3` 与 `gh run list --repo chaoRookie/turncourier --limit 5`。
 2. `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`，运行下方验证命令，确认仍全部通过。
-3. 从 main 建 `feat/phase-04a-mail`，按 phase-04.md 从 4a Task 1 起逐任务实施：先写失败的测试，再由子代理实现，经规格与质量审查（含变异测试）、修复和独立复查后提交；阶段末做整阶段审查，然后开 PR。
-4. 4a 合并后进入 L1：需维护者在本机操作，授权码只在本机终端输入，每封探测邮件发出前逐封确认。
+3. 跑完 L1 第 5 步并补采样本，结果写进 phase-04.md 的「L1 结果」。探测命令的共同前缀是 `TURNCOURIER_LIVE=1 TURNCOURIER_LIVE_OUT=<仓库之外、权限恰为 0700 的目录>`，再加 `go test -count=1 -tags live -run <用例> -v ./tests/live/`；IDLE 那一轮默认 30 分钟，必须另加 `-timeout 60m`，否则 `go test` 自己的 10 分钟上限会先把它打断。
+4. L1 收尾后按 phase-04.md 细化 4b 任务契约，经确认后在新分支逐任务实施：先写失败的测试，再由子代理实现，经规格与质量审查（含变异测试）、修复和独立复查后提交；阶段末做整阶段审查，然后开 PR。
 
 ## 验证方式
 
@@ -68,6 +74,8 @@ git diff --check
 - Actions 固定 SHA 经 GitHub API 核对：公开时为 checkout v5.1.0、setup-go v6.5.0、upload-artifact v4.6.2；2026-09-18 升级为 checkout v7.0.1、setup-go v7.0.0、upload-artifact v7.0.1。
 - 2026-09-17 远端：首次推送的 CI（`quality (ubuntu-24.04)`、`quality (macos-15)`）与 Security（`security`）成功；私密漏洞报告 `enabled: true`；GitHub 识别许可证 Apache-2.0。
 - 2026-09-18 远端：Actions 升级合并后 main `9cc5bd7` 的 CI、Security 与 Candidate build 成功；下载产物 `shasum -c` 通过，可执行位保留，arm64 二进制版本为 `0.1.0-dev.9cc5bd7`。
+- 2026-09-20 L1：维护者本机执行第 1–3 步，全部通过；样本写入仓库之外的 0700 目录，未进仓库。
+- 2026-09-19 Phase 4a：本地 `make check`（覆盖率约 93.5%）、`make security`、`make workflows`、`make build`、两个平台的 vet 与 `CGO_ENABLED=0` 测试通过；PR #12 三项检查通过；合并后 main `4f646c6` 的 CI 与 Security 成功。
 - 2026-09-19 Phase 3：本地 `make check`（覆盖率 93.28%，985/1056）、`make security`、`make workflows`、`make build`、两个平台的 vet 与 `CGO_ENABLED=0` 测试通过；PR #9 三项检查通过（质量任务约 2 分钟）；合并后 main `e046ff4` 的 CI 与 Security 成功。
 
 ## 关键文件
@@ -98,4 +106,8 @@ git diff --check
 - main 分支保护要求分支最新（strict），必需检查为 `quality (ubuntu-24.04)`、`quality (macos-15)`、`security`；修改工作流 job 名称时须同步更新分支保护。多个 PR 需逐个「更新分支 → 等三项检查 → 合并」。
 - Git 全局未配置提交身份。提交使用单次配置：`git -c user.name=chaoRookie -c user.email=179816769+chaoRookie@users.noreply.github.com commit ...`；不要改全局身份。
 - 文档、提交与续点中不要写本机绝对路径、用户名或订阅档位；gitleaks 默认规则不会拦截这类信息。
-- 所有 QQ 凭据将来通过本地 init 输入，不发送到聊天、不进入测试或 Git。worktree 不是 OS 沙箱，邮件文字不能绕过 Agent 权限。
+- 所有 QQ 凭据通过本地 `turncourier init` 输入，不发送到聊天、不进入测试或 Git。真实邮箱地址同样不写进文档、提交与续点。worktree 不是 OS 沙箱，邮件文字不能绕过 Agent 权限。
+- QQ 邮箱新版把 IMAP/SMTP 开关挪到了「设置 → 账号与安全」，不在左侧设置列表里；授权码粘贴时常带空格或换行，`init` 会以「不含空白的可打印 ASCII」为由拒绝。IMAP 登录被拒时 `internal/mail/imap` 按设计不保留服务器响应文本，查不到具体原因，先核对 IMAP 服务是否真的开启、再重录授权码。
+- L1 已证实的三条，实施 4b 时不要再当作未知：QQ 会改写发出邮件的 Message-ID（`X-OQ-MSGID` 保留我方 ID，实际投递 ID 从「已发送」副本取）；机器人自己的 Junk 里确实会落邮件，Junk 补扫是必需路径；同域投递不带 `Received` 与 `Authentication-Results`。另有一条是维护者人工观察而非探测实测：通知会落进**收件人**的垃圾箱——那只影响送达率，别拿它论证机器人端的 Junk 补扫。
+- 回复主题的前缀至少有 `Re:` 与 `回复：` 两种（成因未确定，可能是客户端差异，也可能是对方的主题设置），主题解析器不能按前缀白名单匹配，只能按 `[TC …]` 标签本身定位。
+- 令牌改到主题之后，自动回复与退信的过滤从纵深防御变成承重规则：白名单地址的假期自动回复会把带令牌的主题原样带回，四项校验全过。过滤必须排在验证顺序最前面，且这类样本尚未采过——是 4b 的前置条件。

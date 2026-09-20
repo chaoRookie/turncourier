@@ -85,7 +85,7 @@ func TestLoadExampleConfig(t *testing.T) {
 		Mailbox:   Mailbox{Address: "bot@example.invalid", IMAPHost: "imap.qq.com", IMAPPort: 993, SMTPHost: "smtp.qq.com", SMTPPort: 465},
 		Recipient: Recipient{Address: "me@example.invalid", AllowedSenders: []string{"me@example.invalid"}},
 		Notify:    Notify{Events: []string{"waiting_input", "failed", "turn_completed"}},
-		Security:  Security{TokenTTL: 168 * time.Hour},
+		Security:  Security{TokenTTL: 72 * time.Hour},
 		Paths:     paths,
 	}
 	if cfg.Mailbox != want.Mailbox || cfg.Recipient.Address != want.Recipient.Address || cfg.Security != want.Security || cfg.Paths != want.Paths {
@@ -109,8 +109,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Mailbox != wantMailbox {
 		t.Errorf("Mailbox = %+v; want %+v", cfg.Mailbox, wantMailbox)
 	}
-	if cfg.Security.TokenTTL != 168*time.Hour {
-		t.Errorf("TokenTTL = %s; want 168h", cfg.Security.TokenTTL)
+	if cfg.Security.TokenTTL != 72*time.Hour {
+		t.Errorf("TokenTTL = %s; want 72h", cfg.Security.TokenTTL)
 	}
 	wantEvents := []string{"waiting_input", "failed", "turn_completed"}
 	if !slices.Equal(cfg.Notify.Events, wantEvents) {
