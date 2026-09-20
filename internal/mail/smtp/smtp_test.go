@@ -257,12 +257,9 @@ func (s *session) Data(r io.Reader) error {
 	s.b.dataEntered.fire()
 	if s.b.dataStall {
 		<-s.b.release.ch
-		// 放行后读走剩余 DATA：客户端已关闭连接时这里读到错误，用它证明连接确实被关闭。
-		// 不用「服务端会话是否结束」判断：那取决于内核缓冲大小与 RST 的时机，各平台不同。
-		if _, err := io.ReadAll(r); err != nil {
-			s.b.connClosed.fire()
-			return err
-		}
+		// 放行后直接读裸连接到结束：客户端已关闭时读到 EOF，用它证明连接确实被关闭。
+		// 不读 DATA 流也不看「服务端会话是否结束」：客户端中途关闭在各平台上有时报错、有时只是 EOF。
+		s.waitClosed()
 		return reject(451, enhancedFor(451))
 	}
 	data, err := readPaced(r, s.b.dataPace)
@@ -292,23 +289,29 @@ func (s *session) Data(r io.Reader) error {
 	return nil
 }
 
-// readPaced 读完 r；pace 非 0 时每读至多 64 KiB 停顿 pace。
+// readPaced 读完 r；pace 非 0 时每读走 64 KiB 停顿 pace。按累计字节数停顿而不是按读取次数：
+// 单次读到多少字节取决于内核缓冲与 TLS 记录大小，各平台不同，按次数停顿会让同一封正文的耗时相差数十倍。
 func readPaced(r io.Reader, pace time.Duration) ([]byte, error) {
 	if pace == 0 {
 		return io.ReadAll(r)
 	}
 	var data []byte
+	paced := 0
 	buf := make([]byte, 64<<10)
 	for {
 		n, err := r.Read(buf)
 		data = append(data, buf[:n]...)
+		paced += n
 		if err == io.EOF {
 			return data, nil
 		}
 		if err != nil {
 			return data, err
 		}
-		time.Sleep(pace)
+		for paced >= 64<<10 {
+			paced -= 64 << 10
+			time.Sleep(pace)
+		}
 	}
 }
 
@@ -885,12 +888,12 @@ func TestSendBodyWriteStall(t *testing.T) {
 func TestSendSlowReaderWithinChunkDeadlines(t *testing.T) {
 	serverTLS, pool := testCerts(t)
 	b := newBackend()
-	// 每次读取至多 64 KiB 停顿一次，而实际读到的字节数取决于内核缓冲：同一块正文在不同平台上的停顿次数不同。
-	// 因此把停顿取小、期限取大，使一块（64 KiB）无论分几次读完都远在 Command 之内，而整封正文远超它。
-	b.dataPace = 2 * time.Millisecond
+	// 服务器每读走 64 KiB 停顿 dataPace（按字节数而不是读取次数，见 readPaced）：一块正好一次停顿，
+	// 远在 Command 之内；整封 1 MiB 共 16 块、约 16 倍停顿，远超 Command。若期限改按整封计时，本用例必然超时。
+	b.dataPace = 60 * time.Millisecond
 	lis := startServer(t, b, serverTLS, serverOptions{readBuffer: 4096})
-	cfg := testConfig(lis, pool, Timeouts{Command: time.Second, Submission: 10 * time.Second})
-	msg := bigMessage(MaxMessageSize)
+	cfg := testConfig(lis, pool, Timeouts{Command: 300 * time.Millisecond, Submission: 10 * time.Second})
+	msg := bigMessage(1 << 20)
 	if _, err := Send(context.Background(), cfg, testPassword, testEnvelope(), msg); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
