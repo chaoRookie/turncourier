@@ -3,7 +3,7 @@
 package integration_test
 
 import (
-	"crypto/sha256"
+	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,14 +11,35 @@ import (
 
 	"github.com/chaoRookie/turncourier/internal/config"
 	"github.com/chaoRookie/turncourier/internal/queue"
+	"github.com/chaoRookie/turncourier/internal/security/payload"
+	"github.com/chaoRookie/turncourier/internal/security/token"
 	"github.com/chaoRookie/turncourier/internal/store/sqlite"
 	"github.com/chaoRookie/turncourier/internal/task"
 )
 
-// openStore 打开 dataDir 中的存储并在测试结束时关闭；已关闭的存储再次关闭的错误被忽略。
+// testTokenKey 返回 kid 1 的测试令牌签名密钥；密钥字节在运行时由 bytes.Repeat 构造，源码中没有密钥字面量。
+// kid 1、32 字节的密钥不会构造失败，失败时 panic。
+func testTokenKey() *token.Key {
+	key, err := token.NewKey(1, bytes.Repeat([]byte{0xc3}, token.KeyLen))
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+// testPayloadKey 返回 kid 1 的测试正文密钥，构造方式与 testTokenKey 相同。
+func testPayloadKey() *payload.Key {
+	key, err := payload.NewKey(1, bytes.Repeat([]byte{0x5a}, payload.KeyLen))
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+// openStore 以测试正文密钥打开 dataDir 中的存储并在测试结束时关闭；已关闭的存储再次关闭的错误被忽略。
 func openStore(t *testing.T, dataDir string) *sqlite.Store {
 	t.Helper()
-	store, err := sqlite.Open(t.Context(), dataDir, sqlite.Options{})
+	store, err := sqlite.Open(t.Context(), dataDir, sqlite.Options{PayloadKey: testPayloadKey()})
 	if err != nil {
 		t.Fatalf("sqlite.Open 返回错误: %v", err)
 	}
@@ -26,15 +47,27 @@ func openStore(t *testing.T, dataDir string) *sqlite.Store {
 	return store
 }
 
-// syntheticReply 为任务构造一封合成入站回复的元数据，摘要取自合成正文。
+// registerKeys 登记 (token, 1) 与 (payload, 1)；存储层不比对校验值，这里传入固定的 8 字节。
+func registerKeys(t *testing.T, store *sqlite.Store) {
+	t.Helper()
+	for _, purpose := range []sqlite.KeyPurpose{sqlite.KeyPurposeToken, sqlite.KeyPurposePayload} {
+		if err := store.RegisterKey(t.Context(), purpose, 1, [8]byte{0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87}); err != nil {
+			t.Fatalf("RegisterKey(%s, 1) 返回错误: %v", purpose, err)
+		}
+	}
+}
+
+// syntheticReply 为任务构造一封合成入站回复：正文为 body，摘要由测试令牌密钥的 BodyDigest 计算，与 4b 入站流水线的算法相同。
 func syntheticReply(taskID, account string, uid uint32, messageID, body string) sqlite.InboundReply {
 	return sqlite.InboundReply{
 		TaskID:      taskID,
 		Account:     account,
+		Folder:      "INBOX",
 		UIDValidity: 1,
 		UID:         uid,
 		MessageID:   messageID,
-		BodySHA256:  sha256.Sum256([]byte(body)),
+		BodyDigest:  testTokenKey().BodyDigest([]byte(body)),
+		Body:        []byte(body),
 	}
 }
 
@@ -62,11 +95,10 @@ func applyEvent(t *testing.T, store *sqlite.Store, current sqlite.Task, event ta
 	}
 }
 
-// TestReplyLifecycle 走完一个任务的完整生命周期：加载示例配置，创建并启动任务，两条回复先后入队；
-// 第 1 条派发后投递不确定，模拟进程崩溃后重开存储恢复并核对为已送达；第 2 条派发确认后关闭任务，
-// 最后验证重复邮件去重、关闭后新邮件被拒绝，以及完整的任务事件序列。
-func TestReplyLifecycle(t *testing.T) {
-	ctx := t.Context()
+// loadExampleConfig 把示例配置写入临时目录，经环境变量指向它与尚不存在的数据目录，再按产品的查找顺序加载；
+// 断言加载结果的数据目录恰为该目录。
+func loadExampleConfig(t *testing.T) config.Config {
+	t.Helper()
 	dir := t.TempDir()
 	example, err := os.ReadFile(filepath.Join("..", "..", "configs", "turncourier.example.toml"))
 	if err != nil {
@@ -94,7 +126,15 @@ func TestReplyLifecycle(t *testing.T) {
 	if cfg.Paths.DataDir != dataDir {
 		t.Fatalf("DataDir = %q; want %q", cfg.Paths.DataDir, dataDir)
 	}
+	return cfg
+}
 
+// TestReplyLifecycle 走完一个任务的完整生命周期：加载示例配置，创建并启动任务，两条回复先后入队；
+// 第 1 条派发后投递不确定，模拟进程崩溃后重开存储恢复并核对为已送达；第 2 条派发确认后关闭任务，
+// 最后验证重复邮件去重、关闭后新邮件被拒绝，以及完整的任务事件序列。
+func TestReplyLifecycle(t *testing.T) {
+	ctx := t.Context()
+	cfg := loadExampleConfig(t)
 	store := openStore(t, cfg.Paths.DataDir)
 	// 配置与存储各自定义数据库文件名；存储打开后 cfg.Paths.Database 须恰好是它创建的数据库文件。
 	info, err := os.Stat(cfg.Paths.Database)
@@ -104,6 +144,7 @@ func TestReplyLifecycle(t *testing.T) {
 	if !info.Mode().IsRegular() {
 		t.Fatalf("cfg.Paths.Database 的类型 = %v; want 常规文件", info.Mode().Type())
 	}
+	registerKeys(t, store)
 	created, err := store.CreateTask(ctx, sqlite.AgentCodex)
 	if err != nil {
 		t.Fatalf("CreateTask 返回错误: %v", err)
@@ -129,7 +170,7 @@ func TestReplyLifecycle(t *testing.T) {
 		seqs = append(seqs, result.Reply.Seq)
 	}
 
-	reply, current, err := store.ClaimNextReply(ctx, id)
+	reply, current, _, err := store.ClaimNextReply(ctx, id)
 	expectReply(t, "派发第 1 条", reply, current, err, seqs[0], queue.Dispatching, task.Running)
 	reply, current, err = store.MarkReplyUncertain(ctx, reply.Seq)
 	expectReply(t, "MarkReplyUncertain", reply, current, err, seqs[0], queue.Uncertain, task.DeliveryUncertain)
@@ -150,7 +191,7 @@ func TestReplyLifecycle(t *testing.T) {
 	expectReply(t, "ResolveUncertainReply(true)", reply, current, err, seqs[0], queue.Acknowledged, task.Running)
 	applyEvent(t, store, current, task.TurnCompleted, task.Completed)
 
-	reply, current, err = store.ClaimNextReply(ctx, id)
+	reply, current, _, err = store.ClaimNextReply(ctx, id)
 	expectReply(t, "派发第 2 条", reply, current, err, seqs[1], queue.Dispatching, task.Running)
 	reply, current, err = store.AcknowledgeReply(ctx, reply.Seq)
 	expectReply(t, "AcknowledgeReply", reply, current, err, seqs[1], queue.Acknowledged, task.Running)

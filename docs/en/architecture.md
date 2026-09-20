@@ -1,13 +1,14 @@
 # TurnCourier Architecture
 
-Status: pre-alpha. Configuration, storage and the state machines (Phase 3) are implemented as internal packages that no command uses yet.
+Status: pre-alpha. Phase 4 is split into 4a (offline), L1 (a manual probe the maintainer runs against a real mailbox) and 4b (built on the L1 results). Phase 4a is done: the Keychain wrapper, reply tokens, body encryption, migration `0002`, the outgoing notification state machine and its storage, the SMTP and IMAP clients and `turncourier init` are implemented, and `init` is the first command that uses the configuration and storage packages. TurnCourier still cannot send or receive email.
 
-This document covers two things: the code that exists in the repository today, and the architecture planned for later phases. Everything under [Planned architecture](#planned-architecture) is design intent. Apart from the parts that section marks as built in Phase 3, none of it is implemented.
+This document covers two things: the code that exists in the repository today, and the architecture planned for later phases. Everything under [Planned architecture](#planned-architecture) is design intent. Apart from the parts that section marks as built in Phase 3 or 4a, none of it is implemented.
 
 The approved design in [docs/zh-CN/design.md](../zh-CN/design.md) (Chinese) is authoritative. Related documents:
 
 - [Phase 2 plan](../zh-CN/plans/phase-02.md)
 - [Phase 3 plan](../zh-CN/plans/phase-03.md): configuration, storage and state machines
+- [Phase 4 plan](../zh-CN/plans/phase-04.md): the mail loop, split into 4a, L1 and 4b
 - [Phase 0–1 research report](../zh-CN/research/phase-01.md)
 - [Development guide](../zh-CN/development.md) (Chinese)
 
@@ -30,13 +31,19 @@ There are no releases and no tags, including `v0.1.0-alpha`. The default branch 
 
 | Area | What exists |
 | --- | --- |
-| CLI | `turncourier help`, `version` and `doctor`, each with an optional `--json` flag. |
-| Planned command stubs | `init`, `run`, `tasks`, `logs` and `service` print a "not implemented yet" message and exit with code 2. |
+| CLI | `turncourier help`, `version` and `doctor`, each with an optional `--json` flag, and `init`, which takes no arguments. |
+| Planned command stubs | `run`, `tasks`, `logs` and `service` print a "not implemented yet" message and exit with code 2. |
 | Environment diagnostics | `doctor` reports the platform and runs `git`, `codex` and `claude` with `--version`. |
-| Configuration | `internal/config` loads the TOML file, fills defaults, applies the one allowed environment override and validates everything. `configs/turncourier.example.toml` is the example, and tests load it. No command reads the configuration yet. |
-| State machines | `internal/task` and `internal/queue` hold the task and reply queue transition tables. They are pure functions with no I/O. |
-| Storage | `internal/store/sqlite` persists tasks, task events, inbound reply metadata and the reply queue, with embedded migrations, deduplication, FIFO dispatch and crash recovery. No command opens the database yet. |
-| Integration tests | `tests/integration` runs the example configuration, a real SQLite database and both state machines through a full reply lifecycle. |
+| Interactive setup | `init` (macOS and an interactive terminal only, never online) creates the configuration file, creates the instance ID, reads the authorization code without echoing it and registers the token and payload keys in the Keychain. It never overwrites an existing configuration file or an already registered key, and it replaces the authorization code only after an explicit confirmation. |
+| Configuration | `internal/config` loads the TOML file, fills defaults, applies the one allowed environment override and validates everything. `Render` and `CreateFile` let `init` write a configuration file atomically, with `0600` and without overwriting. `configs/turncourier.example.toml` is the example, and tests load it. |
+| State machines | `internal/task` and `internal/queue` hold the task, reply queue and outgoing notification transition tables. They are pure functions with no I/O. |
+| Storage | `internal/store/sqlite` persists tasks, task events, inbound reply metadata, the reply queue, the instance ID, key metadata, outgoing notifications, encrypted pending bodies, fetch cursors and rejected inbound mail, with embedded migrations, deduplication, FIFO dispatch and crash recovery. Only `init` opens the database so far. |
+| Keychain | `internal/security/keychain` is a thin wrapper over `/usr/bin/security`. Secrets travel only over the subprocess's stdin and stdout, never in arguments or environment variables. Other platforms return "unsupported"; there is no plaintext fallback. |
+| Reply tokens | `internal/security/token` issues, parses and verifies version 1 reply tokens (HMAC-SHA256 truncated to 128 bits, 48 Crockford base32 characters) and computes the keyed body digest. It does not parse mail and does not define where a token lives in a message. |
+| Body encryption | `internal/security/payload` seals and opens pending bodies with AES-256-GCM. The associated data binds each ciphertext to its purpose, key id, task and sequence number. |
+| Mail clients | `internal/mail/smtp` submits one message over implicit TLS with a deadline on every step and classifies the outcome. `internal/mail/imap` logs in over implicit TLS, lists folders, examines read-only, rescans by UID, fetches with `BODY.PEEK` and idles, with a watchdog, backoff reconnects and a login rate limit. Neither package touches storage or the configuration, and neither modifies the mailbox. |
+| Integration tests | `tests/integration` runs the example configuration, a real SQLite database and both state machines through a full reply lifecycle, and a second test drives notifications, tokens, the keyed digest, body ciphertext and dispatch together. |
+| Manual probes | `tests/live` holds the L1 probes. They need the `live` build tag, `TURNCOURIER_LIVE=1` and interactive confirmations, refuse to run when `CI` is set, and are never run by `make test` or CI. The redaction helpers in `sample.go` carry no build tag and are tested offline. |
 | Engineering checkers | `tools/commentcheck` checks for Chinese doc comments. `tools/covercheck` enforces the statement coverage threshold. |
 | Quality gates | Makefile targets for gofmt, go vet, module checksum verification, comment checks, race tests with coverage, staticcheck, govulncheck, gitleaks and actionlint. |
 | CI | GitHub Actions workflows for quality checks, security scans and a manually triggered macOS candidate build. |
@@ -46,52 +53,74 @@ CLI output meant for people is in Chinese. JSON field names are in English.
 
 ### Not implemented
 
-- Sending or receiving email (SMTP, IMAP), MIME parsing, reply validation and email rendering.
+- Sending or receiving email in the product. The SMTP and IMAP clients exist, but no command calls them, and nothing renders a notification or parses an inbound message. MIME parsing, quote and signature parsing, reply validation, the thread binding rules and the deterministic filtering of outgoing content are all Phase 4b, after L1 has answered how QQ Mail rewrites Message-IDs and how each client formats a reply.
 - Codex and Claude Code adapters. TurnCourier does not start, resume or watch agent sessions.
-- Wiring configuration and storage into commands. No command reads a configuration file or opens the database.
-- macOS Keychain storage, encrypted storage of email bodies, the outgoing mail queue, signed tokens and token revocation.
+- Wiring the mail loop into commands. `internal/app`, which is to assemble the send and receive loop, does not exist; `init` is the only command that reads a configuration file or opens the database.
+- Token revocation, key rotation (only key id 1 is created), `init`'s environment diagnostics and its real round-trip test.
 - A background service, launchd integration, a menu bar, worktree management and telemetry.
 - Release binaries. The manual candidate build uploads Actions artifacts that expire after 14 days. It does not create a GitHub Release.
 
 ## Packages and dependency direction
 
-The module is `github.com/chaoRookie/turncourier`. It requires Go 1.27.1 (see `go.mod`). Besides the standard library, production code imports the two modules listed under [Dependencies](#dependencies).
+The module is `github.com/chaoRookie/turncourier`. It requires Go 1.27.1 (see `go.mod`). Besides the standard library, the packages import the modules listed under [Dependencies](#dependencies).
 
 ```text
-cmd/turncourier
-  ├─► internal/cli          command routing, output, exit codes
-  │     └─► internal/doctor   Checker and Report types
-  └─► internal/doctor       doctor.New() wires the production checker
+cmd/turncourier ─► internal/cli ─► internal/doctor
+                        ├──────► internal/config
+                        ├──────► internal/store/sqlite ─► internal/task
+                        │                 ├───────────► internal/queue
+                        │                 └───────────► internal/security/payload
+                        ├──────► internal/security/keychain
+                        └──────► golang.org/x/term, golang.org/x/sys/unix (termios, macOS only)
 
-internal/store/sqlite       SQLite storage (modernc.org/sqlite)
-  ├─► internal/task         task state machine, no I/O
-  └─► internal/queue        reply queue state machine, no I/O
+internal/security/token      standard library only
+internal/security/payload    standard library only
+internal/security/keychain   standard library only (runs /usr/bin/security)
+internal/mail/smtp           ─► github.com/emersion/go-smtp, go-sasl
+internal/mail/imap           ─► github.com/emersion/go-imap/v2 (imapclient), go-message
+                                (imapclient imports go-message/mail)
 
-internal/config             TOML configuration (BurntSushi/toml)
+tests/live (sample.go, no build tag) ─► go-message, go-message/charset, x/text
+tests/live (probes, live build tag)  ─► config, security/keychain, security/token, mail/*, modernc.org/sqlite
+                                        (a read-only query for the instance ID)
+tests/integration ─► config, store/sqlite, task, queue, security/token, security/payload
 
 tools/commentcheck          standalone checker, standard library only
 tools/covercheck            standalone checker, standard library only
 ```
 
-Dependencies point one way: `cmd` → `internal/cli` → `internal/doctor`, and `internal/store/sqlite` → `internal/task`, `internal/queue`. `cmd` also imports `internal/doctor` directly to build the production checker. `internal/doctor`, `internal/config`, `internal/task` and `internal/queue` import no other package from this module, so `config`, `task` and `queue` do not depend on each other or on storage. The store does not import `config`: callers normalize email addresses before passing them in. No command imports the configuration, state machine or storage packages yet, so the product binary does not link the third-party modules. Only `tests/integration` combines them. Nothing imports `cmd` or `tools`. The tools are never linked into the product binary, but their code is still included in the coverage total.
+Dependencies point one way. `cmd` imports `internal/cli`, plus `internal/doctor` and `internal/security/keychain` to build the production checker and the Keychain factory it passes in. `internal/cli` is the only production assembler: `init` needs the configuration, the store, the Keychain and the terminal at once. `internal/store/sqlite` imports `internal/task`, `internal/queue` and `internal/security/payload`, because a body has to be encrypted in the same transaction that assigns its sequence number. It does not import `internal/security/token`: a notification id (nid) is stored as a `[12]byte`. It also still does not import `internal/config`; the bot domain, the token lifetime and normalized addresses are passed in by the caller.
+
+`internal/mail/smtp` and `internal/mail/imap` depend on neither storage, configuration nor `internal/security/*`. They move bytes; cursors and passwords arrive as values or as functions. The three `internal/security` packages do not import each other. At the end of Phase 4a no production package imports both a mail package and storage; `internal/app`, which will, is Phase 4b work. Outside the product binary, `tests/live` is the second assembler.
+
+Nothing imports `cmd` or `tools`. The tools are never linked into the product binary, but their code is still included in the coverage total.
+
+The product binary currently links `github.com/BurntSushi/toml`, `modernc.org/sqlite` with its dependencies, `golang.org/x/term` and `golang.org/x/sys`. It does not link the `emersion` mail modules or `golang.org/x/text`: those are used only by tests and `tests/live` until Phase 4b wires the mail loop into a command. `go version -m dist/turncourier` shows the current list.
 
 | Package | Responsibility |
 | --- | --- |
-| `cmd/turncourier` | Entry point. Turns SIGINT and SIGTERM into context cancellation, passes `doctor.New()` to `cli.Run` and exits with the returned code. |
-| `internal/cli` | Parses `help`, `version`, `doctor` and `--json`. Rejects planned commands, unknown commands and extra arguments, and writes text or JSON output. `cli.Version` defaults to `0.1.0-dev` and can be set at build time with `-ldflags -X`. |
-| `internal/config` | Resolves the configuration file and data directory paths, normalizes email addresses and loads the TOML file. It rejects unknown keys, credential keys, invalid addresses, a bot address in the sender allowlist, unknown or duplicate events, invalid ports, hosts and token lifetimes, and unsafe files. TOML syntax and type errors are returned on their own, without echoing the offending text. Unknown and credential keys are reported together before any value is checked. Once the file decodes cleanly, all remaining validation errors are returned together with `errors.Join`. No error contains local absolute paths. |
+| `cmd/turncourier` | Entry point. Turns SIGINT and SIGTERM into context cancellation, assembles `cli.Deps` (the production checker, terminal, Keychain factory, environment lookup, random source and clock) and exits with the code `cli.Run` returns. |
+| `internal/cli` | Parses `help`, `version`, `doctor`, `init` and `--json`. Rejects planned commands, unknown commands and extra arguments, and writes text or JSON output. `cli.Version` defaults to `0.1.0-dev` and can be set at build time with `-ldflags -X`. `init.go` holds the interactive flow, `terminal.go` the `x/term` terminal, with the echo switch in `terminal_darwin.go` and a stub for other platforms. |
+| `internal/config` | Resolves the configuration file and data directory paths, normalizes email addresses and loads the TOML file. It rejects unknown keys, credential keys, invalid addresses, a bot address in the sender allowlist, unknown or duplicate events, invalid ports, hosts and token lifetimes, and unsafe files. TOML syntax and type errors are returned on their own, without echoing the offending text. Unknown and credential keys are reported together before any value is checked. Once the file decodes cleanly, all remaining validation errors are returned together with `errors.Join`. `Render` produces a configuration file in the same shape as the example, and `CreateFile` writes it atomically with `0600` and never overwrites. No error contains local absolute paths. |
 | `internal/task` | Task states (`CREATED`, `RUNNING`, `WAITING_INPUT`, `WAITING_APPROVAL`, `COMPLETED`, `FAILED`, `DELIVERY_UNCERTAIN`, `CLOSED`), events and the only transition table. It also decides which states accept replies and which can dispatch one. |
-| `internal/queue` | Reply queue states (`QUEUED`, `DISPATCHING`, `ACKNOWLEDGED`, `UNCERTAIN`, `REJECTED`), events and the transition table, kept separate from task states. |
-| `internal/store/sqlite` | Opens and migrates the database, creates task IDs, persists tasks with optimistic versioning, and deduplicates, queues, dispatches and recovers replies. Every state change runs in one transaction and goes through the state machines first. |
+| `internal/queue` | Two separate transition tables, neither reusing the other and neither doing any I/O: reply queue states (`QUEUED`, `DISPATCHING`, `ACKNOWLEDGED`, `UNCERTAIN`, `REJECTED`) in `state.go`, and outgoing notification states (`PENDING`, `SENDING`, `SENT`, `UNCERTAIN`, `ABANDONED`) in `outbox.go`. |
+| `internal/store/sqlite` | Opens and migrates the database, creates task IDs, persists tasks with optimistic versioning, deduplicates, queues, dispatches and recovers replies, and holds the instance ID, key metadata, outgoing notifications, encrypted pending bodies, fetch cursors and rejected inbound mail. Every state change runs in one transaction and goes through the state machines first. |
+| `internal/security/keychain` | Generic-password entries under the service `io.github.chaorookie.turncourier`. `Set` starts one `security -i` process per call and sends a single `add-generic-password -U … -X <hex>` line on stdin, then reads the value back to confirm it; `Add` is the same without `-U`, so it only ever creates. `Get` uses `find-generic-password -w` and reads only stdout. Exit code 44 means "not found". Keys are 32 random bytes stored as 43 `base64url` characters; `KeyCheck` derives the 8-byte value registered in the database. |
+| `internal/security/token` | Reply token v1: 30 bytes (version, key id, a 12-byte random nid, a 16-byte truncated HMAC-SHA256 tag) encoded as 48 Crockford base32 characters. The task, owner and expiry are read from the notification and task rows and enter the MAC without travelling in the token. `Verify` checks the key id, the claims, the tag with `hmac.Equal` and only then the expiry, so a tampered expired token reports a bad signature. `Key.BodyDigest` computes the keyed body digest. Tokens and keys redact themselves in `String`, `Format` and `LogValue`; only `Reveal` returns the token text. |
+| `internal/security/payload` | AES-256-GCM over pending bodies, with a random 96-bit nonce. The ciphertext is `0x01 ‖ nonce ‖ ciphertext ‖ tag`, 29 bytes longer than the plaintext, and the plaintext is capped at 1 MiB. The associated data binds the purpose (`r` for a reply, `n` for a notification), the key id, the task ID and the sequence number, so a ciphertext moved to another row will not open. |
+| `internal/mail/smtp` | One message over implicit TLS through go-smtp's `DialTLS` only, never STARTTLS or plaintext, with debug output off because it would print credentials. Each step has its own deadline, the body is written in 64 KiB chunks, and the outcome is classified as sent, definitely not sent, rejected or uncertain. It does not render mail, retry or touch storage. |
+| `internal/mail/imap` | Read-only mail collection: implicit TLS, `LIST`, `EXAMINE`, rescan by UID, `BODY.PEEK` fetches and `IDLE`, each command with a deadline whose expiry closes the connection. That is what stops QQ's bare `* BAD` and half-open connections from blocking forever. `watcher.go` runs the long-lived loop with backoff reconnects, a login rate limit and an auth-failure pause. It never sets `\Seen`, moves, expunges or appends. |
 | `internal/doctor` | Read-only diagnostics. The platform, the `PATH` lookup, the version runner and the timeout are injectable, so tests run offline. |
 | `tools/commentcheck` | Walks the source tree and fails if a package, type or named function has no Chinese doc comment. |
 | `tools/covercheck` | Reads a Go cover profile and fails if statement-weighted coverage is below the minimum. |
-| `tests/integration` | Test-only package. Loads a copy of the example configuration, opens a real database in a temporary directory and drives a task and its replies from start to close, including a simulated crash. |
+| `tests/integration` | Test-only package. Loads a copy of the example configuration, opens a real database in a temporary directory and drives a task and its replies from start to close, including a simulated crash, plus a second lifecycle over notifications, tokens, the keyed digest and body ciphertext. |
+| `tests/docs` | Test-only package. Reads `go.mod` and the imports of every non-test Go file, and fails when the dependency tables in this document and in `docs/zh-CN/development.md` miss a direct module, disagree with its pinned version, or fail to name a package that imports it directly. |
+| `tests/live` | Manual L1 probes, never run by `make test` or CI. `sample.go` carries no build tag and holds the pure redaction, classification and output-directory checks; the three probe files carry `//go:build live` and only do I/O and confirmations. |
 
 Command parsing rules:
 
 - Running with no arguments is the same as `help`. `--help` and `-h` also mean `help`, and `--version` means `version`.
-- The only argument accepted after a command is a single `--json`. An invalid command name is reported before an invalid argument.
+- The only argument accepted after `help`, `version` or `doctor` is a single `--json`. `init` takes no arguments at all, `--json` included. An invalid command name is reported before an invalid argument.
 - JSON output is one indented object. `doctor --json` returns `platform`, `supported`, `ready` and `tools`. Each tool entry has `name`, `status`, and either `version` or `detail`. The possible `status` values are `ok`, `missing`, `timeout`, `cancelled`, `error` and `invalid`.
 
 ## doctor safety boundary
@@ -110,41 +139,69 @@ Command parsing rules:
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Success. For `doctor`, the report is ready. |
-| 1 | `doctor` is not ready, or writing the output failed. Not ready means the platform is not macOS, or `git`, `codex` or `claude` is missing, timed out, was cancelled, failed to run or produced unexpected output. A not-ready report is still written in full. |
-| 2 | Usage error: an unknown command, an unexpected argument, or a planned command (`init`, `run`, `tasks`, `logs`, `service`). |
+| 0 | Success. For `doctor`, the report is ready. For `init`, the configuration file, the instance ID, the authorization code and both keys are in place, and the summary is on stdout. |
+| 1 | `doctor` is not ready, `init` failed, or writing the output failed. Not ready means the platform is not macOS, or `git`, `codex` or `claude` is missing, timed out, was cancelled, failed to run or produced unexpected output. A not-ready report is still written in full. `init` prints one Chinese line on stderr saying why: not macOS, not an interactive terminal, an existing configuration file that does not load, key metadata whose Keychain entry is missing or no longer matches, three invalid answers in a row, or a Keychain or database error. Ctrl-C prints "已取消。". Error text contains no paths and no secrets. |
+| 2 | Usage error: an unknown command, an unexpected argument (including `--json` after `init`), or a planned command (`run`, `tasks`, `logs`, `service`). |
 | 141 | Not returned by the program. If stdout or stderr is a closed pipe, the process is killed by SIGPIPE, following Unix convention, and the shell reports 141 (128 + 13). |
 
 ## Persistence and recovery
 
-These rules are implemented and tested in `internal/config` and `internal/store/sqlite`. No command uses them yet.
+These rules are implemented and tested in `internal/config` and `internal/store/sqlite`. Only `init` uses them so far.
 
 **Locations.** The configuration file is `$TURNCOURIER_CONFIG`, which must be an absolute path, or else `TurnCourier/turncourier.toml` under `os.UserConfigDir()` (on macOS, `~/Library/Application Support/TurnCourier/turncourier.toml`). The data directory is `$TURNCOURIER_DATA_DIR`, which must also be absolute, or else the directory that holds the configuration file. The database file is `turncourier.db` in the data directory. `TURNCOURIER_NOTIFY_EVENTS` (comma-separated) is the only setting an environment variable can override. The sender allowlist, addresses and token lifetime cannot be overridden this way.
 
-**Configuration file.** It must be a regular file of at most 1 MiB. On Unix it must belong to the current user and must not be writable by group or others. Key names are case-sensitive, so a variant such as `ADDRESS` counts as an unknown key. Unknown keys and credential keys such as `password` or `token` (in any letter case) are rejected: the mail authorization code and signing key are meant for the Keychain, which is not wired up yet.
+**Configuration file.** It must be a regular file of at most 1 MiB. On Unix it must belong to the current user and must not be writable by group or others. Key names are case-sensitive, so a variant such as `ADDRESS` counts as an unknown key. Unknown keys and credential keys such as `password` or `token` (in any letter case) are rejected: the mail authorization code and the keys belong in the Keychain, where `init` puts them. `init` writes this file itself, atomically, with `0600` and without ever overwriting an existing one.
 
-**Database.** On Unix the data directory must be `0700` and the database file `0600`. Both are created with those modes, and wider existing modes are refused. The connection uses WAL, `synchronous=FULL`, foreign keys and a 5-second busy timeout, and write transactions start with `BEGIN IMMEDIATE`. Each process uses a single connection, and all tables are `STRICT`. When several processes open a new database at once, switching the empty file to WAL can fail with `SQLITE_BUSY` without waiting for the busy timeout, so opening retries for up to 5 seconds. Migrations are embedded SQL files. Each one runs in a transaction together with the `user_version` update and reads the version again inside that transaction, so concurrent openers apply it only once. A database with a newer schema than the build knows is refused with its tables and data untouched, although opening it may already have switched the file to WAL mode.
+**Database.** On Unix the data directory must be `0700` and the database file `0600`. Both are created with those modes, and wider existing modes are refused. The connection uses WAL, `synchronous=FULL`, foreign keys, `secure_delete`, and a 5-second busy timeout, and write transactions start with `BEGIN IMMEDIATE`. `secure_delete` is `ON`, not `FAST`, because `FAST` does not zero overflow pages, which is where a body of more than a few kilobytes lives. Each process uses a single connection, and all tables are `STRICT`. When several processes open a new database at once, switching the empty file to WAL can fail with `SQLITE_BUSY` without waiting for the busy timeout, so opening retries for up to 5 seconds. Migrations are embedded SQL files. Each one runs in a transaction together with the `user_version` update and reads the version again inside that transaction, so concurrent openers apply it only once. A database with a newer schema than the build knows is refused with its tables and data untouched, although opening it may already have switched the file to WAL mode.
 
 **Durability.** `synchronous=FULL` makes committed data survive a process crash. On macOS it does not guarantee durability after a power loss or a kernel panic: the SQLite driver uses `F_FULLFSYNC` only when `PRAGMA fullfsync=1` is set, and a plain `fsync` there does not force the data onto stable storage. Turning on `fullfsync`, which holds the write lock longer, is to be evaluated in the later security and recovery phase.
 
-**What is stored.** Tasks (a 10-character random ID, owner, agent, agent session ID, state, version and timestamps), task events, inbound reply metadata (mailbox account, UIDVALIDITY, UID, Message-ID and the SHA-256 digest of the body) and reply queue items. Times are UTC Unix milliseconds. There is no column for an email body or a credential. Encrypting pending bodies, with the key in the Keychain, must be built before any body is stored.
+**What is stored.** Migration `0001` created tasks (a 10-character random ID, owner, agent, agent session ID, state, version and timestamps), task events, inbound reply metadata and reply queue items. Times are UTC Unix milliseconds throughout. Migration `0002` adds the rest of the mail loop:
+
+| Table | Contents |
+| --- | --- |
+| `inbound_messages` | Rebuilt with a `folder` column. A UID is unique only within one folder (RFC 3501), so the UID key is now `(account, folder, uid_validity, uid)`. The `(account, message_id)` key is unchanged. `body_sha256` keeps its name, published in `0001`, but from `0002` on it holds the keyed digest. |
+| `replies` | Rebuilt alongside `inbound_messages`, because it references that table and a migration runs inside a transaction, where foreign keys cannot be switched off. Its columns, the partial unique index for one in-flight reply per task and the `AUTOINCREMENT` sequences are all preserved; existing `inbound_messages` rows get the folder `INBOX`. |
+| `instance` | One row with the instance ID: 10 random bytes as 16 lowercase Crockford base32 characters, created by `init` and stable for as long as the data directory is. |
+| `crypto_keys` | Key metadata only, never key material: purpose (`token` or `payload`), key id 1–255, state (`active`, `retired`, `destroyed`), an 8-byte check value and timestamps. A partial unique index allows one `active` key per purpose. |
+| `notifications` | One row per outgoing notification: task, event, the 12-byte nid, our Message-ID, the delivered Message-ID, the token key id and expiry, state, abandon reason, attempts, `not_before` and timestamps. A partial unique index allows at most one `SENDING` row globally, so sending is serial. Triggers make the fields that enter the token MAC immutable and let the delivered Message-ID be written only once. |
+| `notification_payloads`, `reply_payloads` | The ciphertext of a pending body, with its key id. Triggers reject an insert unless the notification is `PENDING` or the reply is `QUEUED`, reject any update, and delete the row in the same transaction that moves the parent to a terminal state. |
+| `fetch_cursors` | `(account, folder)` with its UIDVALIDITY and last handled UID. |
+| `inbound_rejections` | Metadata for a message that was refused: account, folder, UID, Message-ID, sender, a reason code and the task, but never a subject or a body. The database only constrains the reason's shape (1–40 characters of `[a-z_]`); the list of valid codes lives in Go, so Phase 4b can add to it without a migration. |
+
+There is still no column for a plaintext body or a credential.
+
+**Pending bodies.** Only bodies that still have work to do are on disk, and only as ciphertext: a notification's content while it is `PENDING`, a reply's body while it is `QUEUED`. The key is read from the Keychain at startup and passed in through `sqlite.Options`; without it, every operation that would encrypt or decrypt a body fails rather than falling back to plaintext. A body is encrypted inside the same transaction that assigns its sequence number, because the sequence number is part of the associated data. When the parent row reaches a terminal state, a trigger deletes the ciphertext in that same transaction; `UNCERTAIN` keeps its body, because a local check may still put the item back in the queue. After a cleanup, and once more when the database is opened, the store makes a best-effort `PRAGMA wal_checkpoint(TRUNCATE)` so that no stale frame is left in the WAL file. That checkpoint temporarily sets `busy_timeout` to 0: it holds the single connection, so waiting for a reader would block everything else in the process. If it is busy it gives up immediately and leaves the work to the next one. What SQLite cannot reach is a copy outside the file: ciphertext left in an APFS snapshot or a Time Machine backup can still be decrypted while the payload key is in the Keychain.
+
+**Keys and the Keychain.** The service is `io.github.chaorookie.turncourier` and the account is `<instance id>:<purpose>`: `qq-auth-code`, `token-key-<kid>` and `payload-key-<kid>`. Putting the instance ID in the account name keeps two data directories from overwriting each other's entries. Phase 4a only ever creates key id 1, so after `init` there are exactly three entries; a rotation would add an entry rather than replace one, which is why rotating the signing key cannot make an already queued ciphertext unreadable. The database records the purpose, the key id, the state and an 8-byte check value: HMAC-SHA256 keyed with the key material itself, over a fixed prefix, the purpose and the key id, so replacing the key changes the value. `init` compares that value with the entry in the Keychain: if the metadata is registered but the entry is missing, or the entry no longer matches, `init` refuses to regenerate or overwrite, because doing so would make pending data undecryptable.
+
+**Outgoing notifications.** A notification is `PENDING`, `SENDING`, `SENT`, `UNCERTAIN` or `ABANDONED`. Claiming one is serial by construction — the partial unique index allows a single `SENDING` row — and it returns the decrypted content. Before claiming, the store abandons any `PENDING` notification whose token would expire within ten minutes, with the reason `expired`. If SMTP confirms delivery the row becomes `SENT`; if it is definitely not delivered it goes back to `PENDING` with a delay; and if the outcome cannot be known it becomes `UNCERTAIN`, which only a local check resolves. A notification is never resent automatically. Closing a task abandons its `PENDING` notifications with `task_closed` but leaves `SENDING` and `UNCERTAIN` alone, since their outcome is not yet known; a closed task's notification never returns to `PENDING`.
 
 **Writes.** Every state change runs in one transaction. The new state comes from `internal/task` or `internal/queue`, and the task row is updated only if its version still matches, so a caller holding a stale version gets a conflict error. `start`, `reply_dispatched`, `delivery_unknown` and `delivery_confirmed` happen only as part of the matching storage operation. `fail` and `close` reject every queued reply of the task in the same transaction.
 
-**Deduplication.** An inbound reply is unique by `(account, UIDVALIDITY, UID)` and by `(account, Message-ID)`. The same message recorded again returns the existing queue item. The same Message-ID with a different body digest, the same UID with a different Message-ID, or the same message for another task is a conflict and is not stored. The duplicate check, the inbound record and the queue item are written in one transaction. A reply to a task that does not accept replies is kept as `REJECTED`, with the reason `task_not_accepting`, `task_failed` or `task_closed`.
+**Deduplication.** An inbound reply is unique by `(account, folder, UIDVALIDITY, UID)` and by `(account, Message-ID)`. The folder is part of the UID key only: the same message copied into both `INBOX` and `Junk` has two UIDs but one Message-ID, so it is still recognized as a duplicate. The body digest is the keyed HMAC-SHA256 described above, computed with the token key of the notification the reply refers to. The same message recorded again returns the existing queue item. The same Message-ID with a different body digest, the same UID with a different Message-ID, or the same message for another task is a conflict and is not stored. The duplicate check, the inbound record and the queue item are written in one transaction. A reply to a task that does not accept replies is kept as `REJECTED`, with the reason `task_not_accepting`, `task_failed` or `task_closed`.
 
 **Dispatch.** Replies leave the queue in local enqueue order, never by the sender's `Date` header, and only while the task is `COMPLETED` or `WAITING_INPUT`. Claiming a reply marks it `DISPATCHING`, records the state before dispatch and moves the task to `RUNNING`. A task has at most one reply in `DISPATCHING` or `UNCERTAIN` at a time. The API checks this, and a partial unique index enforces it in the database too. When the agent confirms receipt, the reply becomes `ACKNOWLEDGED`. If receipt cannot be confirmed, the reply becomes `UNCERTAIN` and a `RUNNING` task becomes `DELIVERY_UNCERTAIN`.
 
-**Recovery.** At startup, `RecoverInFlight` turns every `DISPATCHING` reply into `UNCERTAIN` and returns all uncertain replies for a local check. It never dispatches anything again. Because it treats every `DISPATCHING` reply as left over from a crash, it must be called only by the single dispatching process, before that process starts dispatching, and while no other process holds a reply in flight; otherwise it would mark a reply that another process is still dispatching as `UNCERTAIN`. The single-instance lock that guarantees this belongs to the background service, which is not built yet. If the check finds the reply was delivered, the reply becomes `ACKNOWLEDGED` and a `DELIVERY_UNCERTAIN` task goes back to `RUNNING`. If it was not delivered, the reply returns to `QUEUED` with its original sequence number, and the task returns to `COMPLETED` or `WAITING_INPUT`, as it was before dispatch. If the task has been closed or has failed in the meantime, the reply is rejected instead. A reply can go back to the queue only if the task has recorded no event since the dispatch other than the uncertain delivery itself. Otherwise the agent has evidently handled it, and it must be resolved as delivered. There is no end-to-end exactly-once guarantee: the agent accepting a message and the SQLite commit cannot be one transaction, so an unconfirmed delivery waits for a local check instead of being resent.
+**Recovery.** At startup, `RecoverInFlight` turns every `DISPATCHING` reply into `UNCERTAIN` and returns all uncertain replies for a local check. It never dispatches anything again. `RecoverSendingNotifications` is its counterpart on the outgoing side: it turns every `SENDING` notification into `UNCERTAIN` and returns all uncertain notifications for a local check, never resending anything. Both treat every in-flight row as left over from a crash, so each must be called only by the single process that does that work, before that process starts working, and while no other process holds an item in flight; otherwise they would mark an item another process is still handling as `UNCERTAIN`. The single-instance lock that guarantees this belongs to the background service, which is not built yet. If the check finds the reply was delivered, the reply becomes `ACKNOWLEDGED` and a `DELIVERY_UNCERTAIN` task goes back to `RUNNING`. If it was not delivered, the reply returns to `QUEUED` with its original sequence number, and the task returns to `COMPLETED` or `WAITING_INPUT`, as it was before dispatch. If the task has been closed or has failed in the meantime, the reply is rejected instead. A reply can go back to the queue only if the task has recorded no event since the dispatch other than the uncertain delivery itself. Otherwise the agent has evidently handled it, and it must be resolved as delivered. There is no end-to-end exactly-once guarantee: the agent accepting a message and the SQLite commit cannot be one transaction, so an unconfirmed delivery waits for a local check instead of being resent.
 
 ## Dependencies
 
 | Module | Version | License | Used by |
 | --- | --- | --- | --- |
-| `modernc.org/sqlite` | v1.59.0 | BSD-style | `internal/store/sqlite`. Pure Go SQLite, so builds keep `CGO_ENABLED=0`. |
+| `modernc.org/sqlite` | v1.59.0 | BSD-style | `internal/store/sqlite`. Pure Go SQLite, so builds keep `CGO_ENABLED=0`. `tests/live` also opens the database read-only to read the instance ID. |
 | `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`. The loader compares every key path from `MetaData.Keys()` against an allowlist, segment by segment and case-sensitively. `MetaData.Undecoded()` is not enough, because the library matches keys to struct fields case-insensitively. |
+| `golang.org/x/term` | v0.46.0 | BSD-3-Clause | `internal/cli`. Reads the authorization code without echoing it during `init`. |
+| `github.com/emersion/go-smtp` | v0.25.0 | MIT | `internal/mail/smtp`, and its server side as the offline fake server in tests. Chosen over the frozen `net/smtp` because it has command timeouts and because `CloseWithResponse` returns the server's DATA response, which L1 needs to find the ID QQ assigns. It does not itself refuse to send credentials over plaintext, so only `DialTLS` is allowed and a source test pins that. |
+| `github.com/emersion/go-imap/v2` | v2.0.0-beta.8 | MIT | `internal/mail/imap` uses `imapclient`; `imapserver` and `imapmemserver` appear only in tests. Still a beta with breaking changes between betas, so the version is exact, the library is wrapped and an upgrade PR gets a human review. |
+| `github.com/emersion/go-message` | v0.18.2 | MIT | Reaches `internal/mail/imap` because `imapclient` imports `go-message/mail`. `tests/live` imports it directly, with `charset` for GB18030 and GBK decoding. |
+| `github.com/emersion/go-sasl` | `b788ff22d5a6` | MIT | `internal/mail/smtp` uses `NewPlainClient` for `AUTH PLAIN`; go-imap/v2 also pulls it in. |
+| `golang.org/x/text` | v0.42.0 | BSD-3-Clause | `tests/live/sample.go` imports `encoding/simplifiedchinese` directly, and `go-message/charset` needs it too, so it enters the build graph through `tests/live`. Pinned explicitly: the v0.14.0 that go-message asks for carries GO-2026-5970, fixed in v0.39.0. |
+| `golang.org/x/sys` | v0.48.0 | BSD-3-Clause | `internal/cli` turns terminal echo off through termios on macOS. Also required by `golang.org/x/term` and `modernc.org/sqlite`. |
 
-`modernc.org/sqlite` also brings in `dustin/go-humanize`, `google/uuid`, `mattn/go-isatty`, `ncruces/go-strftime`, `remyoudompheng/bigfft`, `golang.org/x/sys`, `modernc.org/libc`, `modernc.org/mathutil` and `modernc.org/memory`, all under MIT or BSD-style licenses.
+`modernc.org/sqlite` also brings in `dustin/go-humanize`, `google/uuid`, `mattn/go-isatty`, `ncruces/go-strftime`, `remyoudompheng/bigfft`, `modernc.org/libc`, `modernc.org/mathutil` and `modernc.org/memory`, all under MIT or BSD-style licenses. `golang.org/x/sys` is pinned at v0.48.0, which `golang.org/x/term` v0.46.0 requires.
+
+The product binary links only `BurntSushi/toml`, `modernc.org/sqlite` with its dependencies, `golang.org/x/term` and `golang.org/x/sys`. The four mail modules and `golang.org/x/text` are used by tests and `tests/live` only; they enter the binary in Phase 4b, when `internal/app` wires the mail loop into a command. `go version -m dist/turncourier` is the check.
 
 Dependency rules:
 
@@ -156,7 +213,7 @@ Dependency rules:
 
 `make check` runs `fmt-check`, `vet`, `modverify`, `comments`, `test` and `lint`:
 
-- `gofmt` must report no changes under `cmd`, `internal`, `tests` and `tools`, and `go vet ./...` must pass.
+- `gofmt` must report no changes under `cmd`, `internal`, `tests` and `tools`, and `go vet ./...` must pass. `vet` and `lint` each run a second time with `-tags live` over `tests/live`, so the probe code is compiled and checked even though it is never run.
 - `go mod verify` checks that the downloaded modules still match the hashes recorded in `go.sum`, so a tampered dependency cannot enter the build.
 - `commentcheck` requires a Chinese doc comment on every hand-written package, on every type (including types declared inside functions) and on every named function or method, test code included. Generated files are exempt.
 - `staticcheck` v0.8.1 runs its default checks plus ST1020, ST1021 and ST1022, which require exported identifiers' doc comments to start with the identifier name.
@@ -176,7 +233,7 @@ Commands, the coverage calculation and the comment rules are covered in the [dev
 
 ## Planned architecture
 
-> **Planned.** Nothing in this section is implemented, except that Phase 3 built the task and queue state machines, TOML configuration loading and SQLite storage as internal packages; see [Current scope](#current-scope) and [Persistence and recovery](#persistence-and-recovery). It summarizes [docs/zh-CN/design.md](../zh-CN/design.md) and may change as later phases are verified. The full target directory tree is kept only in the design document. Directories are created when their code is written, not ahead of time.
+> **Planned.** Nothing in this section is implemented, except what Phase 3 and Phase 4a built: the state machines, TOML configuration loading, SQLite storage, the Keychain wrapper, reply tokens, body encryption, the SMTP and IMAP clients and `init`; see [Current scope](#current-scope) and [Persistence and recovery](#persistence-and-recovery). It summarizes [docs/zh-CN/design.md](../zh-CN/design.md) and may change as later phases are verified. The full target directory tree is kept only in the design document. Directories are created when their code is written, not ahead of time.
 
 ### Module responsibilities (planned)
 
@@ -252,4 +309,4 @@ Delivery confirmation uncertain → DELIVERY_UNCERTAIN (recovered after a local 
 
 Before `v0.1.0-alpha`, Codex and Claude Code must each complete ten consecutive real email rounds. Those rounds must cover recovery after a network outage, duplicate, forged and expired mail, FIFO while the agent is busy, and privacy filtering. The release would then publish macOS binaries with SHA-256 checksums, with cross-platform packages and Homebrew later. A successful build does not replace real acceptance testing.
 
-Planned order of work: research, public engineering skeleton, configuration, storage and state machine, email round trip, Codex, Claude Code, security and recovery, real acceptance testing, release. The current phase is configuration, storage and the state machine: their packages exist, but no command uses them yet.
+Planned order of work: research, public engineering skeleton, configuration, storage and state machine, email round trip, Codex, Claude Code, security and recovery, real acceptance testing, release. The current phase is the email round trip: its offline half (4a) is built and tested, and the rest waits for the L1 probe against a real mailbox.

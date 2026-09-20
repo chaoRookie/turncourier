@@ -1,6 +1,6 @@
 # 开发指南
 
-状态：pre-alpha。命令只有 `help`、`version`、`doctor` 三个，另有一套质量门槛。配置、存储与状态机（Phase 3）已作为内部包实现并通过测试，但尚未接入任何命令；没有邮件收发、Agent 适配器、Keychain 或后台服务。规划内容见[设计文档](design.md)，当前代码结构与持久化语义见[英文架构文档](../en/architecture.md)，各阶段范围见实施清单（[Phase 2](plans/phase-02.md)、[Phase 3](plans/phase-03.md)）。
+状态：pre-alpha。命令有 `help`、`version`、`doctor` 与 `init`，另有一套质量门槛。Phase 4 拆分为 4a（离线实现）、L1（维护者在本机执行的真机探测）与 4b（依据 L1 结果实现）；4a 已完成 Keychain 封装、回复令牌、正文加密、迁移 `0002`、待发通知状态机与存储、SMTP 与 IMAP 客户端及其离线假服务器、只由人工执行的 `tests/live` 探测工具，以及第一个使用配置与存储的命令 `init`。TurnCourier 仍不能收发邮件：没有通知渲染、入站验证与收发循环，也没有 Agent 适配器和后台服务。规划内容见[设计文档](design.md)，当前代码结构与持久化语义见[英文架构文档](../en/architecture.md)，各阶段范围见实施清单（[Phase 2](plans/phase-02.md)、[Phase 3](plans/phase-03.md)、[Phase 4](plans/phase-04.md)）。
 
 本文所有命令都在仓库根目录执行。
 
@@ -8,7 +8,7 @@
 
 ### Go 1.27.1
 
-`go.mod` 要求 Go 1.27.1。生产代码依赖两个第三方模块（见[第三方依赖](#第三方依赖)），首次运行 `go vet`、`go test` 或 `make check` 时，go 命令会从模块代理下载它们；`modernc.org/sqlite` 体积较大，首次下载和编译需要几分钟。
+`go.mod` 要求 Go 1.27.1。仓库依赖若干第三方模块（见[第三方依赖](#第三方依赖)），首次运行 `go vet`、`go test` 或 `make check` 时，go 命令会从模块代理下载它们；`modernc.org/sqlite` 体积较大，首次下载和编译需要几分钟。
 
 本机已经装有 Go 时，先确认版本：
 
@@ -65,17 +65,24 @@ git check-ignore .local/toolchains/go/bin/go
 
 | 模块 | 版本 | 许可证 | 使用方 |
 | --- | --- | --- | --- |
-| `modernc.org/sqlite` | v1.59.0 | BSD 风格 | `internal/store/sqlite`；纯 Go 实现，构建保持 `CGO_ENABLED=0` |
+| `modernc.org/sqlite` | v1.59.0 | BSD 风格 | `internal/store/sqlite`；纯 Go 实现，构建保持 `CGO_ENABLED=0`。`tests/live` 另以只读方式打开数据库读取实例 ID |
 | `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`；用 `MetaData.Keys()` 列出全部键路径，与白名单逐段区分大小写比对来拒绝未知键（该库会把大小写变体匹配到字段，`MetaData.Undecoded()` 看不到它们） |
+| `golang.org/x/term` | v0.46.0 | BSD-3-Clause | `internal/cli`；`init` 以不回显方式读入授权码 |
+| `github.com/emersion/go-smtp` | v0.25.0 | MIT | `internal/mail/smtp` 用它的客户端发信，测试用它的服务端作离线假服务器。选它而不用已冻结的 `net/smtp`：它自带命令超时，`CloseWithResponse` 还能取回服务端的 DATA 响应文本（L1 需要它查找 QQ 分配的 ID）。它不阻止在明文连接上发送凭据，因此只允许 `DialTLS`，并由源码测试钉住 |
+| `github.com/emersion/go-imap/v2` | v2.0.0-beta.8 | MIT | `internal/mail/imap` 只用 `imapclient`；`imapserver` 与 `imapmemserver` 只在测试中用作离线假服务器。仍是 beta，各 beta 之间有破坏性 API 变更，因此固定精确版本、封装在本包之后，升级 PR 须人工审阅 |
+| `github.com/emersion/go-message` | v0.18.2 | MIT | 随 `imapclient`（它导入 `go-message/mail`）进入 `internal/mail/imap`；`tests/live` 直接导入它与 `charset` 解码 GB18030、GBK |
+| `github.com/emersion/go-sasl` | 伪版本 `b788ff22d5a6` | MIT | `internal/mail/smtp` 用 `NewPlainClient` 做 `AUTH PLAIN`；go-imap/v2 也会引入它 |
+| `golang.org/x/text` | v0.42.0 | BSD-3-Clause | `tests/live/sample.go` 直接导入 `encoding/simplifiedchinese`，`go-message/charset` 也需要它，因此经 `tests/live` 进入构建图。显式固定：go-message 要求的 v0.14.0 有模块级漏洞 GO-2026-5970，修复于 v0.39.0 |
+| `golang.org/x/sys` | v0.48.0 | BSD-3-Clause | `internal/cli`；在 macOS 上经 termios 关闭终端回显。同时也是 `golang.org/x/term` 与 `modernc.org/sqlite` 的依赖 |
 
-`modernc.org/sqlite` 另外带入 `dustin/go-humanize`、`google/uuid`、`mattn/go-isatty`、`ncruces/go-strftime`、`remyoudompheng/bigfft`、`golang.org/x/sys`、`modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory`，许可证均为 MIT 或 BSD 风格。选型理由与实测记录见 [Phase 3 实施清单](plans/phase-03.md) 的决策 D1。
+`modernc.org/sqlite` 另外带入 `dustin/go-humanize`、`google/uuid`、`mattn/go-isatty`、`ncruces/go-strftime`、`remyoudompheng/bigfft`、`modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory`，许可证均为 MIT 或 BSD 风格；`golang.org/x/sys` 固定在 v0.48.0，这是 `golang.org/x/term` v0.46.0 的要求。选型理由与实测记录见 [Phase 3 实施清单](plans/phase-03.md) 的决策 D1 与 [Phase 4 实施清单](plans/phase-04.md) 的决策 D2。
 
 依赖规则：
 
 - 只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。新增依赖须在实施清单或 issue 中说明理由与许可证，并在上表记录。
 - 版本固定在 `go.mod` 与 `go.sum`。`make modverify`（`make check` 的一部分）执行 `go mod verify`，确认模块缓存中的依赖与 `go.sum` 记录的哈希一致，防止被篡改的依赖进入构建。
 - govulncheck（`make security`）与 Dependabot 的 `gomod` 更新覆盖这些依赖。
-- 目前没有命令导入配置、状态机或存储包，产品二进制不链接上述模块。正式发布链接它们的二进制之前，必须补齐第三方许可声明。
+- 产品二进制目前只链接 `BurntSushi/toml`、`modernc.org/sqlite`（及其依赖）、`golang.org/x/term` 与 `golang.org/x/sys`；四个邮件模块与 `golang.org/x/text` 只被测试和 `tests/live` 使用，要到 4b 由 `internal/app` 把收发循环接入命令后才进入二进制。用 `go version -m dist/turncourier` 核对。正式发布链接这些模块的二进制之前，必须补齐第三方许可声明。
 
 ## 常用 make 目标
 
@@ -84,11 +91,11 @@ git check-ignore .local/toolchains/go/bin/go
 | `make build` | `go build -trimpath` 输出 `dist/turncourier`。版本号默认 `0.1.0-dev`，可用 `make build VERSION=0.1.0-dev.local` 覆盖 | 否 |
 | `make fmt` | 用 `gofmt -w` 格式化 `cmd`、`internal`、`tests`、`tools` | 否 |
 | `make fmt-check` | 列出未格式化的文件并失败；gofmt 本身出错也算失败 | 否 |
-| `make vet` | `go vet ./...` | 首次下载模块依赖时 |
+| `make vet` | `go vet ./...`，再加 `go vet -tags live ./tests/live/`：探测代码只编译检查，从不运行 | 首次下载模块依赖时 |
 | `make modverify` | `go mod verify`，校验依赖与 `go.sum` 记录的哈希一致 | 首次下载模块依赖时 |
 | `make comments` | `go run ./tools/commentcheck .`，检查中文注释 | 否 |
 | `make test` | `go test -race -covermode=atomic -coverprofile=coverage.out ./...`，再用 `tools/covercheck` 要求覆盖率不低于 80% | 首次下载模块依赖时 |
-| `make lint` | staticcheck v0.8.1 检查 `./...` | 首次安装或首次下载模块依赖时 |
+| `make lint` | staticcheck v0.8.1 检查 `./...`，再加 `staticcheck -tags live ./tests/live/` | 首次安装或首次下载模块依赖时 |
 | `make check` | 依次运行 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint` | 首次下载模块依赖或安装 staticcheck 时 |
 | `make secrets` | 用 gitleaks v8.30.1 执行 `scripts/scan-secrets.sh` | 首次安装时 |
 | `make security` | 先执行 `make secrets`，再用 govulncheck v1.8.0 检查 `./...` | 是：govulncheck 每次运行都要查询 Go 漏洞数据库 |
@@ -172,9 +179,12 @@ go run ./tools/commentcheck .
 ## 测试约定
 
 - 单元测试和被测代码放在同一目录（`*_test.go`）。
-- 跨包的集成测试放在 `tests/integration/`（包名 `integration_test`，只有测试文件，需要单独写中文包注释）。`lifecycle_test.go` 组合示例配置、临时目录中的真实 SQLite 与两个状态机，走完一条回复从入队、派发、模拟崩溃后恢复到任务关闭的完整流程。端到端和真实验收测试按设计将来也放在 `tests/` 下，有代码时再建对应目录。
-- 测试必须离线：不访问网络、真实邮箱、模型或 Agent 会话，也不依赖本机是否装有 `git`、`codex`、`claude`。`internal/doctor` 的测试通过 `Checker` 注入 `GOOS`、`Lookup`、`Run` 和 `Timeout`，使用合成的版本字符串（见 `doctor_test.go` 中的 `healthyChecker`）。CLI 测试把输出写到 `bytes.Buffer`。
-- 需要真实子进程时，使用测试辅助子进程模式，让测试二进制自己扮演被调用的命令。`internal/doctor/doctor_test.go` 中的 `TestMain` 发现环境变量 `TURNCOURIER_TEST_VERSION_PROCESS` 非空时不运行测试，而是按模式（`ok`、`error`、`large`、`wait`、`background`、`group`）模拟版本命令。测试用 `os.Executable()` 取得自身路径，用 `t.Setenv` 选择模式，通过 `TURNCOURIER_TEST_PID_FILE` 取回孙进程 PID，结束前清理遗留进程。现有这类变量都以 `TURNCOURIER_TEST_` 开头，正常测试流程不会设置它们。
+- 核对文档与代码是否一致的测试放在 `tests/docs/`（包名 `docs_test`）：`deps_test.go` 以 `go.mod` 的直接依赖与各包实际导入为准，核对中英文两份第三方依赖表。
+- 跨包的集成测试放在 `tests/integration/`（包名 `integration_test`，只有测试文件，需要单独写中文包注释）。`lifecycle_test.go` 组合示例配置、临时目录中的真实 SQLite 与两个状态机，走完一条回复从入队、派发、模拟崩溃后恢复到任务关闭的完整流程；`payload_test.go` 再走一遍通知、令牌、键控摘要、正文密文与派发的组合生命周期。端到端测试按设计将来也放在 `tests/` 下，有代码时再建对应目录；人工执行的真机探测已经在 `tests/live/`，见[真机探测](#真机探测testslive)。
+- 测试必须离线：不访问网络、真实邮箱、模型或 Agent 会话，不读写真实钥匙串，也不依赖本机是否装有 `git`、`codex`、`claude`。`internal/doctor` 的测试通过 `Checker` 注入 `GOOS`、`Lookup`、`Run` 和 `Timeout`，使用合成的版本字符串（见 `doctor_test.go` 中的 `healthyChecker`）。CLI 测试把输出写到 `bytes.Buffer`，并注入终端、Keychain、环境变量、随机源与时钟的替身。唯一的例外是带 `live` 标签的 `tests/live`，它不随 `go test ./...` 编译。
+- 需要真实子进程时，使用测试辅助子进程模式，让测试二进制自己扮演被调用的命令。`internal/doctor/doctor_test.go` 中的 `TestMain` 发现环境变量 `TURNCOURIER_TEST_VERSION_PROCESS` 非空时不运行测试，而是按模式（`ok`、`error`、`large`、`wait`、`background`、`group`）模拟版本命令。`internal/security/keychain/keychain_test.go` 同理：`TURNCOURIER_TEST_SECURITY_MODE` 非空时，测试二进制扮演 `/usr/bin/security`，用 `TURNCOURIER_TEST_SECURITY_STATE` 指向的文件保存假条目，把收到的参数与标准输入写进 `TURNCOURIER_TEST_SECURITY_LOG`，测试据此断言机密没有进入参数列表与环境变量。测试用 `os.Executable()` 取得自身路径，用 `t.Setenv` 选择模式，通过 `TURNCOURIER_TEST_PID_FILE` 取回孙进程 PID，结束前清理遗留进程。现有这类变量都以 `TURNCOURIER_TEST_` 开头，正常测试流程不会设置它们。
+- 邮件客户端用离线假服务器测试，不连接任何真实服务器。SMTP 用 go-smtp 自带的服务端，IMAP 用 `imapmemserver` 加一层可注入故障的代理：`imapmemserver` 模拟不了 QQ 对不支持的命令只回无标签 `* BAD`，也模拟不了半开连接，这些由代理注入，代理同时记录客户端发出的每条命令（`LOGIN` 只记命令名）。两边的 TLS 证书都借用 `net/http/httptest` 的自签证书，只把它的根证书放进 `RootCAs`，不落盘、不联网；IMAP 的服务端配置要清掉 `NextProtos`，否则 httptest 的 `http/1.1` 会和 imapclient 协商的 ALPN `imap` 冲突而握手失败。
+- 「从不做某事」这类否定性质由源码测试钉住，功能测试看不出差别：`internal/security/token/source_test.go` 用 `go/parser` 与 `go/types` 断言标签只经常数时间比较；`internal/mail/smtp/source_test.go` 与 `internal/mail/imap/source_test.go` 按白名单断言只调用 `DialTLS`（不调用 `Dial`、`DialStartTLS`）、不出现调试输出与放宽证书校验的标识符、`tls.Config` 只在包内构造一处，IMAP 另外断言 EXAMINE 只以只读选项发出、FETCH 的正文项都带 `Peek`。
 - 平台相关的测试用构建约束，例如 `process_unix_test.go` 的 `//go:build unix`。平台缺少前提条件（例如不能创建符号链接）时，用 `t.Skip` 并写明原因。
 - 临时文件放在 `t.TempDir()` 里。
 - 配置测试把合成的 TOML 写入 `t.TempDir()` 并设为 0600，环境变量通过注入的 `getenv` 或 `t.Setenv` 提供，断言错误文本不含临时目录路径。
@@ -193,7 +203,7 @@ make test
 
 覆盖率门槛只以 `make test` 的结果为准。
 
-模糊测试：`internal/config` 的 `FuzzNormalizeAddress` 在普通 `go test` 与 CI 中只运行种子用例。需要运行模糊引擎时在本地执行：
+模糊测试：`internal/config` 的 `FuzzNormalizeAddress` 与 `internal/security/token` 的 `FuzzParse` 在普通 `go test` 与 CI 中只运行种子用例。需要运行模糊引擎时在本地执行（把包与目标名换成另一个即可）：
 
 ```sh
 go test -run='^$' -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/
@@ -201,9 +211,49 @@ go test -run='^$' -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/
 
 发现失败时，go 会把触发失败的输入写入 `internal/config/testdata/fuzz/FuzzNormalizeAddress/`，之后的 `go test` 会把它当作种子重跑。
 
+## 真机探测（tests/live）
+
+`tests/live/` 是 L1 真机探测工具：它会登录真实的机器人邮箱、发出真实邮件、读写真实钥匙串，只由维护者在本机人工执行。普通开发和 CI 都不会运行它。
+
+`tests/live/` 里有两类文件：
+
+- `sample.go` 与 `sample_test.go` **不带构建标签**。`sample.go` 是纯函数——样本脱敏归类、主题前缀白名单、Message-ID 按相等关系归类、输出目录校验——只处理传入的字节与值，不读配置、钥匙串、网络或环境变量。`sample_test.go` 用合成邮件字节离线测试它们，随 `make test` 在 CI 中运行，计入覆盖率与中文注释检查。
+- `live_test.go`、`probe_test.go`、`keychain_test.go` 都以 `//go:build live` 开头。不带标签时 `go test ./...`、`make test` 与 CI 都不编译它们；`make vet` 与 `make lint` 带上标签只做编译检查，从不运行。
+
+不会被误触发的四道关：
+
+1. **双重开关。** 必须同时给出 `-tags live` 与 `TURNCOURIER_LIVE=1`。缺环境变量时 `TestMain` 打印「跳过」并以 0 退出，不运行任何测试（包列表模式下 `go test` 会丢弃通过的包的输出，想看到这行要加 `-v`）。
+2. **拒绝 CI。** 环境变量 `CI` 非空时打印「拒绝在 CI 中运行」并以 1 退出。
+3. **总确认。** 通过前两关后、访问钥匙串或网络之前，经 `/dev/tty` 列出机器人账户、接收地址、输出目录与本次 `-run` 选中的探测项，要求输入 `yes`。`TURNCOURIER_LIVE=1` 残留在 shell 中时，误运行的命令会停在这里。
+4. **逐项确认。** 每封邮件发出前、每次写入真实钥匙串前再确认一次；打不开 `/dev/tty`（没有控制终端）即失败，回答其他内容则跳过该项并记为 `skipped`。
+
+输出目录由 `TURNCOURIER_LIVE_OUT` 指定，必须是已存在的绝对路径目录、权限恰为 0700，且**不在本仓库工作树之内**（先解析符号链接再逐级向上按 inode 比对，所以仓库外指向仓库内的符号链接也会被拒绝）。`state.json` 与 `samples.jsonl` 以 0600 写在那里，`.gitignore` 另外兜底忽略这两个文件名。
+
+| 探测 | 做什么 | 是否发信 |
+| --- | --- | --- |
+| `TestL1KeychainRoundTrip` | 在真实钥匙串中写入、读回、删除一个合成条目，并确认 `Add` 对已存在条目返回 `ErrExists` | 否 |
+| `TestL1Capabilities` | 登录 IMAP，记录能力、文件夹列表与各文件夹的 UIDVALIDITY | 否 |
+| `TestL1SendNotification` | 发出合成通知，再只读查找「已发送」中的副本，记录 QQ 分配的 Message-ID | 是 |
+| `TestL1Replies` | 只读补扫 INBOX 与 Junk，对引用了探测邮件的来信输出脱敏样本 | 否 |
+| `TestL1Idle` | 分预检、测量、FETCH 检查三个会话，记录 IDLE 推送延迟与服务器断开时间 | 可选 |
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `TURNCOURIER_LIVE` | 必须恰为 `1`，否则跳过 |
+| `TURNCOURIER_LIVE_OUT` | 输出目录，见上 |
+| `TURNCOURIER_LIVE_SEND_COUNT` | 发出的合成通知数，默认 1，至多 5 |
+| `TURNCOURIER_LIVE_CC_BOT` | 设为 `1` 时同时抄送机器人自己，用于从收件箱取回投递副本的 ID |
+| `TURNCOURIER_LIVE_IDLE_MINUTES` | IDLE 测量时长，默认 30，至多 60 |
+| `TURNCOURIER_LIVE_IDLE_SELF_SEND` | 设为 `1` 时在测量中自发一封邮件并测推送延迟 |
+| `TURNCOURIER_LIVE_KEEP` | 设为 `1` 时保留合成钥匙串条目，等待按回车再删除，便于在另一终端检查沙箱能否读到它 |
+
+运行探测的全部命令都要带 `-count=1`，否则 `go test` 可能直接显示缓存结果，看起来像是跑过了。
+
+`samples.jsonl` 只记录结构特征（地址换成角色、不输出正文、显示名、日期与完整主题），但它仍然来自真实邮件。样本进入仓库之前，必须由维护者逐条审阅并按 4b 的要求转为合成回归样本。
+
 ## 配置文件与数据目录
 
-目前没有命令读取配置或打开数据库，以下位置由 `internal/config` 与 `internal/store/sqlite` 实现，供后续命令使用：
+`turncourier init` 是目前唯一读取配置并打开数据库的命令；它在下列位置创建配置文件、数据目录与数据库，收发循环仍未实现：
 
 | 项目 | 位置 |
 | --- | --- |
@@ -211,18 +261,55 @@ go test -run='^$' -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/
 | 数据目录 | `$TURNCOURIER_DATA_DIR`（须为绝对路径）；未设置时为配置文件所在目录 |
 | 数据库 | 数据目录下的 `turncourier.db` |
 
-- 配置示例是 `configs/turncourier.example.toml`，测试会加载它，修改校验规则时同步修改示例。配置只保存账户与选项，出现 `password`、`token` 等凭据类键（不区分大小写）或未知键都会报错，键名区分大小写，`ADDRESS` 这类大小写变体按未知键处理；授权码与签名密钥将由 `init` 写入 Keychain（尚未实现）。
+- 配置示例是 `configs/turncourier.example.toml`，测试会加载它，修改校验规则时同步修改示例。配置只保存账户与选项，出现 `password`、`token` 等凭据类键（不区分大小写）或未知键都会报错，键名区分大小写，`ADDRESS` 这类大小写变体按未知键处理；授权码与两把密钥由 `turncourier init` 写入 Keychain。
+- `init` 生成的配置与示例同格式：主机、端口、事件与有效期写默认值，地址按交互输入填写。它以 0600 原子创建配置文件，已存在时从不覆盖，也不修改。
 - 配置文件须是不超过 1 MiB 的常规文件；在 Unix 上须归当前用户所有，且组和其他用户不可写。
 - 环境变量只能覆盖 `TURNCOURIER_NOTIFY_EVENTS`（逗号分隔，空字符串视为未设置）。白名单、邮箱地址、令牌有效期等安全相关项不接受环境变量覆盖。
-- 在 Unix 上，数据目录权限须为 0700、数据库文件须为 0600；缺失时按此权限创建，已有目录或文件权限更宽时拒绝打开。数据库只保存元数据与正文 SHA-256 摘要，不保存正文和凭据。
+- 在 Unix 上，数据目录权限须为 0700、数据库文件须为 0600；缺失时按此权限创建，已有目录或文件权限更宽时拒绝打开。数据库保存元数据、键控正文摘要，以及待处理正文的密文：待发通知在 PENDING 时、回复在 QUEUED 时各存一份 AES-256-GCM 密文，进入终态的同一事务中由触发器删除。数据库不保存明文正文与凭据。
+- 不要把数据目录恢复到旧版本的备份。「从不自动重发」和「不重复派发」都以数据库状态连续为前提：旧备份会让已发出的通知回到 PENDING 而重发，让已确认的回复回到 QUEUED 而再次派发。必须恢复时，先人工核对其中的 PENDING 通知与 QUEUED 回复，再启动程序。
 - `.gitignore` 已忽略 `turncourier.toml` 与 `*.db`，不要把本机配置或数据库提交进仓库。
+
+## Keychain 条目
+
+授权码与两把密钥保存在 macOS 登录钥匙串的通用密码条目里，由 `internal/security/keychain` 经 `/usr/bin/security` 读写；机密只经子进程的标准输入与标准输出传递，不出现在参数、环境变量、错误文本或日志中。
+
+| 用途 | service | account |
+| --- | --- | --- |
+| QQ 邮箱授权码 | `io.github.chaorookie.turncourier` | `<实例 ID>:qq-auth-code` |
+| 令牌签名密钥 | 同上 | `<实例 ID>:token-key-<kid>` |
+| 正文加密密钥 | 同上 | `<实例 ID>:payload-key-<kid>` |
+
+实例 ID 是 16 位小写 Crockford base32，由 `init` 首次运行时生成并写入数据库的 `instance` 表；数据目录不变则实例 ID 不变。把它放进 account 名里，是为了让两个数据目录不会互相覆盖条目。kid 是十进制 1–255，4a 只生成 kid=1，因此 `init` 之后恰好三个条目。
+
+- 查看某个条目是否存在（不打印机密，故意不加 `-w`）：
+
+  ```sh
+  security find-generic-password -s io.github.chaorookie.turncourier -a <account>
+  ```
+
+  实例 ID 由 `turncourier init` 在摘要中打印；数据目录已存在时重新运行 `init` 会打印同一个 ID，不会重新生成。
+- 删除数据目录不会删除钥匙串条目。遗留条目按 account 逐个手工删除：
+
+  ```sh
+  security delete-generic-password -s io.github.chaorookie.turncourier -a <account>
+  ```
+
+- 密钥条目只以「不覆盖」的方式创建（`Add`，即不带 `-U` 的 `add-generic-password`），从不经 `Set` 覆盖。授权码仍用 `Set`（带 `-U`），因为它本来就需要更换。
+- 数据库的 `crypto_keys` 表只登记用途、kid、状态与 8 字节校验值，不保存密钥材料。`init` 遇到下面两种不一致时拒绝继续，而不是重新生成或覆盖：
+  - **有元数据但 Keychain 中缺少条目：** 重新生成会得到一把不同的密钥，数据库中待处理的密文将永远无法解密，键控摘要也对不上；
+  - **条目与登记的校验值不符：** 说明 Keychain 中的这把密钥已被替换，覆盖它同样会让已有密文作废，而且会掩盖替换这一事实。
+
+  两种情况都要人工处理：确认没有待处理数据后，按上面的命令删除相关条目与数据目录，再重新运行 `init`。Keychain 中已有同名但格式不符的条目时，`init` 也只提示按本节手工删除后重试。
+- 威胁模型：经 `security` 创建的条目，受信任应用是 `/usr/bin/security`，同一用户下的任何进程（包括 Agent 执行的命令，只要其沙箱放行）都能静默读出这三个条目，读出后可以伪造通过全部校验的回复并改写本地队列。详见[设计文档](design.md)与 [SECURITY.md](../../SECURITY.md)。请使用专用的机器人邮箱，怀疑泄露时在 QQ 邮箱中停用该授权码。
+- 开发与测试从不接触真实钥匙串：单元测试让测试二进制扮演假的 `security` 程序（见[测试约定](#测试约定)），真实钥匙串只出现在 `tests/live` 中由维护者人工执行的探测里。
 
 ## 隐私与凭据
 
 - 不要在 issue、PR、提交、测试或日志中提交 QQ 邮箱授权码、令牌、真实邮件内容、Agent 会话记录或本机绝对路径。复现问题时优先使用合成数据。
-- 按计划，授权码将来通过本地 `init` 写入 macOS Keychain。这一功能尚未实现，目前没有任何命令会读取或保存授权码。
-- `.gitignore` 已经忽略 `.env`、`.env.*`、`*.db`、`*.sqlite*`、`*.log`、`turncourier.toml`、`.local/`、`dist/`、`coverage.out` 等文件。不要用 `git add -f` 强行加入。
-- 公共 CI 不运行真实邮箱或模型调用，也不保存凭据。
+- 授权码由 `turncourier init` 以不回显方式读入并写进 macOS Keychain，同时生成令牌签名密钥与正文加密密钥，三者都不进入配置文件或仓库。条目布局、查看与删除方式见[Keychain 条目](#keychain-条目)。
+- 机密形状的测试向量一律在运行时构造（用 `strings.Repeat`、`bytes.Repeat` 生成低熵值，或按下标填充字节数组后再做十六进制、base64、base32 编码），源码中不写这类字符串字面量。必须出现的 account 名 `qq-auth-code` 本身就含 `auth`，参数列表中的逗号即可充当分隔符，只让变量名避开关键词不够。写有这类向量的改动在提交前运行 `make secrets`：扫描覆盖全部 Git 历史并拒绝 `.gitleaksignore`，这类字面量一旦提交就只能改写分支历史。
+- `.gitignore` 已经忽略 `.env`、`.env.*`、`*.db`、`*.sqlite*`、`*.log`、`turncourier.toml`、`.local/`、`dist/`、`coverage.out`、`state.json`、`samples.jsonl` 等文件。不要用 `git add -f` 强行加入。
+- 公共 CI 不运行真实邮箱或模型调用，也不保存凭据。真实邮箱与真实钥匙串只出现在 `tests/live` 中由维护者人工执行的探测里，见[真机探测](#真机探测testslive)。
 - `experiments/phase01/` 的 live 探针会使用本机 CLI 登录并消耗订阅额度，不属于 `make check`，运行前先读[探针说明](../../experiments/phase01/README.md)。只做语法检查时可以离线运行，例如 `node --check experiments/phase01/codex-probe.mjs`。
 
 ## 密钥扫描
@@ -301,7 +388,7 @@ shasum -a 256 -c SHA256SUMS
 候选构建不是正式发布：
 
 - 它不创建 tag，也不创建 GitHub Release，artifact 到期后会被删除。
-- 其中的二进制只有 `help`、`version`、`doctor`，没有经过任何邮件验收。
+- 其中的二进制只有 `help`、`version`、`doctor` 与 `init`，不能收发邮件，也没有经过任何邮件验收。
 - 本地 `make build` 产出的 `0.1.0-dev` 同样不是发布版本。
 
 完成真实邮箱验收之前，不打 `v0.1.0-alpha` 标签。按设计，发布前 Codex 和 Claude Code 各要完成连续十轮真实邮件交互，覆盖断网恢复、重复、伪造和过期邮件、忙碌时的 FIFO 顺序以及隐私过滤；编译成功不能代替真实验收。目前没有任何发布版本，默认分支为 `main`。

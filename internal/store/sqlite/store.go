@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chaoRookie/turncourier/internal/security/payload"
+
 	// 导入时注册纯 Go 实现的 "sqlite" 驱动，构建不依赖 CGO；错误类型与结果码用于识别 SQLITE_BUSY。
 	moderncsqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -21,23 +23,30 @@ import (
 
 // Store 是可并发使用的 SQLite 存储；进程内所有操作串行经过单个连接。
 type Store struct {
-	db     *sql.DB
-	now    func() time.Time
-	random io.Reader
+	db         *sql.DB
+	now        func() time.Time
+	random     io.Reader
+	payloadKey *payload.Key
 }
 
 // Options 允许测试注入时钟与随机源；零值使用 time.Now 与 crypto/rand。
+// PayloadKey 是进程启动时从 Keychain 读出的正文密钥。为 nil 时，所有需要加密或解密正文的操作返回 ErrPayloadKeyUnavailable
+// （「Keychain 读取失败时拒绝发送与派发」）。
 type Options struct {
-	Now    func() time.Time
-	Random io.Reader
+	Now        func() time.Time
+	Random     io.Reader
+	PayloadKey *payload.Key
 }
 
 const (
 	// databaseFileName 是数据目录中的数据库文件名。
 	databaseFileName = "turncourier.db"
+	// busyTimeoutMillis 是连接的忙等待毫秒数；truncateWAL 临时改为 0 后按它恢复。
+	busyTimeoutMillis = "5000"
 	// connectionParams 设置外键、WAL、FULL 同步与 5 秒忙等待，并让事务以 BEGIN IMMEDIATE 开始：
 	// 事务一开始就取得写锁，避免先读后写的事务在升级写锁时绕过忙等待直接返回 SQLITE_BUSY。
-	connectionParams = "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	// secure_delete 使删除的内容在主库中被零覆盖（D5）；不用 FAST，它对溢出页无效。
+	connectionParams = "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(" + busyTimeoutMillis + ")&_txlock=immediate&_pragma=secure_delete(1)"
 	// openBusyTimeout 是打开数据库时重试 SQLITE_BUSY 的期限，与 connectionParams 中的 busy_timeout 一致。
 	openBusyTimeout = 5 * time.Second
 	// busyRetryInterval 是两次重试之间的间隔。
@@ -47,7 +56,7 @@ const (
 // uriEscaper 转义 SQLite URI 路径中有特殊含义的字符：% 引出转义序列，? 开始参数，# 开始片段。
 var uriEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 
-// Open 在 dataDir 中打开或创建 turncourier.db 并执行未应用的迁移。
+// Open 在 dataDir 中打开或创建 turncourier.db，执行未应用的迁移，再尽力执行一次 TRUNCATE 检查点。
 // dataDir 必须是绝对路径；目录权限须为 0700、数据库文件须为 0600（Unix），否则拒绝打开。
 func Open(ctx context.Context, dataDir string, opts Options) (*Store, error) {
 	if !filepath.IsAbs(dataDir) {
@@ -65,7 +74,9 @@ func Open(ctx context.Context, dataDir string, opts Options) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	store := &Store{db: db, now: opts.Now, random: opts.Random}
+	// 清掉上次运行留在 WAL 中的历史帧；忙或出错时留待下一次清理，不影响打开。
+	truncateWAL(ctx, db)
+	store := &Store{db: db, now: opts.Now, random: opts.Random, payloadKey: opts.PayloadKey}
 	if store.now == nil {
 		store.now = time.Now
 	}

@@ -33,30 +33,41 @@ TurnCourier is provided under the [Apache License 2.0](LICENSE), without warrant
 
 ## Scope
 
-The current code is the CLI (`help`, `version`, `doctor`), build, test and scanning scripts, and internal packages that no command uses yet: configuration loading (`internal/config`), SQLite storage (`internal/store/sqlite`) and the task and reply queue state machines (`internal/task`, `internal/queue`). Examples of relevant reports:
+The current code is the CLI (`help`, `version`, `doctor`, `init`), build, test and scanning scripts, and internal packages: configuration loading (`internal/config`), SQLite storage (`internal/store/sqlite`) with migration `0002`, the task, reply queue and outgoing notification state machines (`internal/task`, `internal/queue`), Keychain access (`internal/security/keychain`), reply tokens (`internal/security/token`), body encryption (`internal/security/payload`) and the mail clients (`internal/mail/smtp`, `internal/mail/imap`). Examples of relevant reports:
 
 - `doctor` running anything other than `git --version`, `codex --version` and `claude --version`, printing executable paths, raw errors or control characters taken from tool output, or, on Unix, leaving version subprocesses running after a timeout;
 - a way to make `make secrets` pass while skipping Git history, staged changes or files that would be published;
 - workflow problems such as broader token permissions, actions not pinned to a full commit SHA, or exposed secrets;
-- a way to get past the configuration checks (rejecting credential keys and, on Unix, requiring the config file to be owned by the current user and not writable by group or others) or, on Unix, the permission checks on the data directory and database file, or to make storage enqueue the same inbound reply twice or automatically resend a reply whose delivery is uncertain.
+- a way to get past the configuration checks (rejecting credential keys and, on Unix, requiring the config file to be owned by the current user and not writable by group or others) or, on Unix, the permission checks on the data directory and database file, or to make storage enqueue the same inbound reply twice or automatically resend a reply whose delivery is uncertain;
+- a secret — the mail authorization code, the token signing key, the body encryption key or a reply token — reaching process arguments, environment variables, logs, error text or a database column in plaintext;
+- accepting a tampered or expired reply token, or a body ciphertext swapped in from another row;
+- a deleted pending body still being recoverable from the database file or the WAL file;
+- sending credentials over a connection that is not encrypted, or an IMAP session modifying the bot mailbox (setting `\Seen`, moving, expunging or appending);
+- `init` overwriting an existing configuration file or an already registered key, or automatically resending a notification whose delivery outcome is uncertain;
+- the probes in `tests/live` reaching the network or the Keychain without the build tag, `TURNCOURIER_LIVE=1` and the interactive confirmations.
 
 Out of scope:
 
 - `doctor` reporting "not ready" on platforms other than macOS or when a tool is missing; this is expected behavior;
+- another process of the same user reading the Keychain entries, and anything it can do with them, including forging a reply that passes every check and rewriting the local queue; this is the documented threat model below;
+- ciphertext left behind in APFS snapshots or Time Machine backups after a pending body is deleted;
 - vulnerabilities in Git, Codex CLI, Claude Code, Go or GitHub Actions themselves; report those to their maintainers;
 - documented limitations of the research probes in `experiments/phase01`, such as the Node.js VM not being a security sandbox.
 
 ## Boundaries of the planned design
 
-Email handling, Agent adapters, Keychain storage and the background service are not implemented. Configuration and SQLite storage are implemented as internal packages, but no command uses them yet. The approved [design](docs/zh-CN/design.md) sets these boundaries for the parts not yet implemented:
+The mail send and receive loop, inbound reply validation, notification rendering, the Agent adapters and the background service are not implemented. Configuration, storage, the state machines, the Keychain wrapper, tokens, body encryption and the SMTP and IMAP clients are implemented; so far only `init` uses any of them.
+
+**Threat model for the Keychain entries.** The authorization code and the two keys are stored with `/usr/bin/security`, so the trusted application is `/usr/bin/security` and the partition is `apple-tool:`. Any process running as the same user — including a shell command an Agent runs, if the Agent's sandbox allows it — can read them silently. A process that has read them can sign valid tokens, forge a reply that passes the sender allowlist, the thread reference, the subject tag and the token check, inject arbitrary content into any task, and rewrite the local queue directly. TurnCourier does not defend against processes of the same user. What the Keychain does protect against is plaintext reaching the configuration file, the repository, logs and backups; other system users reading it; and offline access to the disk without the login password. Use a dedicated bot mailbox rather than a personal one, and disable the authorization code in QQ Mail if you suspect it has leaked. Calling Security.framework in-process would bind access to TurnCourier itself, but a Go binary has only an ad-hoc signature that changes with every build, so every upgrade would ask for authorization again. That path is to be reconsidered once there is a Developer ID signature.
+
+The approved [design](docs/zh-CN/design.md) sets these boundaries for the parts not yet implemented:
 
 - A Git worktree isolates working copies. It is not an operating-system sandbox, so the Agent's own sandbox and permission controls stay in place.
 - An email reply becomes natural-language input to an existing Agent session. Email cannot approve tool permissions or set parameters that bypass approval; approval requests are reported for local handling.
-- A sender address can be forged and is not enough on its own. A reply is rejected unless the sender allowlist, thread references, short task ID and signed token all match.
-- Mailbox authorization codes and signing keys are to be stored in the macOS Keychain, not in configuration files or the repository. The authorization code is to be entered through a local `init` command.
+- A sender address can be forged and is not enough on its own. A reply is rejected unless the sender allowlist, thread references, short task ID and signed token all match. That check defends against someone else impersonating you; it does not defend against a process of the same user that can read the local Keychain entries, because such a process can sign a token itself.
 - Filtering outgoing email cannot guarantee that every secret is removed.
 
-Because this code does not exist yet, comments on these boundaries are design feedback and can go to a feature request. Report problems in existing code, including the configuration and storage packages, through private vulnerability reporting, and do not include exploit details for existing code in a feature request.
+Because this code does not exist yet, comments on these boundaries are design feedback and can go to a feature request. Report problems in existing code, including the configuration, storage, security and mail packages, through private vulnerability reporting, and do not include exploit details for existing code in a feature request.
 
 ---
 
@@ -95,27 +106,38 @@ TurnCourier 按 [Apache License 2.0](LICENSE) 提供，不附带任何形式的�
 
 ## 报告范围
 
-当前代码包括 CLI（`help`、`version`、`doctor`），构建、测试和扫描脚本，以及还没有命令使用的内部包：配置加载（`internal/config`）、SQLite 存储（`internal/store/sqlite`）和任务与回复队列状态机（`internal/task`、`internal/queue`）。相关报告示例：
+当前代码包括 CLI（`help`、`version`、`doctor`、`init`），构建、测试和扫描脚本，以及各内部包：配置加载（`internal/config`）、含迁移 `0002` 的 SQLite 存储（`internal/store/sqlite`）、任务、回复队列与待发通知状态机（`internal/task`、`internal/queue`）、Keychain 访问（`internal/security/keychain`）、回复令牌（`internal/security/token`）、正文加密（`internal/security/payload`）以及邮件客户端（`internal/mail/smtp`、`internal/mail/imap`）。相关报告示例：
 
 - `doctor` 执行了 `git --version`、`codex --version`、`claude --version` 以外的命令，输出了可执行文件路径、原始错误或来自工具输出的控制字符，或在 Unix 上超时后仍留下版本子进程；
 - 能让 `make secrets` 在跳过 Git 历史、暂存区或待公开文件的情况下仍然通过的方法；
 - 工作流问题，例如令牌权限扩大、Action 未固定到完整提交 SHA 或泄露密钥；
-- 能绕过配置检查（拒绝凭据类键；在 Unix 上还要求配置文件归当前用户所有且组和其他用户不可写）或在 Unix 上绕过数据目录与数据库文件权限检查的方法，或能让存储把同一封入站回复入队两次、自动重发投递结果不确定的回复的方法。
+- 能绕过配置检查（拒绝凭据类键；在 Unix 上还要求配置文件归当前用户所有且组和其他用户不可写）或在 Unix 上绕过数据目录与数据库文件权限检查的方法，或能让存储把同一封入站回复入队两次、自动重发投递结果不确定的回复的方法；
+- 机密——邮箱授权码、令牌签名密钥、正文加密密钥或回复令牌——进入进程参数、环境变量、日志、错误文本或数据库明文列；
+- 接受被篡改或已过期的回复令牌，或接受从别的行调换过来的正文密文；
+- 已删除的待处理正文仍能从数据库文件或 WAL 文件中恢复；
+- 在未加密的连接上发送凭据，或 IMAP 会话修改了机器人邮箱（置 `\Seen`、MOVE、EXPUNGE、APPEND）；
+- `init` 覆盖了已有的配置文件或已登记的密钥，或自动重发投递结果不确定的通知；
+- `tests/live` 的探测在没有构建标签、`TURNCOURIER_LIVE=1` 与逐项确认的情况下联网或访问钥匙串。
 
 不属于范围：
 
 - `doctor` 在非 macOS 平台或缺少工具时报告未就绪，这是预期行为；
+- 同一用户的其他进程读取 Keychain 条目，以及它据此能做的一切，包括伪造出通过全部校验的回复、直接改写本地队列；这是下文已记录的威胁模型；
+- 待处理正文删除后留在 APFS 快照与 Time Machine 备份中的密文残留；
 - Git、Codex CLI、Claude Code、Go 或 GitHub Actions 本身的漏洞，请报告给各自的维护者；
 - `experiments/phase01` 研究探针中已写明的限制，例如 Node.js VM 不是安全沙箱。
 
 ## 规划设计中的边界
 
-邮件处理、Agent 适配器、Keychain 存储和后台服务都尚未实现；配置与 SQLite 存储已作为内部包实现，但还没有命令使用它们。已批准的[设计](docs/zh-CN/design.md)为尚未实现的部分规定了以下边界：
+邮件收发循环、入站回复验证、通知渲染、Agent 适配器和后台服务都尚未实现；配置、存储、状态机、Keychain 封装、令牌、正文加密与 SMTP、IMAP 客户端已经实现，目前只有 `init` 使用了其中一部分。
+
+**Keychain 条目的威胁模型。** 授权码与两把密钥经 `/usr/bin/security` 保存，受信任应用因此是 `/usr/bin/security`、分区为 `apple-tool:`。同一用户下的任何进程——包括 Agent 执行的 shell 命令，只要 Agent 的沙箱放行——都能静默读出它们。读到之后，该进程可以签发有效令牌，伪造出通过发件人白名单、线程引用、主题标签与令牌全部校验的回复，把任意内容注入任一任务，也可以直接改写本地队列。TurnCourier 不防同一用户下的进程。Keychain 在这里防的是：明文进入配置文件、仓库、日志与备份；其他系统用户读取；在没有登录密码的情况下离线访问磁盘。请使用专用的机器人邮箱而不是个人邮箱，怀疑泄露时在 QQ 邮箱中停用该授权码。在进程内调用 Security.framework 可以把访问权限绑定到 TurnCourier 自身，但 Go 二进制只有随构建变化的临时签名，每次升级都会重新弹窗授权；这条路要等有 Developer ID 签名后再评估。
+
+已批准的[设计](docs/zh-CN/design.md)为尚未实现的部分规定了以下边界：
 
 - Git worktree 隔离工作副本，但不是操作系统沙箱，Agent 自身的沙箱和权限控制仍然保留。
 - 邮件回复只作为自然语言输入送入已有的 Agent 会话。邮件不能批准工具权限，也不能设置绕过审批的参数；审批请求会通知到本地处理。
-- 发件人地址可以伪造，不能单独作为身份依据。发件人白名单、线程引用、短任务 ID 和签名令牌必须全部一致，否则拒绝。
-- 邮箱授权码和签名密钥将存入 macOS Keychain，不写入配置文件或仓库；授权码将通过本地 `init` 命令输入。
+- 发件人地址可以伪造，不能单独作为身份依据。发件人白名单、线程引用、短任务 ID 和签名令牌必须全部一致，否则拒绝。这一校验防的是其他人冒充，不防能读取本机 Keychain 条目的同一用户进程：那样的进程可以自己签出令牌。
 - 外发邮件的过滤不能保证清除所有机密。
 
-这些代码尚不存在，因此对上述边界的意见属于设计反馈，可以通过功能建议提交。现有代码（包括配置与存储包）中的问题请通过私密漏洞报告提交，不要在功能建议中包含针对现有代码的利用细节。
+这些代码尚不存在，因此对上述边界的意见属于设计反馈，可以通过功能建议提交。现有代码（包括配置、存储、安全与邮件包）中的问题请通过私密漏洞报告提交，不要在功能建议中包含针对现有代码的利用细节。

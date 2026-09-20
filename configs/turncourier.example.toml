@@ -1,5 +1,5 @@
 # TurnCourier 配置示例。只保存账户与选项：
-# 邮箱授权码与签名密钥将由 init 命令写入 macOS Keychain，禁止写在本文件中。
+# 邮箱授权码与两把密钥由 turncourier init 写入 macOS Keychain，禁止写在本文件中。
 
 [mailbox]
 # 专用机器人发件邮箱
