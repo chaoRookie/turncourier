@@ -1,7 +1,8 @@
 // Package imap 用离线假服务器验证长连接收取循环：交付与游标、处理失败时同一连接内重试、断开与半开后的退避重连与复位、
 // 只在 IDLE 阶段出现的故障下登录间隔增长与登录频率上限、IDLE 降级为轮询、认证失败暂停、凭据不可用、
-// Junk 缺失与暂时不可用、Junk 连续失败后降级而 INBOX 照常收信、每轮最先补扫「已发送」且它的失败从不降级、
-// 唤醒提前结束等待、补扫完成回调与注入的时钟、首次运行跳过历史、批的延后、取消。
+// Junk 缺失与暂时不可用、Junk 连续失败后降级而 INBOX 照常收信、每轮最先补扫「已发送」且它的失败从不降级、下一轮照常重试、
+// 「已发送」中取不到数据的副本不成为证据、唤醒只提前结束等待新邮件（不缩短认证暂停与重连退避，等待前已有的信号不复位退避）、
+// 补扫完成回调与注入的时钟、首次运行跳过历史、批的延后、取消。
 package imap
 
 import (
@@ -233,6 +234,28 @@ func assertNear(t *testing.T, d, want time.Duration, what string) {
 	if d < want*8/10 || d > want*12/10 {
 		t.Errorf("%s = %v, want %v ±20%%", what, d, want)
 	}
+}
+
+// keepWaking 在后台每 5 毫秒以非阻塞方式向 wake 写入一个信号，直到用例结束，模拟不停唤醒 Watcher 的发送循环。
+func keepWaking(t *testing.T, wake chan<- struct{}) {
+	t.Helper()
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-stop:
+				return
+			case wake <- struct{}{}:
+			default:
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-stopped
+	})
 }
 
 // TestWatcherDelivers 覆盖正常收取：依次交付 INBOX 与 Junk 的批次，IDLE 期间放入的邮件在 1 秒内交付，每封只交付一次。
@@ -496,6 +519,42 @@ func TestWatcherPendingExistsIsNotIdle(t *testing.T) {
 	}
 }
 
+// TestWatcherPendingWakeIsNotIdle 与 TestWatcherPendingExistsIsNotIdle 相同，但等待之前留在通道中的是唤醒信号：每条连接登录之后、
+// 第一轮补扫之前都留下一个信号，第一轮之后 Watcher 不发送 IDLE 就开始第二轮（每条连接上两次 EXAMINE INBOX 之后才有 IDLE）。
+// 这不是一次 IDLE 正常结束，不复位重连退避；第二轮的 IDLE 只回无标签 BAD 而超时，退避依次约为 Initial、2×Initial。
+func TestWatcherPendingWakeIsNotIdle(t *testing.T) {
+	fs := newFakeServer(t, proxyOptions{noJunk: true})
+	fs.addRule(&rule{command: "IDLE", kind: faultBAD})
+	b := testBackoff()
+	h := newHarness(t, fs, testTimeouts(), b)
+	wake := make(chan struct{}, 1)
+	h.w.Wake = wake
+	status := h.w.Status
+	h.w.Status = func(s Status) {
+		status(s)
+		if s.Kind == StatusConnected { // connected 在第一轮补扫之前同步发出
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		}
+	}
+	h.start()
+	h.waitStatus(StatusIdleDisabled, 1)
+	h.waitStatus(StatusBackoff, 2)
+	h.stop()
+	round := []string{FolderInbox, FolderInbox, "IDLE"}
+	if got, want := examineSequence(fs), slices.Concat(round, round); len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
+		t.Fatalf("EXAMINE and IDLE sequence = %q, want prefix %q: the pending wake must start the second round without IDLE", got, want)
+	}
+	backoffs := h.statusesOf(StatusBackoff)
+	assertNear(t, backoffs[0].Delay, b.Initial, "first backoff")
+	assertNear(t, backoffs[1].Delay, 2*b.Initial, "second backoff")
+	if n := fs.count("IDLE"); n != 2 {
+		t.Errorf("IDLE count = %d, want 2", n)
+	}
+}
+
 // TestWatcherDisablesIdleAfterTimeouts 覆盖 IDLE 降级：IDLE 两次只回无标签 BAD 而超时后发出一次 idle_disabled，
 // 此后不再发送 IDLE，新邮件在 Poll 间隔内交付。
 func TestWatcherDisablesIdleAfterTimeouts(t *testing.T) {
@@ -675,12 +734,14 @@ func TestWatcherExistsDuringFetch(t *testing.T) {
 }
 
 // TestWatcherAuthFailure 覆盖认证失败：发出 auth_failed，Delay 等于 AuthPause，暂停期间没有新的 LOGIN，也不按普通断开退避。
-// 服务器回 NO 后立即断开时同样如此。
+// 服务器回 NO 后立即断开时同样如此；暂停期间持续收到唤醒信号时也同样如此：Wake 只结束「等待新邮件」，不缩短认证失败后的暂停，
+// 否则发送循环的唤醒会绕过「认证失败后至少暂停 10 分钟」。
 func TestWatcherAuthFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		close bool // 服务器回 NO 后立即关闭连接
-	}{{"rejected", false}, {"rejected then closed", true}} {
+		wakes bool // 全程每 5 毫秒发出一次唤醒信号
+	}{{"rejected", false, false}, {"rejected then closed", true, false}, {"rejected while wakes keep arriving", false, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newFakeServer(t, proxyOptions{})
 			if tc.close {
@@ -690,6 +751,11 @@ func TestWatcherAuthFailure(t *testing.T) {
 			h := newHarness(t, fs, testTimeouts(), b)
 			wrong := strings.Repeat("qx", 8)
 			h.w.Password = func(context.Context) (string, error) { return wrong, nil }
+			if tc.wakes {
+				wake := make(chan struct{}, 1)
+				h.w.Wake = wake
+				keepWaking(t, wake)
+			}
 			h.start()
 			h.waitStatus(StatusAuthFailed, 1)
 			time.Sleep(b.AuthPause - 150*time.Millisecond)
@@ -1125,6 +1191,20 @@ func examineSequence(fs *fakeServer) []string {
 	return out
 }
 
+// assertRoundsStartWithSent 断言每一轮都以「已发送」的 EXAMINE 开头：代理记录中的第一条 EXAMINE 与每条 IDLE 之后的第一条 EXAMINE
+// 都是对「已发送」发出的（比较次数不够严：隔一轮才补扫它的实现，次数照样会增长）。只适用于没有重连的用例：「已发送」的失败拆掉连接时，
+// 重连后的那一轮按设计从 INBOX 继续。
+func assertRoundsStartWithSent(t *testing.T, fs *fakeServer) {
+	t.Helper()
+	seq := examineSequence(fs)
+	for i, item := range seq {
+		if (i == 0 || seq[i-1] == "IDLE") && item != FolderSent {
+			t.Errorf("EXAMINE and IDLE sequence = %q; the round starting at %d does not start with Sent", seq, i)
+			return
+		}
+	}
+}
+
 // examineTimes 返回代理收到的、对 folder 发出的每条 EXAMINE 的时刻。
 func examineTimes(fs *fakeServer, folder string) []time.Time {
 	var out []time.Time
@@ -1257,8 +1337,9 @@ func TestWatcherSentMissingFromList(t *testing.T) {
 
 // TestWatcherSentFailuresNeverDegrade 覆盖「已发送」是承重路径：它的补扫持续失败时每一轮都照常重试，不像 Junk 那样连续失败后降级；
 // 每次失败发出一次 folder_unavailable（Folder 为 FolderSent），从不调用 Scanned(FolderSent)，INBOX 的新邮件照常交付。
-// 四种持续失败各一例：EXAMINE 被带标签 BAD 或 NO [UNAVAILABLE] 拒绝（连接仍可用，不重新登录）；无标签 BAD 使 EXAMINE 超时
-// （连接被关闭，重连后的那一轮从 INBOX 继续，INBOX 因此不会饿死）；「已发送」批次的 Handle 一直失败（每轮至多 sentFailLimit 次本地失败）。
+// 五种持续失败各一例：EXAMINE 被带标签 BAD 或 NO [UNAVAILABLE] 拒绝（连接仍可用，不重新登录，每一轮都仍以「已发送」开头，
+// 而不是隔一轮才重试）；无标签 BAD 使 EXAMINE 超时、服务器收到 EXAMINE 即断开（连接被关闭，重连后的那一轮从 INBOX 继续，
+// INBOX 因此不会饿死）；「已发送」批次的 Handle 一直失败（每轮至多 sentFailLimit 次本地失败）。
 func TestWatcherSentFailuresNeverDegrade(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1298,47 +1379,54 @@ func TestWatcherSentFailuresNeverDegrade(t *testing.T) {
 			if got := h.delivered(FolderInbox); !slices.Equal(got, []uint32{1, 2}) {
 				t.Errorf("INBOX deliveries = %v, want each message once", got)
 			}
+			assertRoundsStartWithSent(t, fs)
 		})
 	}
 
-	t.Run("untagged BAD", func(t *testing.T) {
-		fs := newFakeServer(t, proxyOptions{})
-		fs.appendMessage(FolderInbox, testMessage(1, 100))
-		fs.addRule(&rule{command: "EXAMINE", contains: FolderSent, kind: faultBAD})
-		tm := testTimeouts()
-		tm.IdleMax = 100 * time.Millisecond
-		h := newHarness(t, fs, tm, testBackoff())
-		h.w.Sent = true
-		h.recordScanned()
-		h.start()
-		// 每次 EXAMINE「已发送」都要到 Command 期限才超时并关闭连接；重连后的那一轮从 INBOX 继续，所以 INBOX 的邮件照常交付。
-		h.waitDelivered(FolderInbox, 1)
-		waitForWithin(t, "Sent to be retried on later rounds", 2*waitLimit, func() bool { return examineCount(fs, FolderSent) >= 3 })
-		h.stop()
-		if s := h.statusesOf(StatusFolderDisabled); len(s) != 0 {
-			t.Errorf("folder_disabled statuses = %+v; Sent must never be degraded", s)
-		}
-		if n, examines := h.unavailable(FolderSent), examineCount(fs, FolderSent); n != examines && n != examines-1 {
-			t.Errorf("folder_unavailable for Sent = %d after %d timed-out EXAMINEs, want one per failure", n, examines)
-		}
-		if s := h.scannedOf(FolderSent); len(s) != 0 {
-			t.Errorf("Scanned(Sent) calls = %+v, want none", s)
-		}
-		// 第一条连接以「已发送」开头；它被超时拆掉之后，每条新连接上的那一轮都从 INBOX 继续。
-		var firsts []string
-		pending := false
-		for _, cmd := range fs.commands() {
-			switch {
-			case cmd.Name == "LOGIN":
-				pending = true
-			case cmd.Name == "EXAMINE" && pending:
-				firsts, pending = append(firsts, strings.Trim(cmd.Args, `"`)), false
+	// 连接层失败：无标签 BAD 使 EXAMINE「已发送」到 Command 期限才超时并关闭连接，或者服务器收到它就直接断开。两种情况下重连后的那一轮
+	// 都从 INBOX 继续，所以 INBOX 的邮件照常交付；只在命令超时时才从 INBOX 继续的实现，会在服务器每次都断开时让 INBOX 饿死。
+	for _, tc := range []struct {
+		name  string
+		fault faultKind
+	}{{"untagged BAD", faultBAD}, {"server disconnects", faultDisconnect}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeServer(t, proxyOptions{})
+			fs.appendMessage(FolderInbox, testMessage(1, 100))
+			fs.addRule(&rule{command: "EXAMINE", contains: FolderSent, kind: tc.fault})
+			tm := testTimeouts()
+			tm.IdleMax = 100 * time.Millisecond
+			h := newHarness(t, fs, tm, testBackoff())
+			h.w.Sent = true
+			h.recordScanned()
+			h.start()
+			h.waitDelivered(FolderInbox, 1)
+			waitForWithin(t, "Sent to be retried on later rounds", 2*waitLimit, func() bool { return examineCount(fs, FolderSent) >= 3 })
+			h.stop()
+			if s := h.statusesOf(StatusFolderDisabled); len(s) != 0 {
+				t.Errorf("folder_disabled statuses = %+v; Sent must never be degraded", s)
 			}
-		}
-		if len(firsts) < 2 || firsts[0] != FolderSent || slices.ContainsFunc(firsts[1:], func(f string) bool { return f != FolderInbox }) {
-			t.Errorf("first EXAMINE on each connection = %q, want Sent on the first and INBOX on every reconnect", firsts)
-		}
-	})
+			if n, examines := h.unavailable(FolderSent), examineCount(fs, FolderSent); n != examines && n != examines-1 {
+				t.Errorf("folder_unavailable for Sent = %d after %d failed EXAMINEs, want one per failure", n, examines)
+			}
+			if s := h.scannedOf(FolderSent); len(s) != 0 {
+				t.Errorf("Scanned(Sent) calls = %+v, want none", s)
+			}
+			// 第一条连接以「已发送」开头；它被拆掉之后，每条新连接上的那一轮都从 INBOX 继续。
+			var firsts []string
+			pending := false
+			for _, cmd := range fs.commands() {
+				switch {
+				case cmd.Name == "LOGIN":
+					pending = true
+				case cmd.Name == "EXAMINE" && pending:
+					firsts, pending = append(firsts, strings.Trim(cmd.Args, `"`)), false
+				}
+			}
+			if len(firsts) < 2 || firsts[0] != FolderSent || slices.ContainsFunc(firsts[1:], func(f string) bool { return f != FolderInbox }) {
+				t.Errorf("first EXAMINE on each connection = %q, want Sent on the first and INBOX on every reconnect", firsts)
+			}
+		})
+	}
 
 	t.Run("handle keeps failing", func(t *testing.T) {
 		fs := newFakeServer(t, proxyOptions{})
@@ -1384,6 +1472,64 @@ func TestWatcherSentFailuresNeverDegrade(t *testing.T) {
 			t.Errorf("LOGIN count = %d, want 1", n)
 		}
 	})
+}
+
+// TestWatcherSentCopyWithoutData 覆盖 D6 的证据不越过取不到的副本：「已发送」中确实存在的副本，服务器对它的 RFC822.SIZE 或
+// BODY.PEEK[HEADER] 只回 OK 而不带数据时，本轮「已发送」的补扫失败：发出 folder_unavailable，不调用 Scanned(FolderSent)，游标不越过它，
+// 也不拆掉连接。故障只出现一次：唤醒后的下一轮照常以「已发送」开头，先把这份副本交给 Handle，再调用 Scanned(FolderSent)。
+// 若像 Scan 那样把它当作两条命令之间已被删除而越过，这份副本从未交给 Handle，Scanned 却成了「副本确实不在」的证据。
+func TestWatcherSentCopyWithoutData(t *testing.T) {
+	for _, tc := range []struct{ name, contains string }{
+		{"size fetch", "RFC822.SIZE"},
+		{"header fetch", "BODY.PEEK[HEADER]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeServer(t, proxyOptions{noJunk: true})
+			fs.appendMessage(FolderSent, testMessage(1, 100))
+			fs.addRule(&rule{command: "UID FETCH", contains: tc.contains, kind: faultEmpty, limit: 1})
+			tm := testTimeouts()
+			tm.IdleMax = 5 * time.Second
+			h := newHarness(t, fs, tm, testBackoff())
+			wake := make(chan struct{}, 1)
+			h.w.Sent, h.w.Wake = true, wake
+			h.recordScanned()
+			h.start()
+			// 第一轮之后 Watcher 停在 IDLE 上，下面读到的状态在唤醒之前不会再变。
+			waitFor(t, "the first IDLE", func() bool { return fs.count("IDLE") == 1 })
+			if n := h.unavailable(FolderSent); n != 1 {
+				t.Errorf("folder_unavailable for Sent after the first round = %d, want 1", n)
+			}
+			if s := h.scannedOf(FolderSent); len(s) != 0 {
+				t.Errorf("Scanned(Sent) calls after the first round = %+v, want none: the copy was never handed to Handle", s)
+			}
+			h.mu.Lock()
+			cur := h.cursors[FolderSent]
+			h.mu.Unlock()
+			if cur != (Cursor{}) {
+				t.Errorf("Sent cursor after the first round = %+v, want no progress past the copy", cur)
+			}
+			wake <- struct{}{}
+			waitFor(t, "Scanned(Sent) on the next round", func() bool { return len(h.scannedOf(FolderSent)) >= 1 })
+			h.stop()
+			h.mu.Lock()
+			order := slices.Clone(h.order)
+			h.mu.Unlock()
+			want := []string{"batch " + FolderInbox, "scanned " + FolderInbox, "batch " + FolderSent, "scanned " + FolderSent}
+			if len(order) < len(want) || !slices.Equal(order[:len(want)], want) {
+				t.Errorf("order = %q, want prefix %q: Scanned(Sent) only after the copy is handed to Handle", order, want)
+			}
+			if got := h.delivered(FolderSent); !slices.Equal(got, []uint32{1}) {
+				t.Errorf("Sent deliveries = %v, want the copy once", got)
+			}
+			// 失败没有拆掉连接：唤醒后的那一轮仍以「已发送」开头，没有重新登录。
+			if got, want := examineSequence(fs), []string{FolderSent, FolderInbox, "IDLE", FolderSent}; len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
+				t.Errorf("EXAMINE and IDLE sequence = %q, want prefix %q", got, want)
+			}
+			if n := fs.count("LOGIN"); n != 1 {
+				t.Errorf("LOGIN count = %d, want 1", n)
+			}
+		})
+	}
 }
 
 // TestWatcherWakeEndsIdle 覆盖 Wake 结束 IDLE：IDLE 进行中收到信号即发出 DONE，按正常结束处理并开始新的一轮，不重连。
@@ -1511,8 +1657,35 @@ func TestWatcherKeepsWakeDuringHandleBackoff(t *testing.T) {
 	}
 }
 
+// TestWatcherWakeKeepsReconnectBackoff 覆盖唤醒只结束「等待新邮件」：服务器每次收到 LOGIN 都断开，Watcher 按退避重连，期间持续收到
+// 唤醒信号；两次登录的间隔仍不小于其间 backoff 状态中的等待（依次约为 Initial、2×Initial），唤醒没有缩短退避与登录频率的等待。
+// 等待开始于上一次拨号返回之后，按代理记录的 LOGIN 时刻，间隔本应严格大于等待；这里仍留 10% 的余量，比较的等待已含抖动。
+func TestWatcherWakeKeepsReconnectBackoff(t *testing.T) {
+	fs := newFakeServer(t, proxyOptions{})
+	fs.addRule(&rule{command: "LOGIN", kind: faultDisconnect})
+	b := testBackoff()
+	h := newHarness(t, fs, testTimeouts(), b)
+	wake := make(chan struct{}, 1)
+	h.w.Wake = wake
+	keepWaking(t, wake)
+	h.start()
+	waitFor(t, "3 logins", func() bool { return fs.count("LOGIN") >= 3 })
+	h.stop()
+	logins, backoffs := loginTimes(fs), h.statusesOf(StatusBackoff)
+	if len(backoffs) < len(logins)-1 {
+		t.Fatalf("%d backoff statuses for %d logins, want one before every login after the first", len(backoffs), len(logins))
+	}
+	assertNear(t, backoffs[0].Delay, b.Initial, "first backoff")
+	assertNear(t, backoffs[1].Delay, 2*b.Initial, "second backoff")
+	for i := 1; i < len(logins); i++ {
+		if gap, wait := logins[i].Sub(logins[i-1]), backoffs[i-1].Delay; gap < wait*9/10 {
+			t.Errorf("login %d came %v after the previous one, within the %v backoff, while wakes kept arriving", i, gap, wait)
+		}
+	}
+}
+
 // TestWatcherScanned 覆盖补扫完成回调：只在某文件夹本轮补扫成功完成（最后一批 More 为假、Handle 没有失败或延后）时调用，
-// 参数是本轮补扫该文件夹开始的时刻，取自注入的 Now。
+// 参数是本轮补扫该文件夹开始的时刻，取自注入的 Now；SkipHistory 返回真、不交付历史邮件的那一轮也调用。
 func TestWatcherScanned(t *testing.T) {
 	t.Run("start of the round from Now", func(t *testing.T) {
 		fs := newFakeServer(t, proxyOptions{})
@@ -1606,6 +1779,31 @@ func TestWatcherScanned(t *testing.T) {
 		// INBOX 的第一轮先失败一次，同一连接内重试后成功：开始时刻是本轮第一次尝试之前，而不是重试开始时。
 		if first, examined := h.scannedOf(FolderInbox)[0], examineTimes(fs, FolderInbox)[0]; first.started.After(examined) {
 			t.Errorf("Scanned(INBOX) started at %v, after the round's first EXAMINE at %v", first.started, examined)
+		}
+	})
+
+	t.Run("on the round that skips history", func(t *testing.T) {
+		// 跳过历史的那一轮同样是本轮补扫成功完成：Scanned 紧随那个不含邮件的批调用，而不是等到下一轮。
+		fs := newFakeServer(t, proxyOptions{noJunk: true})
+		fs.appendMessage(FolderSent, testMessage(1, 100))
+		tm := testTimeouts()
+		tm.IdleMax = 5 * time.Second
+		h := newHarness(t, fs, tm, testBackoff())
+		h.w.Sent = true
+		h.w.SkipHistory = func(string) bool { return true }
+		h.recordScanned()
+		h.start()
+		waitFor(t, "the first IDLE", func() bool { return fs.count("IDLE") == 1 })
+		h.stop()
+		if got := h.delivered(FolderSent); len(got) != 0 {
+			t.Fatalf("Sent deliveries = %v, want none: the round must skip the history", got)
+		}
+		h.mu.Lock()
+		order := slices.Clone(h.order)
+		h.mu.Unlock()
+		want := []string{"batch " + FolderSent, "scanned " + FolderSent, "batch " + FolderInbox, "scanned " + FolderInbox}
+		if !slices.Equal(order, want) {
+			t.Errorf("order = %q, want %q", order, want)
 		}
 	})
 }

@@ -1,8 +1,11 @@
 // Package imap 的长连接收取循环：登录后 LIST，每一轮依次补扫「已发送」（Watcher.Sent 为真时，只取头部）、INBOX 与 Junk，
 // 再回到 INBOX 上 IDLE（不支持或已降级时按 Poll 轮询；Wake 的信号提前结束等待），连接失败时按退避重连，并限制登录频率；
 // 认证失败暂停，本地处理失败在同一连接内按退避重试，Handle 可以把一批中的一部分延后到下一轮（ErrDefer）。
-// 「已发送」与 Junk 的失败都不影响 INBOX：「已发送」是承重路径，失败只跳过本轮、从不降级；Junk 排在 INBOX 之后，本轮跳过即可，
-// 连续失败到阈值后降级，满 relistInterval 后重新扫描。
+// 「已发送」与 Junk 的失败不会让 INBOX 饿死，但不是毫无影响。「已发送」是承重路径，失败只跳过本轮、从不降级、下一轮照常重试；
+// 它的命令超时或服务器断开拆掉连接时，本轮的 INBOX 要等重连之后才补扫（重连后的那一轮从 INBOX 继续）；它的本地处理失败时，
+// 本轮的 INBOX 要先等它在同一连接内的重试结束（至多 sentFailLimit 次尝试，其间按退避等待），且各文件夹共用的本地重试退避
+// 不因此复位，INBOX 若紧接着也在本地失败，等待从已加倍的基准开始。Junk 排在 INBOX 之后，本轮跳过即可，连续失败到阈值后降级，
+// 满 relistInterval 后重新扫描。
 package imap
 
 import (
@@ -117,10 +120,19 @@ type Watcher struct {
 	Sent bool
 	// Wake 可为 nil。等待新邮件时（IDLE 或 Poll 间隔）收到信号即正常结束等待——IDLE 发出 DONE 并按正常结束处理——开始新的一轮。
 	// 只在等待时读取它：补扫期间到达的信号留在通道中，使下一次等待立即结束（此时不发出 IDLE）。发送方应非阻塞写入容量为 1 的通道。
+	// 它只结束「等待新邮件」：同一连接内处理失败后的重试退避、重连退避、登录频率限制与认证失败后的 AuthPause 都不因它提前结束，
+	// 期间到达的信号同样留在通道中。
+	// 另有两条约定由发送方遵守，Watcher 不检查：通道不得关闭——关闭的通道永远就绪，每次等待都立即结束，Watcher 会不停补扫
+	// （实测 300 毫秒内 1217 条 EXAMINE、0 条 IDLE）；Handle 延后（ErrDefer）之后的唤醒必须延时发出（Task 9、10 定为 30 秒），
+	// 在返回 ErrDefer 之前直接唤醒，下一次等待立即结束、同一批又被延后，形成不限速的补扫循环。
 	Wake <-chan struct{}
 	// Scanned 可为 nil。某个文件夹本轮补扫成功完成（最后一批 More 为假，且 Handle 没有返回错误或 ErrDefer）时调用，
 	// started 是本轮补扫该文件夹开始的时刻（第一次读取它的游标之前，本轮在同一连接内重试过也取第一次尝试之前），取自 Now。
-	// D6 以它判断「副本确实不在」：开始时刻之前已在文件夹中的邮件，都已交给 Handle 并处理成功。
+	// D6 以 Scanned(FolderSent) 判断「副本确实不在」：开始时刻之前已在「已发送」中的邮件，都已交给 Handle 并处理成功。
+	// ScanHeaders 把 UID SEARCH 列出、却取不到头部的邮件当作本轮失败，不越过它们，所以 Scanned(FolderSent) 不会漏过它们
+	// （INBOX 与 Junk 用 Scan，仍把列出却取不到数据的邮件当作已被删除而越过）。例外是 SkipHistory 返回真的那一轮：UIDNEXT 之前的邮件
+	// 一封也没有交给 Handle，Scanned 照样调用。因此 SkipHistory 只有在这些邮件不可能是任何已有通知的副本时（例如库中还没有任何通知）
+	// 才能返回真，查询失败时必须返回假。
 	Scanned func(folder string, started time.Time)
 	// SkipHistory 可为 nil。文件夹没有持久化游标（Cursor 返回零值）且它返回真时，不补扫历史，只以 EXAMINE 得到的 UIDVALIDITY
 	// 与 UIDNEXT−1 构造一个不含邮件的批（Next 即该游标）交给 Handle 持久化。它在 EXAMINE 返回之后才被询问：首次运行时，
@@ -139,9 +151,9 @@ type Watcher struct {
 // 就没有 Junk 时发出一次 folder_missing，此后只在由存在变为缺失时再发出一次；重连不重置这一结论，Junk 一直缺失时不会每次重连
 // 都重复发出。
 //
-// 「已发送」本轮补扫失败（不在 LIST 中、EXAMINE 被拒绝、命令失败或超时、连接断开、本轮累计 sentFailLimit 次本地处理失败）时
-// 只发出 folder_unavailable 并跳过本轮，照常补扫 INBOX 与 Junk；从不降级，下一轮照常重试。失败时连接已被关闭的（命令超时或
-// 服务器断开），重连后的那一轮从 INBOX 继续，不再先补扫「已发送」：否则「已发送」每次都拆掉连接时 INBOX 永远轮不到补扫。
+// 「已发送」本轮补扫失败（不在 LIST 中、EXAMINE 被拒绝、命令失败或超时、连接断开、列出的邮件取不到头部、本轮累计 sentFailLimit 次
+// 本地处理失败）时只发出 folder_unavailable 并跳过本轮，照常补扫 INBOX 与 Junk；从不降级，下一轮照常重试。失败时连接已被关闭的
+// （命令超时或服务器断开），重连后的那一轮从 INBOX 继续，不再先补扫「已发送」：否则「已发送」每次都拆掉连接时 INBOX 永远轮不到补扫。
 //
 // INBOX 排在 Junk 之前，Junk 的任何失败都不影响本次连接已交付的 INBOX 新邮件。Junk 本轮补扫失败（EXAMINE 被拒绝、
 // 命令失败或超时、本轮累计 junkFailLimit 次本地处理失败）时只发出 folder_unavailable 并跳过本轮，不因此断开连接；
@@ -149,8 +161,9 @@ type Watcher struct {
 // 连接层失败（ErrClosed）不计入这个次数：它与 Junk 是否可用无关，重连后 Junk 照常补扫。
 // INBOX 的失败仍按原有方式处理：命令失败关闭连接并重连，本地处理失败在同一连接内按退避无限重试。
 //
-// 退避只在连接自登录起保持健康达到 IdleMax、或一次 IDLE 正常结束（含被 Wake 结束）后复位；补扫成功不复位。每次等待取退避与
-// 登录频率限制（两次登录至少间隔 Initial，任意 LoginWindow 内至多 MaxLogins 次）中较长者，只发出一个状态。
+// 退避只在连接自登录起保持健康达到 IdleMax、或一次 IDLE 正常结束（含被 Wake 结束）后复位；补扫成功不复位，等待之前通道中
+// 已有的唤醒信号或 EXISTS 使 Watcher 不发 IDLE 就开始新的一轮，这也不复位。每次等待取退避与登录频率限制（两次登录至少间隔
+// Initial，任意 LoginWindow 内至多 MaxLogins 次）中较长者，只发出一个状态；这一等待与认证失败后的 AuthPause 都不因 Wake 提前结束。
 func (w *Watcher) Run(ctx context.Context) error {
 	b := w.Backoff.withDefaults()
 	r := &runner{w: w, b: b, t: w.Config.Timeouts.withDefaults(), junk: true, reconnect: retry{b: b}, local: retry{b: b}}
@@ -309,7 +322,10 @@ func (r *runner) list(ctx context.Context, s *Session) error {
 // 不把错误交给 serve，因此不因它拆掉连接；从不计数、从不降级，下一轮照常重试。LIST 中没有它同样按失败处理，且不 EXAMINE 它。
 // 连接层失败（命令超时或服务器断开，连接已被关闭）也算本轮失败：对 D6 而言它同样意味着本轮拿不到「副本确实不在」的证据；
 // 此时置 resumeInbox，紧随其后的 INBOX 补扫发现连接已关闭而按原有方式重连，重连后的那一轮从 INBOX 继续。否则「已发送」
-// 每次都拆掉连接时（例如对它的 EXAMINE 一直只回无标签 BAD），INBOX 永远轮不到补扫。只有 ctx 结束时才返回错误。
+// 每次都拆掉连接时（例如对它的 EXAMINE 一直只回无标签 BAD），INBOX 永远轮不到补扫。连接仍然打开的失败（被 NO 或带标签的 BAD
+// 拒绝、列出的邮件取不到头部、本地处理失败）不置 resumeInbox，下一轮照常先补扫它。只有 ctx 结束时才返回错误。
+// 「已发送」持续超时或每次都断开时，每一轮都要重连一次，收取循环会长期顶在登录频率上限附近（每 LoginWindow 至多 MaxLogins 次，
+// 生产为每小时 12 次）：这是「从不降级」的直接代价，仍在 4a 的登录上限之内。
 func (r *runner) drainSent(ctx context.Context, s *Session) error {
 	if !r.sent {
 		r.emit(Status{Kind: StatusFolderUnavailable, Folder: FolderSent})

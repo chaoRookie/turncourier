@@ -1,6 +1,6 @@
 // Package imap 用离线假服务器验证单连接会话：收取与游标、只取头部的补扫、只读、命令白名单、每条命令的期限、
-// 补扫中到达的 EXISTS、IDLE 推送、UIDVALIDITY 变化、批量与大小上限、字面量中途断开、认证与传输安全、文件夹错误；
-// 测试不连接任何真实服务器。
+// 补扫中到达的 EXISTS、IDLE 推送、UIDVALIDITY 变化、批量与大小上限、字面量中途断开、取不到数据的邮件（Scan 越过它，
+// ScanHeaders 按本批失败处理）、认证与传输安全、文件夹错误；测试不连接任何真实服务器。
 package imap
 
 import (
@@ -967,20 +967,73 @@ func TestScanBatchBytes(t *testing.T) {
 	}
 }
 
-// TestScanSkipsVanishedMessages 覆盖补扫期间被删除的邮件：UID FETCH 没有返回数据时跳过该邮件，游标越过它。
+// TestScanSkipsVanishedMessages 覆盖补扫期间被删除的邮件：UID FETCH 没有返回数据（或正文的字面量为 NIL）时，Scan 跳过该邮件，
+// 游标越过它。这是 Scan（INBOX 与 Junk）的语义；ScanHeaders 在同样的故障下按本批失败处理，见 TestScanHeadersMissingData。
 func TestScanSkipsVanishedMessages(t *testing.T) {
-	for _, tc := range []struct{ name, contains string }{
-		{"size fetch", "RFC822.SIZE"},
-		{"body fetch", "BODY.PEEK"},
+	for _, tc := range []struct {
+		name string
+		rule rule
+	}{
+		{"size fetch", rule{command: "UID FETCH", contains: "RFC822.SIZE", kind: faultEmpty}},
+		{"body fetch", rule{command: "UID FETCH", contains: "BODY.PEEK", kind: faultEmpty}},
+		{"NIL body", rule{command: "UID FETCH", contains: "BODY.PEEK", kind: faultReply, reply: "* 1 FETCH (UID 1 BODY[] NIL)\r\n"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newFakeServer(t, proxyOptions{})
 			fs.appendMessage(FolderInbox, testMessage(1, 100))
 			s := dial(t, fs, testTimeouts())
-			fs.addRule(&rule{command: "UID FETCH", contains: tc.contains, kind: faultEmpty, limit: 1})
+			r := tc.rule
+			r.limit = 1
+			fs.addRule(&r)
 			b := scan(t, s, FolderInbox, Cursor{})
 			if len(b.Messages) != 0 || b.More || b.Next.LastUID != 1 {
 				t.Errorf("batch = %+v, want no messages and LastUID 1", b)
+			}
+		})
+	}
+}
+
+// TestScanHeadersMissingData 覆盖 ScanHeaders 取不到 UID SEARCH 列出的邮件的数据：RFC822.SIZE 或头部的 UID FETCH 只回 OK 而不带数据、
+// 头部的字面量为 NIL、返回的节与请求的 BODY[HEADER] 不一致（整封、某个部分的头部、只含部分字段、偏移不为 0）时，返回 errMissingData
+// 而不交付本批，不像 Scan 那样按「两条命令之间已被删除」越过它：「已发送」的补扫成功完成是 D6「副本确实不在」的证据，越过一份
+// 取不到的副本，它就成了假证据。整封的字面量大于头部上限，若被当作头部，这份副本会被判为 TooLarge 交付，Task 10 读不出其中的标识，
+// 只能忽略它。
+// 错误不是 ErrClosed，连接仍可用：故障只出现一次，紧接着的 ScanHeaders 在同一连接上交付这封邮件的头部。
+func TestScanHeadersMissingData(t *testing.T) {
+	setVar(t, &maxHeaderSize, 1024)
+	raw := testMessage(1, 4096)
+	header := headerOf(raw)
+	for _, tc := range []struct {
+		name string
+		rule rule
+	}{
+		{"size fetch without data", rule{command: "UID FETCH", contains: "RFC822.SIZE", kind: faultEmpty}},
+		{"header fetch without data", rule{command: "UID FETCH", contains: "BODY.PEEK[HEADER]", kind: faultEmpty}},
+		{"NIL header", rule{command: "UID FETCH", contains: "BODY.PEEK[HEADER]", kind: faultReply, reply: "* 1 FETCH (UID 1 BODY[HEADER] NIL)\r\n"}},
+		{"whole message instead of the header", rule{command: "UID FETCH", contains: "BODY.PEEK[HEADER]", kind: faultReply, reply: fetchReply("BODY[]", raw)}},
+		{"header of a part", rule{command: "UID FETCH", contains: "BODY.PEEK[HEADER]", kind: faultReply, reply: fetchReply("BODY[1.HEADER]", header)}},
+		{"selected header fields", rule{command: "UID FETCH", contains: "BODY.PEEK[HEADER]", kind: faultReply,
+			reply: fetchReply("BODY[HEADER.FIELDS (FROM)]", []byte("From: user@example.invalid\r\n\r\n"))}},
+		{"offset other than zero", rule{command: "UID FETCH", contains: "BODY.PEEK[HEADER]", kind: faultReply, reply: fetchReply("BODY[HEADER]<5>", header[5:])}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeServer(t, proxyOptions{})
+			fs.appendMessage(FolderSent, raw)
+			s := dial(t, fs, testTimeouts())
+			r := tc.rule
+			r.limit = 1
+			fs.addRule(&r)
+			ctx := context.Background()
+			b, err := s.ScanHeaders(ctx, FolderSent, Cursor{})
+			if !errors.Is(err, errMissingData) || errors.Is(err, ErrClosed) {
+				t.Fatalf("ScanHeaders = %+v, %v; want errMissingData, not ErrClosed", b, err)
+			}
+			if len(b.Messages) != 0 || b.Next != (Cursor{}) {
+				t.Errorf("batch returned with the error = %+v, want the zero batch", b)
+			}
+			again, err := s.ScanHeaders(ctx, FolderSent, Cursor{})
+			if err != nil || !slices.Equal(uids(again), []uint32{1}) || again.Messages[0].TooLarge || !bytes.Equal(again.Messages[0].Raw, header) || again.Next.LastUID != 1 {
+				t.Fatalf("ScanHeaders after the fault = %+v, %v; want the header of UID 1 on the same connection", again, err)
 			}
 		})
 	}

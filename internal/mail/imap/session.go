@@ -138,6 +138,11 @@ var (
 	// ErrNoFolder 表示 EXAMINE 被服务器以 NO 拒绝。原因可能是文件夹不存在，也可能是暂时不可用（例如 [UNAVAILABLE]），
 	// 本包不区分；文件夹是否存在由调用方按 ListFolders 的结果判断。
 	ErrNoFolder = errors.New("imap: folder cannot be examined")
+
+	// errMissingData 表示 ScanHeaders 取不到 UID SEARCH 列出的某封邮件的数据：RFC822.SIZE 的响应中没有它，或者取头部时服务器
+	// 没有返回正文节数据项、字面量为 NIL、返回的节不是请求的 BODY[HEADER]。本批作废、游标不前进；命令本身已正常完成，连接仍可用，
+	// 所以它不是也不包装 ErrClosed。文本固定，不含文件夹名与 UID。理由见 ScanHeaders。
+	errMissingData = errors.New("imap: listed message returned no data")
 )
 
 // rejectedError 表示服务器以带标签的 NO 或 BAD（或问候中的 BYE）拒绝了一步；只保留步骤名与响应类型，不保留服务器文本，
@@ -400,8 +405,8 @@ func (s *Session) Examine(ctx context.Context, folder string) (Mailbox, error) {
 // 已取回正文合计达到 MaxBatchBytes 时本批提前结束并置 More。
 //
 // 合计上限在取下一封正文之前检查：已取回的正文加下一封声明的大小超过 maxBatchBytes 时本批结束，因此服务器如实报告大小时
-// 合计不超过上限；每批至少交付一封，单封大于上限时也能前进。UID SEARCH 返回、但 FETCH 没有返回数据（或没有正文）的邮件
-// 已在两条命令之间被删除，跳过它，游标越过它。
+// 合计不超过上限；每批至少交付一封，单封大于上限时也能前进。UID SEARCH 返回、但 FETCH 没有返回数据（或没有正文、正文为 NIL）的邮件
+// 已在两条命令之间被删除，跳过它，游标越过它（ScanHeaders 在这里与 Scan 不同，见其说明）。
 func (s *Session) Scan(ctx context.Context, folder string, cur Cursor) (Batch, error) {
 	return s.scan(ctx, folder, cur, scanOptions{})
 }
@@ -410,19 +415,28 @@ func (s *Session) Scan(ctx context.Context, folder string, cur Cursor) (Batch, e
 // 至多读 maxHeaderSize+1 字节，超出即判为 TooLarge、Raw 为 nil。Raw 是头部（到结束头部的空行为止），Size 仍是整封声明的大小。
 // 头部的大小事先无从得知，所以不像 Scan 那样按声明大小跳过取回：整封很大的邮件也照常取回头部。正文合计上限照旧，
 // 取下一封之前按预计取回的字节数（声明大小与 maxHeaderSize 中较小者）检查。Watcher 用它补扫「已发送」：只需头部中的标识。
+//
+// 另一处与 Scan 不同，是对「与 Scan 相同」的有意偏差：UID SEARCH 列出、却取不到数据的邮件——RFC822.SIZE 的响应中没有它，
+// 取头部时服务器没有返回正文节数据项、字面量为 NIL，或返回的节不是 BODY[HEADER]（例如整封的 BODY[]：大于 maxHeaderSize 的副本
+// 会被判为 TooLarge，调用方拿不到其中的标识）——不当作已被删除而越过，而是返回 errMissingData：本批作废、游标不前进，
+// 连接仍可用。Watcher 把「已发送」本轮补扫成功完成（Scanned(FolderSent)）当作 D6「副本确实不在」的证据，据此的 thread_mismatch
+// 拒绝不可撤销；越过一份取不到的副本，这条证据就是假的。所以宁可本轮失败、下一轮重试：邮件若确已被删除，下一次 UID SEARCH
+// 不再列出它，补扫自行恢复；若一直取不到，「已发送」每轮失败，回复只会延后并有告警，不会被错误地拒绝。
 func (s *Session) ScanHeaders(ctx context.Context, folder string, cur Cursor) (Batch, error) {
 	return s.scan(ctx, folder, cur, scanOptions{headers: true})
 }
 
 // scanOptions 是补扫的内部选项；零值即 Scan 的行为。
 type scanOptions struct {
-	headers bool // 只取头部（ScanHeaders）：BODY.PEEK[HEADER]，上限为 maxHeaderSize，不按整封的声明大小跳过取回
+	headers bool // 只取头部（ScanHeaders）：BODY.PEEK[HEADER]，上限为 maxHeaderSize，不按整封的声明大小跳过取回，取不到数据即本批失败
 	// skipHistory 非 nil 时，在 EXAMINE 返回且报告了 UIDNEXT 之后询问它；返回真即不取回任何已有邮件，只返回游标落在 UIDNEXT−1
 	// 的空批。没有报告 UIDNEXT 时不询问、照常补扫。只供 Watcher 在文件夹没有持久化游标时转交 SkipHistory，询问时机见其说明。
 	skipHistory func() bool
 }
 
-// scan 是 Scan、ScanHeaders 与 Watcher 跳过历史的共同实现，见 Scan 与 ScanHeaders 的说明。
+// scan 是 Scan、ScanHeaders 与 Watcher 跳过历史的共同实现，见 Scan 与 ScanHeaders 的说明。UID SEARCH 列出、FETCH 却取不到数据的邮件，
+// Scan 越过它、游标照常前进；ScanHeaders 返回 errMissingData、整批作废：「已发送」的补扫完成是 D6 的证据，宁可本轮失败，
+// 也不能越过一份取不到的副本。
 func (s *Session) scan(ctx context.Context, folder string, cur Cursor, opts scanOptions) (Batch, error) {
 	// 排空发生在 EXAMINE 之前：此后到达的 EXISTS 都会留下信号，新邮件要么被本次 UID SEARCH 覆盖，要么让下一次 Idle 立即返回。
 	select {
@@ -469,6 +483,8 @@ func (s *Session) scan(ctx context.Context, folder string, cur Cursor, opts scan
 	for _, uid := range uids {
 		size, ok := sizes[uid]
 		switch {
+		case !ok && opts.headers:
+			return Batch{}, errMissingData
 		case !ok:
 			// 已被删除，跳过。
 		case !opts.headers && size > limit:
@@ -481,6 +497,9 @@ func (s *Session) scan(ctx context.Context, folder string, cur Cursor, opts scan
 			raw, tooLarge, found, err := s.fetchSection(ctx, uid, section, limit)
 			if err != nil {
 				return Batch{}, err
+			}
+			if !found && opts.headers {
+				return Batch{}, errMissingData
 			}
 			if found {
 				b.Messages = append(b.Messages, Message{UID: uint32(uid), Size: size, Raw: raw, TooLarge: tooLarge})
@@ -539,8 +558,10 @@ func (s *Session) sizes(ctx context.Context, uids []imap.UID) (map[imap.UID]int6
 
 // fetchSection 执行 UID FETCH <uid> (BODY.PEEK[<section>]<0.limit+1>)：section 为空时取整封（Scan，limit 为 maxMessageSize），
 // 为 HEADER 时只取头部（ScanHeaders，limit 为 maxHeaderSize）。字面量流式读取至多 limit+1 字节：超出 limit 时 tooLarge 为 true、
-// raw 为 nil，其余部分由库读出丢弃。found 为 false 表示服务器没有返回该数据项。正文与头部共用这一个函数与 readLiteral，
-// 对读取失败与字面量中途断开的处理因此对两者同样生效。
+// raw 为 nil，其余部分由库读出丢弃。found 为 false 表示服务器没有返回可用的数据项：没有正文节数据项、字面量为 NIL，或者取头部时
+// 返回的节不是 BODY[HEADER]（见 isHeaderSection）；Scan 据此越过这封邮件，ScanHeaders 据此让本批失败。这些情形下命令照常完成，
+// 连接仍可用，所以只在命令结束后由 found 报告，不在命令进行中返回错误：那样 do 会把它当作连接层失败而关闭连接。
+// 正文与头部共用这一个函数与 readLiteral，对读取失败与字面量中途断开的处理因此对两者同样生效。
 func (s *Session) fetchSection(ctx context.Context, uid imap.UID, section imap.PartSpecifier, limit int64) (raw []byte, tooLarge, found bool, err error) {
 	var data []byte
 	var large, ok bool
@@ -550,13 +571,17 @@ func (s *Session) fetchSection(ctx context.Context, uid imap.UID, section imap.P
 		})
 		for msg := cmd.Next(); msg != nil; msg = cmd.Next() {
 			for item := msg.Next(); item != nil; item = msg.Next() {
-				section, isBody := item.(imapclient.FetchItemDataBodySection)
-				if !isBody || section.Literal == nil || ok {
+				body, isBody := item.(imapclient.FetchItemDataBodySection)
+				if !isBody || body.Literal == nil || ok {
+					continue
+				}
+				// 取头部时只认 BODY[HEADER]：别的节（例如整封）不能当作头部，跳过它，由下一次 Next 读出丢弃。
+				if section == imap.PartSpecifierHeader && !isHeaderSection(body.Section) {
 					continue
 				}
 				ok = true
 				var err error
-				if data, large, err = readLiteral(section.Literal, limit); err != nil {
+				if data, large, err = readLiteral(body.Literal, limit); err != nil {
 					// 读取失败或字面量中途断开（见 readLiteral）都说明连接已断开。此时不能再调用 Next：它会丢弃同一字面量而再次读取，
 					// 与解码协程争用读缓冲。连接断开后解码协程自行退出并结束本命令，不会因为没人取走数据而阻塞。
 					return err
@@ -569,6 +594,15 @@ func (s *Session) fetchSection(ctx context.Context, uid imap.UID, section imap.P
 		return nil, false, false, err
 	}
 	return data, large, ok, nil
+}
+
+// isHeaderSection 判断 FETCH 响应中的正文节是否正是 ScanHeaders 请求的 BODY[HEADER]<0.N>。imapclient 按响应解析节（readSectionSpec），
+// 不照抄请求，所以这里看到的是服务器实际返回的节。整封（BODY[]）、某个部分的头部（BODY[1.HEADER]）、只含部分字段的头部
+// （HEADER.FIELDS，库把它的 Specifier 也记为 HEADER）与起始偏移不为 0 的部分取回都不是；BODY[HEADER]<0> 与不带偏移的
+// BODY[HEADER] 是，后者说明服务器没有遵守部分取回，这时 readLiteral 仍把读取限制在上限之内。
+func isHeaderSection(sec *imap.FetchItemBodySection) bool {
+	return sec != nil && sec.Specifier == imap.PartSpecifierHeader && len(sec.Part) == 0 &&
+		len(sec.HeaderFields) == 0 && len(sec.HeaderFieldsNot) == 0 && (sec.Partial == nil || sec.Partial.Offset == 0)
 }
 
 // readLiteral 流式读取字面量 lit 至多 limit+1 字节：超出 limit 时 tooLarge 为 true、data 为 nil，其余部分留给库读出丢弃。

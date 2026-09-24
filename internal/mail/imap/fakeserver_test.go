@@ -2,7 +2,8 @@
 // 前面是只在测试中存在的代理。代理默认终结 TLS（证书借用 httptest），记录客户端发出的每条命令（标签、命令名与参数，
 // LOGIN 只记命令名；UID FETCH 另记数据项，可据此区分取整封的 BODY.PEEK[] 与只取头部的 BODY.PEEK[HEADER]），并按规则注入故障，
 // 模拟 QQ 的无标签 BAD、半开连接、问候冻结、文件夹暂时不可用、补扫中到达的 EXISTS、少报的邮件大小、
-// 不遵守部分取回、字面量中途断开、断开（含拒绝登录后断开）、登录前的慢握手、能力差异、不报告 UIDNEXT 与明文入口。
+// 不遵守部分取回、字面量中途断开、FETCH 不带数据或带着非常规的数据（字面量为 NIL、返回的节与请求不一致）、
+// 断开（含拒绝登录后断开）、登录前的慢握手、能力差异、不报告 UIDNEXT 与明文入口。
 // 测试只连接这里的本地假服务器，不连接任何真实服务器。
 package imap
 
@@ -72,6 +73,7 @@ const (
 	faultRejectClose                      // 不转发，回 <标签> NO [AUTHENTICATIONFAILED] 后立即关闭两侧连接，模拟拒绝登录后断开的服务器
 	faultWholeBody                        // 不转发，回一条正文字面量为 bytes 字节的 FETCH 响应再回 <标签> OK，模拟不遵守部分取回的服务器；cut 大于 0 时只发出字面量的前 cut 字节就关闭两侧连接
 	faultCloseAfter                       // 转发命令，响应转发 bytes 字节后关闭两侧连接；TLS 以 close_notify 正常结束，客户端读到 io.EOF
+	faultReply                            // 不转发，原样写出 reply 再回 <标签> OK，模拟以非常规的数据回应命令的服务器（例如正文节为 NIL、返回的节与请求不一致）
 )
 
 // rule 是一条故障规则：命令名相同且命令行含 contains 时生效。
@@ -82,6 +84,7 @@ type rule struct {
 	bytes    int       // faultFreezeAfter 与 faultCloseAfter 转发的响应字节数；faultWholeBody 声明的字面量字节数
 	cut      int       // faultWholeBody 大于 0 时只发出字面量的前 cut 字节，然后关闭两侧连接（TLS 以 close_notify 正常结束）
 	exists   []uint32  // faultInject 注入的各条 EXISTS 的 N
+	reply    string    // faultReply 原样写出的无标签响应，须含行尾，可以带字面量（见 fetchReply）
 	limit    int       // 生效次数上限；0 表示不限
 	hook     func()    // 生效时、转发之前调用，例如同时放入一封新邮件
 	used     int       // 已生效次数，受 fakeServer.mu 保护
@@ -523,6 +526,8 @@ func (pc *proxyConn) clientToServer() {
 				err = pc.send([]byte(tag + " BAD Command is not supported for this mailbox\r\n"))
 			case faultEmpty:
 				err = pc.send([]byte(tag + " OK completed\r\n"))
+			case faultReply:
+				err = pc.send([]byte(r.reply + tag + " OK completed\r\n"))
 			case faultFreeze:
 				pc.freeze()
 			case faultDisconnect:
@@ -668,4 +673,9 @@ func messageWithHeader(n, headerSize, bodySize int) []byte {
 // headerOf 返回合成邮件的头部：到结束头部的空行为止（含空行），即 BODY[HEADER] 应返回的字节。
 func headerOf(raw []byte) []byte {
 	return raw[:bytes.Index(raw, []byte("\r\n\r\n"))+4]
+}
+
+// fetchReply 构造供 faultReply 写出的一条 FETCH 响应：UID 1 的数据项 item（例如 BODY[] 或 BODY[HEADER]<5>）带字面量 data。
+func fetchReply(item string, data []byte) string {
+	return fmt.Sprintf("* 1 FETCH (UID 1 %s {%d}\r\n%s)\r\n", item, len(data), data)
 }
