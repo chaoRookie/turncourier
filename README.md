@@ -196,12 +196,14 @@ turncourier/
 │   │   │   ├── session_test.go      # Bare BAD, half-open, UIDVALIDITY change
 │   │   │   ├── watcher_test.go      # Backoff, login rate limit, auth pause
 │   │   │   └── source_test.go       # Source check: DialTLS, read-only, PEEK
-│   │   ├── parser/                  # Inbound MIME, quotes and signatures
+│   │   ├── parser/                  # Inbound MIME, quotes, signatures, auto-replies
 │   │   │   ├── parser.go            # Parse, ParseHeader, NewText; redacted Message
 │   │   │   ├── charset.go           # GBK labels decoded as GB18030
 │   │   │   ├── quote.go             # Quote and signature stripping, residue check
+│   │   │   ├── classify.go          # Auto-reply and bounce classification
 │   │   │   ├── parser_test.go       # Samples, headers, charsets, limits, redaction
 │   │   │   ├── quote_test.go        # Boundary rules, signatures, residue triggers
+│   │   │   ├── classify_test.go     # L1 samples, one rule per case, bounce first
 │   │   │   └── fuzz_test.go         # Fuzzing: no panic, bounded valid output
 │   │   └── smtp/                    # Submit one message over implicit TLS
 │   │       ├── smtp.go              # Per-step deadlines, outcome classification

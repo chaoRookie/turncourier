@@ -196,12 +196,14 @@ turncourier/
 │   │   │   ├── session_test.go      # 无标签 BAD、半开连接、UIDVALIDITY 变化
 │   │   │   ├── watcher_test.go      # 退避、登录频率上限、认证失败暂停
 │   │   │   └── source_test.go       # 源码检查：DialTLS、只读、PEEK
-│   │   ├── parser/                  # 入站邮件的 MIME、引用与签名解析
+│   │   ├── parser/                  # 入站邮件解析：MIME、引用、签名与自动回复
 │   │   │   ├── parser.go            # Parse、ParseHeader、NewText；Message 脱敏
 │   │   │   ├── charset.go           # GBK 系列标签按 GB18030 解码
 │   │   │   ├── quote.go             # 引用与签名剥离、残留检查
+│   │   │   ├── classify.go          # 自动回复与退信判定
 │   │   │   ├── parser_test.go       # 样本、头部、字符集、上限与脱敏测试
 │   │   │   ├── quote_test.go        # 边界规则、签名与残留触发测试
+│   │   │   ├── classify_test.go     # L1 样本、逐条规则与退信优先测试
 │   │   │   └── fuzz_test.go         # 模糊测试：不 panic、输出合法且有界
 │   │   └── smtp/                    # 只用隐式 TLS 发送单封邮件
 │   │       ├── smtp.go              # 逐步期限与投递结果三分类
