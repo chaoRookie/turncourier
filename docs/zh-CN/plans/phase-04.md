@@ -2630,7 +2630,8 @@ cmd/turncourier ─► internal/cli ─► internal/doctor
 
 internal/mail/parser    ─► internal/mail（gateway 常量）、go-message、go-message/mail、go-message/charset、x/text
 internal/mail/renderer  ─► internal/mail（gateway 常量）、go-message、go-message/mail（经接口取得标签，不导入 security/token）
-tests/qqsim             ─► go-imap/v2（imapserver、imapmemserver）、go-smtp（服务端）、go-sasl（服务端认证）
+tests/qqsim             ─► go-imap/v2（imapserver、imapmemserver）、go-smtp（服务端）、go-sasl（服务端认证）、
+                           internal/mail/{imap,smtp}（文件夹名常量与客户端配置）、tests/fixtures/mail（Reply 的模板）
 tests/e2e               ─► internal/app、tests/qqsim、store/sqlite、config、task
 tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/keychain（只读取授权码）
 ```
@@ -2904,6 +2905,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 **Files:**
 - Create: `tests/qqsim/qqsim.go`、`tests/qqsim/qqsim_test.go`
 - Modify: `docs/en/architecture.md`、`docs/zh-CN/development.md`（go-imap/v2、go-smtp、go-sasl 的「使用方」一栏点名 `tests/qqsim`；`qqsim.go` 不是测试文件，`tests/docs/deps_test.go` 会扫描它）
+- Modify（实施时补充）：`tests/fixtures/mail/mailfixture.go` 及其测试、`qq-app-reply.json`、`tests/fixtures/mail/README.md`（`Reply` 复用 Task 3 的样本模板，见实施说明第 11 条）；README 两份树形图
 
 **契约：** 一个进程内的离线假服务器，供 `internal/app`、`internal/cli` 与 `tests/e2e` 的测试共用；只用 go-imap/v2 的 `imapserver`、`imapmemserver` 与 go-smtp 的服务端（其 AUTH 需要 go-sasl 的 `sasl.Server`），不联网，监听 `127.0.0.1` 的随机端口，隐式 TLS 使用测试时生成的自签 CA（调用方经 `RootCAs` 信任它）。
 
@@ -2915,10 +2917,31 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 
 **测试（先写并确认失败）：** 用 `internal/mail/smtp.Send` 发一封信后，「已发送」中出现改写了 ID 的副本且 `X-OQ-MSGID` 等于原 ID；`imap.Session` 能登录、`ScanHeaders` 取到副本；每种故障注入都产生对应的客户端错误分类（`ErrAuth`、`*ReplyError` 4xx/5xx、`ErrUncertain`、`ErrAuthFailed`、`ErrNoFolder`、断开后的 `ErrClosed`）；延迟写入的副本在延迟之后才出现。
 
-- [ ] **Step 1：** 写失败的测试。
-- [ ] **Step 2：** 实现；更新两份依赖表。
-- [ ] **Step 3：** `make check`、`make secrets` 通过。
-- [ ] **Step 4：** `git commit -m "test(qqsim): offline QQ Mail simulator with Message-ID rewriting and fault injection"`
+- [x] **Step 1：** 写失败的测试。
+- [x] **Step 2：** 实现；更新两份依赖表。
+- [x] **Step 3：** `make check`、`make secrets` 通过。
+- [x] **Step 4：** `git commit -m "test(qqsim): offline QQ Mail simulator with Message-ID rewriting and fault injection"`
+
+**实施说明（2026-09-24）：** 由独立子代理按上述契约实现（提交 `ca9d412`，由 worktree 中的 `f4f84b7` 拣选而来）。先写测试，失败基线为编译失败：`qqsim_test.go` 中 `Options`、`Server`、`Faults`、`Delivered` 未定义，`mailfixture_test.go` 中 `Sample.defaults` 与 `Values.Optional` 未定义；mailfixture 的实现就位而 `qq-app-reply.json` 尚未参数化时，三个可选占位符用例以 `declares no optional placeholder` 失败；加入 `qqsim.go` 后，`tests/docs` 的依赖表检查报两份文档 × go-imap/v2、go-smtp、go-sasl 共 6 处没有点名 `tests/qqsim`，补上后通过。
+
+- **接口：** `New(Options{Address, Password, Now})` 与 `Close`；`Host`、`IMAPPort`、`SMTPPort`、`RootCAs`，以及可直接使用的 `IMAPConfig()`、`SMTPConfig()`；`Delivered()` 是不设上限的队列（元素 `{From, To, MessageID, OriginalID, Raw}`，测试不读也不会阻塞 SMTP 会话，`Close` 后通道关闭）；`Deliver(folder, raw)` 返回 UID，`Messages(folder)` 返回原样字节；`Stats()` 给出 IMAP 登录、SMTP 认证与收下的次数（供 Task 11 断言熔断期间不登录）；`SetFaults(Faults)`、`ClearFaults()`、`ReleaseSent()`、`DisconnectAll()`；包级函数 `Reply(d, from, subjectPrefix, body)`。`Faults` 的字段：`AuthCode`、`MailCode`、`RcptCode`、`DataCode`、`SubmissionCode`（该步骤以此状态码回复）、`Drop`（`DropAccepted` 或 `DropDiscarded`：收到结束标记后不回响应即断开）、`SentDelay`、`NoSentCopy`、`IMAPLoginFails`、`SentExamineFails`、`SentHidden`。
+- **新增用例：** qqsim 24 个，涵盖契约「测试」段的每一项（`smtp.Send` 之后「已发送」中是改写了 ID 的副本、`X-OQ-MSGID` 等于原 ID；`imap.Session` 登录、`ScanHeaders` 取到副本；AUTH、MAIL、RCPT、DATA 与结束标记之后各一个 4xx 与 5xx 的 10 个子用例，断开的两种，IMAP 登录失败、EXAMINE 被拒、LIST 缺失、断开后的 `ErrClosed`；延迟写入的副本在注入时钟走满或放行之后才出现），另有 `Reply` 经产品解析器的往返（`NewText`、`Classify`）、Message-Id 改写的边界、只读、连接包装与参数校验；mailfixture 新增 6 个，`TestBuildDecodesBack` 改为独立计算默认值展开与 HTML 转义后再比对。
+- **变异测试：** 自拟 29 个，全部被杀死，每次恢复后 SHA-256 与原文件相同：契约点名的类型（不改写 Message-Id、不写 `X-OQ-MSGID`、副本不进「已发送」、各故障不生效或作用于错误的阶段、延迟写入立即生效），另有到期判断差一、`DropDiscarded` 仍收下、UIDVALIDITY 不统一、回复的线程头指向我方原 ID、250 改回 go-smtp 的默认文本、不核对信封发件人，以及 mailfixture 的 5 个。其中「只隐藏「已发送」也让 EXAMINE 失败」与「回复的收件人错取信封收件人」两个在补断言之前存活，补上后被杀死。
+- **按字面解释或补充的地方：**
+  1. DATA 的 250 响应用 QQ 实测的原文 `OK: queued as.`（契约括注的 go-smtp 默认文本同样不含 ID，这里取与 L1 完全相同的写法）；注入的回复都不带增强状态码，与 L1 中 QQ 的 550 一致。
+  2. go-smtp 的服务端收到 DATA 直接回 354、不经过会话，「DATA 命令被拒绝」只能由 TLS 之上按行检查的包装拦截：命令模式下逐字节读到行尾、不多读正文，354 之后原样转发。go-smtp 因此看到的不是 `*tls.Conn`，要设 `AllowInsecureAuth`；传输层仍只有隐式 TLS，没有明文入口。
+  3. 「不回响应即断开」分「已收下」（有副本）与「已丢弃」（无副本）两种，供 D7 的两种情形（Task 10、11）。
+  4. 「已发送」副本的延迟按注入时钟判断，不开后台计时器：到期的副本在下一次 SELECT、EXAMINE 或 STATUS「已发送」、或调用 `Messages` 时写入；`ReleaseSent` 不等到期立即写入；`NoSentCopy` 优先于 `SentDelay`。
+  5. `SentHidden` 只影响 LIST，EXAMINE 照常（Watcher 按 LIST 判断、不会去 EXAMINE）；要两者都失败时同时设 `SentExamineFails`。
+  6. `Deliver` 除 INBOX 与 Junk 外也允许「已发送」（首次运行跳过历史等场景下放入历史副本）。「任意字节」有一处限制：imapmemserver 取回 `BODY[]` 与 `BODY[HEADER]` 时经 go-message 重新解析头部，头部可解析时字节只有换行统一为 CRLF 这一处变化（非法 UTF-8、超长行、`<>` 形式的 Message-ID 都原样保留），头部无法解析时经 IMAP 取回的是空字节（产品会判为畸形来信）；`Messages` 与 RFC822.SIZE 总是原样字节。这一限制写在注释里并由用例钉住；需要经 IMAP 投递头部不可解析的字节的测试（例如 Task 9 的畸形来信）应直接构造 `imap.Batch`。
+  7. 客户端的写命令（APPEND、STORE、COPY、MOVE、EXPUNGE、CREATE、DELETE、RENAME、SUBSCRIBE、UNSUBSCRIBE）一律回 NO：模拟器的记录因此始终与 imapmemserver 一致，也顺带钉住产品只读邮箱。
+  8. imapmemserver 的 UIDVALIDITY 按文件夹各自递增，模拟器在 SELECT、EXAMINE 与 STATUS 的结果中统一换成同一个随机非零值，与 L1 实测一致。
+  9. 契约之外按 QQ 的规矩拒绝：未认证的 MAIL（503）、与登录账户不同的信封发件人（501）、错误的授权码（535）；只提供 AUTH PLAIN。
+  10. Message-Id 的边界（L1 没有观察，取最简单的一致处理）：原信缺少时补一个、不写 `X-OQ-MSGID`；重复的只留一个；原有的 `X-OQ-MSGID` 删去；`X-OQ-MSGID` 的取值与原 ID 逐字相同（带尖括号）；改写后的 ID 为 40 个大写十六进制字符。
+  11. `Reply` 复用 `qq-app-reply` 样本而不另写 MIME 组装：mailfixture 增加模板声明的、带默认值的可选占位符（FROM、TO、PREFIX、SUBJECT、MESSAGEID、BODY、QUOTED），全部占位符一趟替换完（取值不再被当作模板，`Reply` 因此能引用含 `{{` 的原文），text/html 部件中的取值按 HTML 转义；固定占位符的取值规则不变。16 个样本以相同取值组装的字节与改动前完全相同（SHA-256 逐一核对）。收件人取 `d.From`（即机器人），引用原信第一个非附件的 text/plain 部件（只接受 utf-8 与 us-ascii，与 4b 通知一致），「发送时间」与 Date 沿用样本中的固定值。
+  12. 模拟器另导入 `internal/mail/imap`、`internal/mail/smtp`（文件夹名常量与两个 Config）和 `tests/fixtures/mail`（`Reply` 的模板），「依赖方向（4b 结束时）」随之补上；没有导入 go-message（改写头部与解析回复只用标准库），go-message 的「使用方」一栏因此不点名 `tests/qqsim`。
+- **实现中发现并修复：** `New` 之后立即 `Close` 时 go-smtp 的 `Serve` 还没登记监听器、`Server.Close` 关不到它而挂起，现由 `Close` 自己再关一次两个 TCP 监听器。
+- **验证：** `make check`（总覆盖率 94.60%，`tests/qqsim` 97.1%，`tests/fixtures/mail` 98.6%）、`go test -race -count=5 ./tests/qqsim/ ./tests/fixtures/mail/`、`make secrets`（提交前后）、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...` 通过，改动文件中没有不可见字符；拣选到集成分支后 `make check`（总覆盖率 94.65%）与 `make secrets` 再次通过。未运行：全仓的 `CGO_ENABLED=0 go test ./...`（只跑了三个相关包）；govulncheck（云端网络策略拒绝 vuln.go.dev）。
 
 ### Task 8：单实例锁、密钥读取与授权码缓存（`internal/app`）
 
