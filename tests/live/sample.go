@@ -701,13 +701,17 @@ func truncatedTag(squeezed string, tag expectedTag) bool {
 	}
 }
 
+// tailBytes 是判断标签在分岔之后是否又接上时比对的期望标签末尾：新形态为令牌的最后 7 个字符加 ]。
+const tailBytes = 8
+
 // cutAt 判断 rest 与期望标签 want 在第 kept 个字节处的分岔是否像截断，调用方保证 kept < len(want)。
 // 主题在此结束算截断。否则取分岔处的字符 r（按完整的 UTF-8 字符取出，占 n 个字节）：r 是 ]、ASCII 字母或数字时不算截断，
-// 标签是在此提前闭合或被改写（字母包括字母表之外的 i、l、o、u）；其余字符（例如省略号）只在期望标签没有在 r 之后接续时才算截断——
+// 标签是在此提前闭合或被改写（字母包括字母表之外的 i、l、o、u）。其余字符（例如省略号）之后，期望标签若又接上了，是改写而不是截断：
 // rest[kept+n:] 以 want[kept:] 开头说明 r 是插入的字符（零宽空格、软连字符、- 等），以 want[kept+1:] 开头说明 r 替换了一个字符，
-// 两者都是改写而不是截断。want 由 SubjectTag 的输出删去空白、折叠大小写而来，全是 ASCII，跳过一个字节就是跳过一个字符。
-// 替换检查只在 r 之后还剩期望标签的内容时进行：分岔在 want 的最后一个字节（]）处时，想「替换后接续」的部分为空、检查恒成立，
-// 而令牌完整、只是 ] 被省略号取代的主题正是在 ] 之前被截断的样子，按截断记录。
+// 其后任意位置出现 want 的最后 tailBytes 个字节说明插入或替换了多个字符（分岔在这几个字节之内时，多个字符的改写仍记为截断）。
+// want 由 SubjectTag 的输出删去空白、折叠大小写而来，全是 ASCII，跳过一个字节就是跳过一个字符。
+// 分岔在 want 的最后一个字节（]）处时令牌完整，只有省略号一类的字符（…、⋯、.）像在 ] 之前被截断；
+// 全角括号、圆括号，或 ] 被删去而紧接着标题文字，都是改写。
 func cutAt(rest, want string, kept int) bool {
 	if kept == len(rest) {
 		return true
@@ -720,7 +724,13 @@ func cutAt(rest, want string, kept int) bool {
 	if strings.HasPrefix(after, want[kept:]) {
 		return false
 	}
-	return kept+1 == len(want) || !strings.HasPrefix(after, want[kept+1:])
+	if kept+1 == len(want) {
+		return r == '…' || r == '⋯' || r == '.'
+	}
+	if strings.HasPrefix(after, want[kept+1:]) {
+		return false
+	}
+	return !strings.Contains(after, want[len(want)-tailBytes:])
 }
 
 // isASCIIAlnum 判断字符是否为 ASCII 小写字母或数字；调用处的文字已折叠 ASCII 大小写，不会出现 ASCII 大写字母。

@@ -65,7 +65,10 @@ type cursorInfo struct {
 }
 
 // copyRecord 是「已发送」或抄送副本的对照结果：是否找到、其 Message-ID 的来源归类，以及 X-OQ-MSGID 是否等于我方 ID。
+// Searched 表示补扫正常结束：找到了副本，或在等待窗口内每次补扫都成功而一直没有找到。补扫出错或探测被取消时为 false，
+// 此时 found 为 false 不能说明副本不存在（例如不能当作 D7 前提成立的证据）。
 type copyRecord struct {
+	Searched            bool   `json:"searched"`
 	Found               bool   `json:"found"`
 	MessageIDSource     string `json:"message_id_source"`
 	MessageIDEqualsOurs bool   `json:"message_id_equals_ours"`
@@ -316,6 +319,7 @@ func findCopy(ctx context.Context, t *testing.T, session *imap.Session, folder s
 				continue
 			}
 			return copied.MessageID, &copyRecord{
+				Searched:            true,
 				Found:               true,
 				MessageIDSource:     live.ClassifyID(copied.MessageID, []live.Mail{mail}),
 				MessageIDEqualsOurs: copied.MessageID == mail.MessageID,
@@ -329,7 +333,7 @@ func findCopy(ctx context.Context, t *testing.T, session *imap.Session, folder s
 		}
 		if time.Now().After(deadline) {
 			t.Logf("%s 中未找到本封邮件的副本", folder)
-			return "", &copyRecord{}
+			return "", &copyRecord{Searched: true}
 		}
 		select {
 		case <-time.After(copyPoll):

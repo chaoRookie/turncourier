@@ -417,8 +417,9 @@ func describePrefix(prefix *string) string {
 // TestAnalyzeTagStates 断言主题标签的七种状态按清单顺序取第一个成立的值，并记录 D4 严格文法不重叠命中的次数（0 到 3 次都有）。
 // 期望标签按 state.json 中每封邮件的 SubjectToken 取新形态或旧形态，并与全部已记录的邮件逐一比较；
 // tag_intact 当且仅当 tag_state 为 intact。标签之前另有一个以 [tc 开头的诱饵（[tcp]）时，各步仍要检查主题中的每一个 [tc。
-// 截断只认两种分岔：主题在此结束，或分岔处的字符不是 ]、字母、数字且期望标签没有在它之后接续；
-// 插入零宽空格、软连字符或 -，以及把一个字符换成 o 或替换字符，都是改写，归入 other。
+// 截断只认两种分岔：主题在此结束，或分岔处的字符不是 ]、字母、数字且期望标签没有在它之后接上；
+// 插入或替换一个或多个字符（零宽空格、软连字符、-、o、替换字符、全角字母）之后又接上的，都是改写，归入 other。
+// 令牌完整而只差 ] 时，只有省略号一类的字符（…、⋯、.）算截断，全角括号、圆括号或紧接着的标题文字都是改写。
 // 每个用例的主题都含金丝雀号码，多数还含完整或部分令牌；样本中既不出现金丝雀号码，也不出现令牌的前 20 个字符。
 func TestAnalyzeTagStates(t *testing.T) {
 	tokenText := testToken(t)
@@ -530,6 +531,37 @@ func TestAnalyzeTagStates(t *testing.T) {
 		// 令牌完整、只是 ] 被省略号取代：这正是客户端恰好在 ] 之前截断主题的样子，替换检查在期望标签的最后一个字节处不进行，记为 truncated。
 		{name: "令牌完整而右方括号换成省略号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"…"+title),
 			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		{name: "截断之后的标题含右方括号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"… [附件]"+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		{name: "右方括号之前插入省略号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"…]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌完整而右方括号换成三个句点", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"..."+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		{name: "令牌完整而右方括号换成居中省略号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"⋯"+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		// 令牌完整而 ] 换成省略号一类之外的字符（例如输入法打出的全角括号），或 ] 被删去而其后接着标题，是改写，不是截断。
+		{name: "右方括号换成全角右方括号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"］"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "右方括号换成黑色方头括号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"】"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "右方括号换成右圆括号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+")"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "右方括号被删去而其后是中文", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+" 关于 "+canaryPhone),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		// 分岔在期望标签的最后 8 个字节之内时，末尾比对用不上，单个字符的插入与替换由逐字符的接续检查识别。
+		{name: "令牌倒数第四个字符换成替换字符", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:44]+"\ufffd"+tokenText[45:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌倒数第三个字符之前插入零宽空格", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:45]+"\u200b"+tokenText[45:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		// 插入或替换了多个字符：分岔之后仍出现期望标签的最后 8 个字节（令牌的最后 7 个字符加 ]），是改写，不是截断。
+		{name: "令牌中插入两个零宽空格", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"\u200b\u200b"+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌中插入零宽空格与软连字符", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"\u200b\u00ad"+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌中插入三个句点", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"..."+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌的两个字符换成全角字母", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"ｘｙ"+tokenText[32:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
 		{name: "没有任务 ID 的记录", header: encodedSubject(t, "回复：[TC ]"+title), mutate: noTaskMail,
 			wantState: "other", wantPrefix: stringPtr("回复：")},
 		// 开尔文符号 U+212A 经 strings.ToLower 会变成 k；大小写只折叠 ASCII，它不算大小写变化。
