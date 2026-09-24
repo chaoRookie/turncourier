@@ -426,7 +426,8 @@ func TestTagRedaction(t *testing.T) {
 }
 
 // TestParseSubjectCopiesTaskID 确认 ParseSubject 返回的任务 ID 不与传入的主题共用底层内存：若是子串，标签活多久，
-// 整条解码后的主题（含令牌明文与用户写的标题）就会被它多留多久，与 D4「主题不进长生命周期变量」的要求相悖。
+// 整条解码后的主题（含令牌明文与用户写的标题）就会被它多留多久；D4 要求组装好的主题不进结构体字段与长生命周期变量，
+// 入站的主题同理。
 func TestParseSubjectCopiesTaskID(t *testing.T) {
 	tag := issueTag(t, "0123456789", 1, 0x33)
 	subject := "Re: " + tag.Reveal() + " 标题"

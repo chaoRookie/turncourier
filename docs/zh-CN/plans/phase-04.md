@@ -2652,7 +2652,7 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 
 - `Tag` 保存任务 ID 与 `Token`，零值不可用。`NewTag(taskID string, t Token) (Tag, error)`：任务 ID 须为 10 个字母表字符，令牌须来自 `Issue` 或 `Parse`（kid 不为 0），否则返回 `ErrInvalidTag`。
 - `(Tag) TaskID() string`、`(Tag) Token() Token`；`(Tag) Reveal() string` 返回 `[TC <任务 ID> <令牌>]`（64 个字符）；`(Tag) RevealToken() string` 返回 48 个字符的令牌文本。两者的契约注释写明「只用于渲染器写入主题与页脚副本」。
-- `String`、`Format`（`%T`、`%p` 之外的全部动词）与 `LogValue` 输出固定的 `[redacted subject tag]`，与 `Token` 的做法一致；`Tag` 作为其他包结构体的未导出字段时同样有原始字节泄漏的可能，这一点照 4a 的「风险与后续」由装配后的金丝雀测试覆盖（Task 11、13、14）。
+- `String`、`Format`（`%T`、`%p` 之外的全部动词；`%w` 同样由 fmt 先于 `Format` 处理，见本任务「审查后的修正」第 4 条）与 `LogValue` 输出固定的 `[redacted subject tag]`，与 `Token` 的做法一致；`Tag` 作为其他包结构体的未导出字段时同样有原始字节泄漏的可能，这一点照 4a 的「风险与后续」由装配后的金丝雀测试覆盖（Task 11、13、14）。
 - `ParseSubject(subject string) (Tag, error)`：输入是解码后的完整主题。按「已定的实现细节」中的文法计数：0 次且没有 `[TC`（ASCII 不区分大小写）返回 `ErrTagMissing`；0 次但有 `[TC` 返回 `ErrTagDamaged`；≥2 次返回 `ErrTagMultiple`；恰好 1 次时把 48 个字符交给 `Parse`，失败返回 `ErrMalformed`。所有错误文本固定，不回显主题。文法的正则在运行时由字母表常量拼出，变量名不含 token 一词（「测试向量与密钥扫描」的约定）。
 - `Token.Reveal` 的注释由「只用于写入通知正文」改为「只用于构造主题标签与页脚副本」。
 
@@ -2685,6 +2685,16 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 3. **任务 ID 含 i、l、o、u 没有用例（质量审查，次要）。** 把正则中任务 ID 的字符类放宽为 `[0-9a-z]` 的变异存活，它会接受 `NewTag` 拒绝的任务 ID。文法表补上任务 ID 含 i、l、o、u 的 4 行，另加开尔文符号（U+212A）与长 s（U+017F）的 2 行（期望 `ErrTagDamaged`），文法表共 62 行。
 4. **`%w` 也先于 `Format` 处理（质量审查，次要）。** `fmt.Errorf(f, tag)` 这类对非 error 操作数使用 `%w` 的调用，fmt 在调用 `Format` 之前按错误动词处理，标签值与指针都按原始字段打印，足以还原令牌；格式串为常量时 vet 的 printf 检查会拦下。类型本身无法拦截，因此写进 `Tag` 的已知局限与 `Tag.Format`、`Token.Format` 的注释（契约原文只写了「`%T`、`%p` 之外」）。
 5. **细节：** 金丝雀的动词表只是抽样，「`Format` 对 `%U` 或 `%c` 输出明文」存活，现逐一检查 `%T`、`%p`、`%w` 之外的全部字母动词；解析得到的任务 ID 是主题的子串、与整条主题共用底层内存，改为 `strings.Clone`，新增 `TestParseSubjectCopiesTaskID`（先失败）；`tagHolder` 的注释误称 slog 的 JSON 处理器会调用标签的方法，已更正；实现子代理的提交说明把文法表写成 57 行、称变异全部被拦下，实际为 56 行、另有上面第 3 条的存活变异，以本节为准。development.md 补上 `imports_test.go`、`reveal_test.go` 与 `FuzzParseSubject`，architecture.md 的 `tests/docs` 一行补上 `imports_test.go` 与守卫的扫描范围。
+
+**独立复查（Task 1 与 IMAP 修复，2026-09-24）：** 一名子代理复查 `5215fb5`（见 Task 6 之下「开工前修复的 4a 缺陷」）与 `1a2b17a`：修复都成立，没有「主要」与「次要」问题。它以 20 次独立进程的 `-race` 运行核实 IMAP 修复：去掉新检查时 `TestScanBodyLiteralCutShort` 20 次都报告竞争，带修复 0 次；原先出问题的 `body_literal_stalls_halfway` 在 4 个并行进程各跑 30 次的负载下，无修复时 4 个进程都报告竞争，有修复时 0 个。余下 7 条细节的处理：
+
+1. CHANGELOG 把文法写成「已冻结」，改为「按 D4 规定，待 L1b 用真实客户端复核后冻结」。
+2. 新检查中的 `limit+1` 没有用例钉住（改成 `limit` 的变异存活），与假服务器两处没跟上 `faultCloseAfter` 的注释一起并入 Task 6：它正在改这两个文件，给 `faultWholeBody` 加「只发前 N 字节后关闭」的选项即可构造这个边界。
+3. `revealViolations` 注释承诺的两点没有用例：合成树补上一个以「.」开头、内容不是 Go 源码的文件（被读就会解析失败），另断言解析失败的文件让扫描返回错误；「只跳过以 _ 开头的文件」「解析失败静默跳过」两个存活变异因此被拦下。
+4. `%w` 的局限写全：任何含标签或令牌的非 error 操作数（值、指针，以及含它们的切片、映射、结构体与其指针）都会按原始字段打印；契约中「`%T`、`%p` 之外」一句旁加了指向本节第 4 条的说明。
+5. 测试注释对 D4 的转述更正为「D4 要求组装好的主题不进结构体字段与长生命周期变量，入站的主题同理」。
+6. `tests/docs/deps_test.go` 与 `imports_test.go` 原先跳过所有以「.」开头的目录，本意只是跳过根目录下的 `.git`、`.local`，与守卫原先的盲区同理：`internal/.y` 这样的包会逃过依赖表与依赖方向的检查。现在两者共用 `skipRepoDir`，只跳过仓库根目录下以「.」开头的目录与 `dist`，`TestSkipRepoDir` 钉住这条规则。
+7. 质量审查清单中的「透传 `Parse` 的错误」存活而记录没有提到：`Parse` 只返回 `ErrMalformed`，是等价变异。
 
 ### Task 2：存储补充（`internal/store/sqlite`）
 

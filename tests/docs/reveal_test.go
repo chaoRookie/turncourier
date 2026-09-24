@@ -45,7 +45,8 @@ func TestRevealReferences(t *testing.T) {
 
 // TestRevealViolationsTree 在临时目录中搭一棵合成源码树，钉住遍历与允许列表的语义：允许列表按包目录精确匹配
 // （子目录不继承），构建约束不豁免，以「.」「_」开头的目录与 testdata 目录照常扫描（显式导入时会编译进产品），
-// 测试文件与以「_」开头的文件不计入；允许列表本身与契约逐字相同。
+// 测试文件与以「.」「_」开头的文件不计入（其中一个不是合法的 Go 源码，被读就会解析失败），解析失败的文件让扫描返回错误；
+// 允许列表本身与契约逐字相同。
 func TestRevealViolationsTree(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
@@ -56,6 +57,7 @@ func TestRevealViolationsTree(t *testing.T) {
 		"internal/cli/b_darwin.go":         "//go:build darwin\n\npackage cli\n\nfunc b(x interface{ RevealToken() string }) string { return x.RevealToken() }\n",
 		"internal/cli/a_test.go":           "package cli\n\nfunc c(x interface{ Reveal() string }) string { return x.Reveal() }\n",
 		"internal/cli/_skip.go":            "package cli\n\nfunc d(x interface{ Reveal() string }) string { return x.Reveal() }\n",
+		"internal/cli/.skip.go":            "this is not Go\n",
 		"internal/cli/testdata/a.go":       "package testdata\n\nfunc a(x interface{ Reveal() string }) string { return x.Reveal() }\n",
 		"internal/_x/a.go":                 "package x\n\nfunc a(x interface{ Reveal() string }) string { return x.Reveal() }\n",
 		"internal/.y/a.go":                 "package y\n\nfunc a(x interface{ RevealToken() string }) string { return x.RevealToken() }\n",
@@ -88,6 +90,13 @@ func TestRevealViolationsTree(t *testing.T) {
 	}
 	if want := []string{"internal/security/token", "internal/mail/renderer"}; !slices.Equal(revealPackages, want) {
 		t.Errorf("允许列表为 %v，契约只允许 %v", revealPackages, want)
+	}
+	// 解析失败必须让扫描返回错误，而不是静默跳过这个文件。
+	if err := os.WriteFile(filepath.Join(root, "internal", "cli", "bad.go"), []byte("package cli\n\nfunc (\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := revealViolations(root, productRoots); err == nil {
+		t.Error("解析失败的文件没有让扫描返回错误")
 	}
 }
 

@@ -55,6 +55,31 @@ func TestDependencyTablesMatchCode(t *testing.T) {
 	}
 }
 
+// TestSkipRepoDir 钉住整仓扫描的目录规则：只跳过仓库根目录下以「.」开头的目录（.git、.local 与工具的工作目录）与 dist；
+// 更深处以「.」「_」开头的目录与 testdata 被显式导入时照样编译，照常检查（与 reveal_test.go 的遍历规则一致）。
+func TestSkipRepoDir(t *testing.T) {
+	cases := []struct {
+		path string
+		skip bool
+	}{
+		{".git", true}, {".local", true}, {".claude", true}, {"dist", true},
+		{"internal", false}, {"internal/.y", false}, {"internal/_x", false},
+		{"internal/cli/testdata", false}, {"tests/dist", false}, {"tools/.cache", false},
+	}
+	for _, c := range cases {
+		path := filepath.Join(repoRoot, filepath.FromSlash(c.path))
+		if got := skipRepoDir(path, filepath.Base(path)); got != c.skip {
+			t.Errorf("skipRepoDir(%s) = %t，期望 %t", c.path, got, c.skip)
+		}
+	}
+}
+
+// skipRepoDir 判断整仓扫描时是否跳过目录：只跳过仓库根目录下以「.」开头的目录（.git、.github、.local 与工具的工作目录）
+// 与 dist。更深处以「.」「_」开头的目录与 testdata 只是不参与 ./... 通配，被显式导入时照样编译，所以照常检查。
+func skipRepoDir(path, name string) bool {
+	return filepath.Dir(path) == filepath.Clean(repoRoot) && (strings.HasPrefix(name, ".") || name == "dist")
+}
+
 // directRequires 读取 go.mod 的 require 块，返回不带 `// indirect` 标记的模块及其版本。
 func directRequires(t *testing.T, path string) map[string]string {
 	t.Helper()
@@ -92,7 +117,7 @@ func moduleImporters(t *testing.T, direct map[string]string) map[string][]string
 		}
 		name := entry.Name()
 		if entry.IsDir() {
-			if path != repoRoot && (strings.HasPrefix(name, ".") || name == "dist") {
+			if skipRepoDir(path, name) {
 				return fs.SkipDir
 			}
 			return nil

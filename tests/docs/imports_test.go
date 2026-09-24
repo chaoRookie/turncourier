@@ -81,7 +81,7 @@ func repoPackageImports(t *testing.T) map[string][]string {
 		}
 		name := entry.Name()
 		if entry.IsDir() {
-			if path != repoRoot && (strings.HasPrefix(name, ".") || name == "dist") {
+			if skipRepoDir(path, name) {
 				return fs.SkipDir
 			}
 			return nil

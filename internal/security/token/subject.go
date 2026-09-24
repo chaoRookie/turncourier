@@ -40,8 +40,9 @@ var subjectTagPattern = regexp.MustCompile(`\[TC ([` + alphabet + `]{10}) ([` + 
 // Tag 是主题标签 [TC <任务 ID> <令牌>] 的值：任务 ID 与令牌。零值不可用：标签只能由 NewTag 或 ParseSubject 得到，
 // 零值的 Reveal 不是合法标签。String、Format 与 LogValue 一律输出脱敏文本，只有 Reveal 与 RevealToken 返回明文。
 // 已知局限与 Token 相同：Tag 作为其他包中结构体的未导出字段时，fmt 无法调用它的方法，会按原始字段打印任务 ID 与令牌字节；
-// %p 作用于标签值（或含标签的结构体值、数组值）时同样如此；%w 作用于标签值或指针时，fmt 在调用 Format 之前就按错误动词处理
-// 非 error 的操作数，同样按原始字段打印（格式串为常量时 vet 的 printf 检查会拦下）。4b 以装配后的金丝雀测试覆盖实际路径
+// %p 作用于标签值（或含标签的结构体值、数组值）时同样如此；%w 作用于任何含标签的非 error 操作数（标签值、指针，
+// 以及含标签的切片、映射、结构体与它们的指针）时，fmt 在调用 Format 之前就按错误动词处理，同样按原始字段打印
+// （格式串为常量时 vet 的 printf 检查会拦下）。4b 以装配后的金丝雀测试覆盖实际路径
 // （Task 11、13、14）。
 type Tag struct {
 	taskID string
