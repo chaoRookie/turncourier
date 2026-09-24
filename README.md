@@ -18,7 +18,7 @@ These packages are implemented and tested; `init` uses some of them, and the res
 - `internal/security/keychain`, `token` and `payload` hold the Keychain wrapper, reply tokens and body encryption.
 - `internal/mail/smtp` and `internal/mail/imap` are the mail clients: implicit TLS only and a deadline on every step; the IMAP client only reads the mailbox and never changes it.
 
-TurnCourier still cannot send or receive email: nothing renders a notification, parses an inbound message or runs a send and receive loop. Those wait for the L1 probe against a real mailbox, described in the [Phase 4 plan](docs/zh-CN/plans/phase-04.md). There are no agent adapters and no background service. There are no releases or tags; the default branch is `main`.
+TurnCourier still cannot send or receive email: nothing renders a notification, parses an inbound message or runs a send and receive loop. Those are Phase 4b. The L1 probe against a real mailbox is done, and the 4b task contracts built on its results are drafted and confirmed by the maintainer; both are in the [Phase 4 plan](docs/zh-CN/plans/phase-04.md). There are no agent adapters and no background service. There are no releases or tags; the default branch is `main`.
 
 The Phase 0–1 research probes (Node.js scripts, not product code) resumed the same Codex and Claude Code sessions from a new process on one Mac. Claude Code's first attempt exited abnormally on its second turn, for a reason not yet determined; the retest passed. No real mail round trip has been tested. See the [research report](docs/zh-CN/research/phase-01.md) (Chinese) for evidence and limits.
 
@@ -246,7 +246,8 @@ turncourier/
 │       └── state_test.go            # Every state × event combination
 ├── tests/                           # Cross-package and manual tests
 │   ├── docs/                        # Checks that documentation matches the code
-│   │   └── deps_test.go             # Dependency tables against go.mod and imports
+│   │   ├── deps_test.go             # Dependency tables against go.mod and imports
+│   │   └── imports_test.go          # Package dependency direction across the repo
 │   ├── integration/                 # Cross-package tests
 │   │   ├── lifecycle_test.go        # Config, storage and state machines together
 │   │   └── payload_test.go          # Notifications, tokens, digests, ciphertext
@@ -273,7 +274,7 @@ turncourier/
 │       ├── plans/                   # Phase checklists
 │       │   ├── phase-02.md          # Phase 2: engineering skeleton
 │       │   ├── phase-03.md          # Phase 3: config, storage, state machines
-│       │   └── phase-04.md          # Phase 4: mail loop (4a built, L1 pending)
+│       │   └── phase-04.md          # Phase 4: mail loop (4a built, L1 done, 4b planned)
 │       └── research/phase-01.md     # Phase 0–1 findings and limits
 ├── experiments/phase01/             # Research probes, not product code
 │   ├── README.md                    # How to run the probes

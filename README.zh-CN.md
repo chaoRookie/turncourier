@@ -18,7 +18,7 @@ Pre-alpha。Go 命令行程序提供 `help`、`version`、只读的 `doctor` 和
 - `internal/security/keychain`、`token`、`payload` 分别是 Keychain 封装、回复令牌与正文加密。
 - `internal/mail/smtp` 与 `internal/mail/imap` 是邮件客户端：只用隐式 TLS，每一步都有期限；IMAP 客户端只读取邮箱，从不改动它。
 
-TurnCourier 仍然不能收发邮件：没有通知渲染、来信解析和收发循环。这些要等 L1 真机探测的结果，见 [Phase 4 实施清单](docs/zh-CN/plans/phase-04.md)。没有 Agent 适配器，也没有后台服务。没有任何发布版本或标签，默认分支为 `main`。
+TurnCourier 仍然不能收发邮件：没有通知渲染、来信解析和收发循环，这些属于 4b。L1 真机探测已经完成，据此起草的 4b 任务契约已经维护者确认，两者都在 [Phase 4 实施清单](docs/zh-CN/plans/phase-04.md) 中。没有 Agent 适配器，也没有后台服务。没有任何发布版本或标签，默认分支为 `main`。
 
 Phase 0–1 的研究探针（Node.js 脚本，不是产品代码）在一台 Mac 上从新进程恢复了同一个 Codex 会话和 Claude Code 会话。Claude Code 首次尝试的第二轮异常退出，原因尚未确定，复测通过。尚未测试真实邮件往返。证据和限制见[验证报告](docs/zh-CN/research/phase-01.md)。
 
@@ -246,7 +246,8 @@ turncourier/
 │       └── state_test.go            # 穷举全部状态 × 事件组合
 ├── tests/                           # 跨包测试与人工执行的测试
 │   ├── docs/                        # 核对文档与代码是否一致
-│   │   └── deps_test.go             # 依赖表与 go.mod、实际导入的比对
+│   │   ├── deps_test.go             # 依赖表与 go.mod、实际导入的比对
+│   │   └── imports_test.go          # 整仓扫描包的依赖方向
 │   ├── integration/                 # 跨包测试
 │   │   ├── lifecycle_test.go        # 配置、存储与状态机的完整生命周期
 │   │   └── payload_test.go          # 通知、令牌、摘要与正文密文的生命周期
@@ -273,7 +274,7 @@ turncourier/
 │       ├── plans/                   # 阶段实施清单
 │       │   ├── phase-02.md          # Phase 2：工程骨架
 │       │   ├── phase-03.md          # Phase 3：配置、存储与状态机
-│       │   └── phase-04.md          # Phase 4：邮件闭环（4a 已实现，待 L1）
+│       │   └── phase-04.md          # Phase 4：邮件闭环（4a 已实现，L1 已完成，4b 已规划）
 │       └── research/phase-01.md     # Phase 0–1 验证结果与限制
 ├── experiments/phase01/             # 研究探针，不是产品代码
 │   ├── README.md                    # 探针运行方式

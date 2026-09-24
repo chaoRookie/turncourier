@@ -1,6 +1,8 @@
-// Package live 的离线自检：用合成邮件字节与合成状态验证样本脱敏与归类、主题前缀白名单、Message-ID 按相等关系归类、
-// DATA 响应脱敏、IDLE 观测判定、通知渲染与输出目录校验。本文件不带构建标签，随 make test 在 CI 中运行，
-// 不读取配置、钥匙串与网络；合成令牌与密钥都在运行时构造，源码中不出现机密形状的字面量。
+// Package live 的离线自检：用合成邮件字节与合成状态验证样本脱敏与归类、主题前缀白名单、主题标签的构造与归类、
+// 自动回复前缀、Return-Path、Message-ID 按相等关系归类、DATA 响应脱敏、IDLE 观测判定、通知渲染、逐封确认文本、
+// 样本格式标识与输出目录校验。
+// 本文件不带构建标签，随 make test 在 CI 中运行，不读取配置、钥匙串与网络；合成令牌与密钥都在运行时构造，
+// 源码中不出现机密形状的字面量。
 package live_test
 
 import (
@@ -8,9 +10,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"mime"
+	netmail "net/mail"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +86,15 @@ func testState(t *testing.T) live.State {
 			DeliveredData: []string{dataID},
 		}},
 	}
+}
+
+// subjectTokenState 返回新形态的合成状态：唯一一封探测邮件的主题标签携带令牌（SubjectToken 为 true），
+// 与 L1b 起 TestL1SendNotification 写入的记录一致；testState 则对应第一轮留下、没有这个字段的记录。
+func subjectTokenState(t *testing.T) live.State {
+	t.Helper()
+	st := testState(t)
+	st.Mails[0].SubjectToken = true
+	return st
 }
 
 // testRoles 返回合成的地址角色表；全部地址只用保留域名。
@@ -336,20 +351,32 @@ func TestAnalyzeClassifiesThreadIDs(t *testing.T) {
 	})
 }
 
-// TestAnalyzeSubjects 断言主题前缀白名单：已知前缀原样输出，其他文字记为 other，没有标签时为 null，
-// 三种情况都不输出主题中的其他文字。
+// TestAnalyzeSubjects 断言主题前缀白名单：已知前缀按 ASCII 不区分大小写匹配、输出来信中的原文（先删去空白），
+// 其他文字记为 other，没有标签时为 null；[TC 本身同样按 ASCII 不区分大小写查找。各情况都不输出主题中的其他文字。
+// 回复与转发前缀逐项各有一例（英文前缀也接受全角冒号），删去白名单中的任一项都会让对应用例失败；自动回复前缀的逐项用例
+// 在 TestAnalyzeAutoReplySubject 中。状态取第一轮的旧形态（SubjectToken 为 false），期望标签为 [TC <任务 ID>]。
 func TestAnalyzeSubjects(t *testing.T) {
 	tokenText := testToken(t)
-	cases := []struct {
+	// subjectCase 是一个主题前缀用例：解码后的主题、期望的前缀（nil 表示 null）与标签是否完整。
+	type subjectCase struct {
 		name      string
 		subject   string
 		want      *string
 		tagIntact bool
-	}{
+	}
+	cases := []subjectCase{
 		{name: "已知前缀", subject: "回复：[TC " + taskID + "] 探测", want: stringPtr("回复："), tagIntact: true},
 		{name: "重复前缀", subject: "答复: Re:[TC " + taskID + "] 探测", want: stringPtr("答复:Re:"), tagIntact: true},
+		{name: "大小写不同的前缀", subject: "RE: fwd: [TC " + taskID + "] 探测", want: stringPtr("RE:fwd:"), tagIntact: true},
+		{name: "重复的全角冒号英文前缀", subject: "FW：Fwd： Re：[TC " + taskID + "] 探测", want: stringPtr("FW：Fwd：Re："), tagIntact: true},
+		{name: "带空格的自动回复前缀", subject: "Automatic reply: [TC " + taskID + "] 探测", want: stringPtr("Automaticreply:"), tagIntact: true},
+		{name: "不在白名单的英文前缀", subject: "Reply: [TC " + taskID + "] 探测", want: stringPtr("other"), tagIntact: true},
+		{name: "标签中的 TC 为小写", subject: "回复：[tc " + taskID + "] 探测", want: stringPtr("回复："), tagIntact: false},
 		{name: "其他文字", subject: "关于合同 " + canaryPhone + " [TC " + taskID + "]", want: stringPtr("other"), tagIntact: true},
 		{name: "没有标签", subject: "关于合同 " + canaryPhone, want: nil, tagIntact: false},
+	}
+	for _, prefix := range []string{"回复：", "回复:", "答复：", "答复:", "转发：", "转发:", "Re:", "Re：", "Fwd:", "Fwd：", "FW:", "FW："} {
+		cases = append(cases, subjectCase{name: "白名单 " + prefix, subject: prefix + " [TC " + taskID + "] 探测", want: stringPtr(prefix), tagIntact: true})
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -379,6 +406,339 @@ func stringPtr(s string) *string {
 	return &s
 }
 
+// describePrefix 把样本中的主题前缀渲染为便于阅读的文字：null 或带引号的取值。
+func describePrefix(prefix *string) string {
+	if prefix == nil {
+		return "null"
+	}
+	return strconv.Quote(*prefix)
+}
+
+// TestAnalyzeTagStates 断言主题标签的七种状态按清单顺序取第一个成立的值，并记录 D4 严格文法不重叠命中的次数（0 到 3 次都有）。
+// 期望标签按 state.json 中每封邮件的 SubjectToken 取新形态或旧形态，并与全部已记录的邮件逐一比较；
+// tag_intact 当且仅当 tag_state 为 intact。标签之前另有一个以 [tc 开头的诱饵（[tcp]）时，各步仍要检查主题中的每一个 [tc。
+// 截断只认两种分岔：主题在此结束，或分岔处的字符不是 ]、字母、数字且期望标签没有在它之后接上；
+// 插入或替换一个或多个字符（零宽空格、软连字符、-、o、替换字符、全角字母）之后又接上的，都是改写，归入 other。
+// 令牌完整而只差 ] 时，只有省略号一类的字符（…、⋯、.）算截断，全角括号、圆括号或紧接着的标题文字都是改写。
+// 每个用例的主题都含金丝雀号码，多数还含完整或部分令牌；样本中既不出现金丝雀号码，也不出现令牌的前 20 个字符。
+func TestAnalyzeTagStates(t *testing.T) {
+	tokenText := testToken(t)
+	tag := live.SubjectTag(taskID, tokenText)
+	// lookalike 与 lookalike2 形状合法（严格文法能命中），但令牌与记录的不同。
+	lookalike := live.SubjectTag(taskID, strings.Repeat("z", 48))
+	lookalike2 := live.SubjectTag(taskID, strings.Repeat("y", 48))
+	title := " TurnCourier L1 探测 1/1 " + canaryPhone
+	// encodedTitle 是 4b 渲染器的结构：标签为原始 ASCII，标签之后的文字单独 B 编码。
+	encodedTitle := mime.BEncoding.Encode("utf-8", strings.TrimSpace(title))
+	// substitute 是与令牌第 31 个字符不同的字母表字符，用来构造「在截断处被改写」而不是截断的主题。
+	substitute := "0"
+	if tokenText[30] == '0' {
+		substitute = "1"
+	}
+	const oldTaskID = "abcdefghjk"
+	oldForm := func(st *live.State) { st.Mails[0].SubjectToken = false }
+	secondOldMail := func(st *live.State) {
+		st.Mails = append(st.Mails, live.Mail{
+			ProbeID: probeID, TaskID: oldTaskID, MessageID: "<tc.old@bot.example.invalid>", DeliveredData: []string{},
+		})
+	}
+	// noTaskMail 追加一条没有任务 ID 的记录：它不产生期望标签，[TC ] 这样的残片不能因它变成 intact。
+	noTaskMail := func(st *live.State) {
+		st.Mails = append(st.Mails, live.Mail{ProbeID: probeID, MessageID: "<tc.none@bot.example.invalid>", DeliveredData: []string{}})
+	}
+	for _, c := range []struct {
+		name       string
+		header     string // Subject 头的原始取值
+		mutate     func(*live.State)
+		wantState  string
+		wantCount  int
+		wantPrefix *string
+	}{
+		{name: "没有标签", header: encodedSubject(t, "关于合同 "+canaryPhone+" "+tokenText), wantState: "missing"},
+		{name: "两个标签", header: encodedSubject(t, "Re: "+tag+" 转发："+lookalike+title),
+			wantState: "multiple", wantCount: 2, wantPrefix: stringPtr("Re:")},
+		{name: "三个标签", header: encodedSubject(t, "Re: "+tag+" "+lookalike+" "+lookalike2+title),
+			wantState: "multiple", wantCount: 3, wantPrefix: stringPtr("Re:")},
+		{name: "原样保留", header: encodedSubject(t, "回复："+tag+title),
+			wantState: "intact", wantCount: 1, wantPrefix: stringPtr("回复：")},
+		{name: "诱饵之后原样保留", header: encodedSubject(t, "Re: [tcp] "+tag+title),
+			wantState: "intact", wantCount: 1, wantPrefix: stringPtr("Re:")},
+		// U+023A 经 strings.ToLower 变成 U+2C65，多出一个字节；个数超过标签之后的字节数时，按 strings.ToLower 的结果求出的
+		// [tc 下标会越过主题末尾。前缀的下标必须按逐字节对齐的 lowerASCII 求，结果为 other 且不会 panic。
+		{name: "前缀含小写后变长的字符", header: encodedSubject(t, canaryPhone+strings.Repeat("\u023a", len(tag)+1)+tag),
+			wantState: "intact", wantCount: 1, wantPrefix: stringPtr("other")},
+		{name: "标签为原始 ASCII、在原有空格处折行", header: "Re: [TC " + taskID + "\r\n " + tokenText + "] " + encodedTitle,
+			wantState: "intact", wantCount: 1, wantPrefix: stringPtr("Re:")},
+		{name: "大写的相似标签不计数", header: encodedSubject(t, "回复："+tag+" "+strings.ToUpper(lookalike)+title),
+			wantState: "intact", wantCount: 1, wantPrefix: stringPtr("回复：")},
+		{name: "旧形态", header: encodedSubject(t, "Re: "+live.SubjectTag(taskID, "")+title), mutate: oldForm,
+			wantState: "intact", wantPrefix: stringPtr("Re:")},
+		{name: "第二封邮件的旧形态", header: encodedSubject(t, "Re: "+live.SubjectTag(oldTaskID, "")+title), mutate: secondOldMail,
+			wantState: "intact", wantPrefix: stringPtr("Re:")},
+		{name: "令牌改为大写", header: encodedSubject(t, "回复："+live.SubjectTag(taskID, strings.ToUpper(tokenText))+title),
+			wantState: "case_changed", wantPrefix: stringPtr("回复：")},
+		{name: "TC 改为小写", header: encodedSubject(t, "回复：[tc "+taskID+" "+tokenText+"]"+title),
+			wantState: "case_changed", wantPrefix: stringPtr("回复：")},
+		{name: "诱饵之后大小写改变", header: encodedSubject(t, "Re: [tcp] [tc "+taskID+" "+strings.ToUpper(tokenText)+"]"+title),
+			wantState: "case_changed", wantPrefix: stringPtr("Re:")},
+		{name: "令牌中插入空格", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:20]+" "+tokenText[20:]+"]"+title),
+			wantState: "whitespace_changed", wantPrefix: stringPtr("回复：")},
+		{name: "折行插入空白", header: "Re: [TC " + taskID + " " + tokenText[:30] + "\r\n " + tokenText[30:] + "] " + encodedTitle,
+			wantState: "whitespace_changed", wantPrefix: stringPtr("Re:")},
+		{name: "分隔换成全角空格", header: encodedSubject(t, "回复：[TC "+taskID+"　"+tokenText+"]"+title),
+			wantState: "whitespace_changed", wantPrefix: stringPtr("回复：")},
+		{name: "分隔被删去且大小写改变", header: encodedSubject(t, "回复：[tc "+taskID+strings.ToUpper(tokenText)+"]"+title),
+			wantState: "whitespace_changed", wantPrefix: stringPtr("回复：")},
+		// 严格文法要求任务 ID 两侧各恰好一个 U+0020：多一个空格或换成制表符都不计数。
+		{name: "任务 ID 与令牌之间两个空格", header: encodedSubject(t, "回复：[TC "+taskID+"  "+tokenText+"]"+title),
+			wantState: "whitespace_changed", wantPrefix: stringPtr("回复：")},
+		{name: "任务 ID 与令牌之间是制表符", header: encodedSubject(t, "回复：[TC "+taskID+"\t"+tokenText+"]"+title),
+			wantState: "whitespace_changed", wantPrefix: stringPtr("回复：")},
+		{name: "TC 与任务 ID 之间是制表符", header: encodedSubject(t, "回复：[TC\t"+taskID+" "+tokenText+"]"+title),
+			wantState: "whitespace_changed", wantPrefix: stringPtr("回复：")},
+		{name: "截断后接省略号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"…"+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		{name: "截断在主题末尾", header: encodedSubject(t, "关于 "+canaryPhone+" [TC "+taskID+" "+tokenText[:20]),
+			wantState: "truncated", wantPrefix: stringPtr("other")},
+		{name: "只缺右方括号且主题在此结束", header: encodedSubject(t, "关于 "+canaryPhone+" [TC "+taskID+" "+tokenText),
+			wantState: "truncated", wantPrefix: stringPtr("other")},
+		{name: "只剩任务 ID", header: encodedSubject(t, "回复：[TC "+taskID+"…"+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		{name: "诱饵之后被截断", header: encodedSubject(t, "Re: [tcp] [TC "+taskID+" "+tokenText[:20]+"…"+title),
+			wantState: "truncated", wantPrefix: stringPtr("Re:")},
+		{name: "令牌与记录不同", header: encodedSubject(t, "回复："+lookalike+title),
+			wantState: "other", wantCount: 1, wantPrefix: stringPtr("回复：")},
+		{name: "新形态的记录只对上旧形态标签", header: encodedSubject(t, "回复："+live.SubjectTag(taskID, "")+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "在截断处被改写", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+substitute+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "标签提前闭合", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		// 下面几例的分岔处都不是截断：标签在插入或替换的字符之后照样接续，或分岔处是字母表之外的字母（i、l、o、u）。
+		// 零宽空格与软连字符不是 unicode.IsSpace 意义上的空白，删去空白后仍在，分岔处要按完整的 UTF-8 字符跳过。
+		{name: "令牌中插入零宽空格", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"\u200b"+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌中插入软连字符", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"\u00ad"+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌中插入连字符", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"-"+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌的一个字符换成 o", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"o"+tokenText[31:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌的一个字符换成替换字符", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"\ufffd"+tokenText[31:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "分岔处是字母表之外的字母", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"o"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		// 令牌完整、只是 ] 被省略号取代：这正是客户端恰好在 ] 之前截断主题的样子，替换检查在期望标签的最后一个字节处不进行，记为 truncated。
+		{name: "令牌完整而右方括号换成省略号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"…"+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		{name: "截断之后的标题含右方括号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"… [附件]"+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		{name: "右方括号之前插入省略号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"…]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌完整而右方括号换成三个句点", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"..."+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		{name: "令牌完整而右方括号换成居中省略号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"⋯"+title),
+			wantState: "truncated", wantPrefix: stringPtr("回复：")},
+		// 令牌完整而 ] 换成省略号一类之外的字符（例如输入法打出的全角括号），或 ] 被删去而其后接着标题，是改写，不是截断。
+		{name: "右方括号换成全角右方括号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"］"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "右方括号换成黑色方头括号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+"】"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "右方括号换成右圆括号", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+")"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "右方括号被删去而其后是中文", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText+" 关于 "+canaryPhone),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		// 分岔在期望标签的最后 8 个字节之内时，末尾比对用不上，单个字符的插入与替换由逐字符的接续检查识别。
+		{name: "令牌倒数第四个字符换成替换字符", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:44]+"\ufffd"+tokenText[45:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌倒数第三个字符之前插入零宽空格", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:45]+"\u200b"+tokenText[45:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		// 插入或替换了多个字符：分岔之后仍出现期望标签的最后 8 个字节（令牌的最后 7 个字符加 ]），是改写，不是截断。
+		{name: "令牌中插入两个零宽空格", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"\u200b\u200b"+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌中插入零宽空格与软连字符", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"\u200b\u00ad"+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌中插入三个句点", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"..."+tokenText[30:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "令牌的两个字符换成全角字母", header: encodedSubject(t, "回复：[TC "+taskID+" "+tokenText[:30]+"ｘｙ"+tokenText[32:]+"]"+title),
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		{name: "没有任务 ID 的记录", header: encodedSubject(t, "回复：[TC ]"+title), mutate: noTaskMail,
+			wantState: "other", wantPrefix: stringPtr("回复：")},
+		// 开尔文符号 U+212A 经 strings.ToLower 会变成 k；大小写只折叠 ASCII，它不算大小写变化。
+		{name: "开尔文符号不算大小写变化", header: encodedSubject(t, "Re: [TC abcdefghjK]"+title), mutate: secondOldMail,
+			wantState: "other", wantPrefix: stringPtr("Re:")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := subjectTokenState(t)
+			if c.mutate != nil {
+				c.mutate(&st)
+			}
+			raw := rawMessage(t, replyHeaders(t, "Subject: "+c.header, "In-Reply-To: "+sentID),
+				qqPlainBody(tokenText), qqHTMLBody(tokenText))
+			got := analyze(t, raw, st)
+			if got.Subject.TagState != c.wantState || got.Subject.TagCount != c.wantCount {
+				t.Errorf("tag_state = %q、tag_count = %d，期望 %q 与 %d",
+					got.Subject.TagState, got.Subject.TagCount, c.wantState, c.wantCount)
+			}
+			if got.Subject.TagIntact != (c.wantState == "intact") {
+				t.Errorf("tag_intact = %v，与期望的 tag_state %q 不一致", got.Subject.TagIntact, c.wantState)
+			}
+			if describePrefix(got.Subject.Prefix) != describePrefix(c.wantPrefix) {
+				t.Errorf("prefix = %s，期望 %s", describePrefix(got.Subject.Prefix), describePrefix(c.wantPrefix))
+			}
+			if output := strings.ToLower(marshal(t, got)); strings.Contains(output, canaryPhone) || strings.Contains(output, tokenText[:20]) {
+				t.Errorf("样本中出现了主题里的金丝雀号码或令牌")
+			}
+		})
+	}
+}
+
+// TestAnalyzeAutoReplySubject 断言主题的自动回复前缀：QQ 的假期自动回复只有 text/html、不带任何头部信号，
+// 主题以自动回复前缀开头是唯一的判据，kind 因此为 auto；冒号是全角还是半角原样记入 prefix，大小写与空白不影响命中。
+// 前缀表逐项各有一例（六个词干各配半角与全角冒号），删去任一项都会让对应用例失败。
+// 这一信号只看解码后的主题开头，与白名单输出的 prefix 无关：前缀之后是其他文字（prefix 为 other）或主题中根本没有标签
+// （prefix 为 null）时照样命中。以「回复：」开头的真人回复不命中，即使其后出现自动回复字样；样本中不出现正文、令牌与金丝雀号码。
+func TestAnalyzeAutoReplySubject(t *testing.T) {
+	tokenText := testToken(t)
+	tag := live.SubjectTag(taskID, tokenText)
+	title := " TurnCourier L1 探测 1/1"
+	// autoReplyCase 是一个自动回复用例：解码后的主题、是否只有 text/html，以及期望的 kind、subject_prefix、prefix（nil 表示 null）
+	// 与 tag_state。
+	type autoReplyCase struct {
+		name       string
+		subject    string
+		htmlOnly   bool
+		wantKind   string
+		wantSignal bool
+		wantPrefix *string
+		wantState  string
+	}
+	cases := []autoReplyCase{
+		{name: "大小写不同", subject: "AUTO-REPLY: " + tag + title, htmlOnly: true,
+			wantKind: "auto", wantSignal: true, wantPrefix: stringPtr("AUTO-REPLY:"), wantState: "intact"},
+		{name: "带空格的英文前缀", subject: "Automatic reply: " + tag + title, htmlOnly: true,
+			wantKind: "auto", wantSignal: true, wantPrefix: stringPtr("Automaticreply:"), wantState: "intact"},
+		{name: "带空格的英文前缀、全角冒号", subject: "Automatic Reply：" + tag + title, htmlOnly: true,
+			wantKind: "auto", wantSignal: true, wantPrefix: stringPtr("AutomaticReply："), wantState: "intact"},
+		{name: "前缀之后是其他文字", subject: "自动回复: 关于合同 " + canaryPhone + " " + tag, htmlOnly: true,
+			wantKind: "auto", wantSignal: true, wantPrefix: stringPtr("other"), wantState: "intact"},
+		{name: "没有主题标签", subject: "自动回复：您好 " + canaryPhone, htmlOnly: true,
+			wantKind: "auto", wantSignal: true, wantPrefix: nil, wantState: "missing"},
+		{name: "真人回复", subject: "回复：" + tag + title,
+			wantKind: "reply", wantPrefix: stringPtr("回复："), wantState: "intact"},
+		{name: "自动回复字样不在开头", subject: "回复：自动回复: " + tag + title,
+			wantKind: "reply", wantPrefix: stringPtr("回复：自动回复:"), wantState: "intact"},
+	}
+	for _, prefix := range []string{
+		"自动回复：", "自动回复:", "自動回覆：", "自動回覆:", "自动答复：", "自动答复:",
+		"Auto-Reply:", "Auto-Reply：", "AutoReply:", "AutoReply：", "AutomaticReply:", "AutomaticReply：",
+	} {
+		cases = append(cases, autoReplyCase{name: "前缀 " + prefix + "，只有 HTML", subject: prefix + " " + tag + title, htmlOnly: true,
+			wantKind: "auto", wantSignal: true, wantPrefix: stringPtr(prefix), wantState: "intact"})
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			headers := replyHeaders(t, "Subject: "+encodedSubject(t, c.subject), "In-Reply-To: "+sentID)
+			raw := rawMessage(t, headers, qqPlainBody(tokenText), qqHTMLBody(tokenText))
+			if c.htmlOnly {
+				raw = rawSinglePart(t, headers, `text/html; charset="utf-8"`, "<html><body>"+canarySentence+"</body></html>")
+			}
+			sample := analyze(t, raw, subjectTokenState(t))
+			if sample.Kind != c.wantKind || sample.Auto.SubjectPrefix != c.wantSignal {
+				t.Errorf("kind = %q、auto.subject_prefix = %v，期望 %q 与 %v", sample.Kind, sample.Auto.SubjectPrefix, c.wantKind, c.wantSignal)
+			}
+			if describePrefix(sample.Subject.Prefix) != describePrefix(c.wantPrefix) {
+				t.Errorf("prefix = %s，期望 %s", describePrefix(sample.Subject.Prefix), describePrefix(c.wantPrefix))
+			}
+			if sample.Subject.TagState != c.wantState {
+				t.Errorf("tag_state = %q，期望 %q", sample.Subject.TagState, c.wantState)
+			}
+			output := strings.ToLower(marshal(t, sample))
+			if strings.Contains(output, canarySentence) || strings.Contains(output, tokenText) || strings.Contains(output, canaryPhone) {
+				t.Errorf("样本中出现了正文、令牌或主题里的金丝雀号码")
+			}
+		})
+	}
+}
+
+// TestAnalyzeBounceBeforeAutoReplySubject 断言退信判定先于自动回复信号：主题以自动回复前缀开头的 multipart/report 仍记为 bounce，
+// auto.subject_prefix 照实记为 true。发件人不是 MAILER-DAEMON 或 postmaster，退信只凭 multipart/report 这一条依据成立。
+func TestAnalyzeBounceBeforeAutoReplySubject(t *testing.T) {
+	headers := []string{
+		"From: <" + canaryAddress + ">",
+		"To: <bot@example.invalid>",
+		"Subject: " + encodedSubject(t, "Auto-Reply: "+live.SubjectTag(taskID, testToken(t))+" 探测"),
+		"Message-Id: " + replySelfI,
+		"In-Reply-To: " + sentID,
+	}
+	sample := analyze(t, rawReport(t, headers), subjectTokenState(t))
+	if sample.Kind != "bounce" || !sample.Auto.SubjectPrefix {
+		t.Errorf("kind = %q、auto.subject_prefix = %v，期望 bounce 与 true", sample.Kind, sample.Auto.SubjectPrefix)
+	}
+}
+
+// TestAnalyzeReturnPath 断言 Return-Path 的脱敏描述：头的个数、第一个取值是否为空信封、第一个地址的角色（规则同 from_role），
+// 以及它与 From 规范化后是否相同（不区分大小写）、域名是否相同；任一地址缺失或无法解析时两项对照都为 false。
+// empty 与 role 只看第一个 Return-Path 头；matches_from 比较地址本身，两个不同的地址角色相同（都是 other）也不算相同；
+// 域名取最后一个 @ 之后的部分，带引号的本地部分可以含 @。
+// 样本中只有角色与布尔值，不出现任何地址。From 默认为 canaryAddress，角色为 recipient。
+func TestAnalyzeReturnPath(t *testing.T) {
+	tokenText := testToken(t)
+	for _, c := range []struct {
+		name  string
+		from  string // 非空时替换 replyHeaders 中的 From 头
+		extra []string
+		want  live.ReturnPath
+	}{
+		{name: "没有该头", want: live.ReturnPath{}},
+		{name: "空信封", extra: []string{"Return-Path: <>"}, want: live.ReturnPath{Count: 1, Empty: true}},
+		{name: "与 From 相同", extra: []string{"Return-Path: <" + canaryAddress + ">"},
+			want: live.ReturnPath{Count: 1, Role: "recipient", MatchesFrom: true, SameDomainAsFrom: true}},
+		{name: "与 From 只差大小写", extra: []string{"Return-Path: <user.canary@EXAMPLE.INVALID>"},
+			want: live.ReturnPath{Count: 1, Role: "recipient", MatchesFrom: true, SameDomainAsFrom: true}},
+		{name: "同域不同地址", extra: []string{"Return-Path: <bounce.canary@Example.Invalid>"},
+			want: live.ReturnPath{Count: 1, Role: "other", SameDomainAsFrom: true}},
+		{name: "异域地址", extra: []string{"Return-Path: <user.canary@elsewhere.invalid>"},
+			want: live.ReturnPath{Count: 1, Role: "other"}},
+		{name: "无法解析", extra: []string{"Return-Path: 关于合同 " + canaryPhone},
+			want: live.ReturnPath{Count: 1, Role: "other"}},
+		{name: "两个头且第一个为空信封", extra: []string{"Return-Path: <>", "Return-Path: <" + canaryAddress + ">"},
+			want: live.ReturnPath{Count: 2, Empty: true}},
+		{name: "两个头且第二个为空信封", extra: []string{"Return-Path: <" + canaryAddress + ">", "Return-Path: <>"},
+			want: live.ReturnPath{Count: 2, Role: "recipient", MatchesFrom: true, SameDomainAsFrom: true}},
+		{name: "两个不同的地址角色都是 other", from: "<first.canary@example.invalid>", extra: []string{"Return-Path: <second.canary@example.invalid>"},
+			want: live.ReturnPath{Count: 1, Role: "other", SameDomainAsFrom: true}},
+		{name: "带引号的本地部分含 @", extra: []string{`Return-Path: <"bounce@canary"@example.invalid>`},
+			want: live.ReturnPath{Count: 1, Role: "other", SameDomainAsFrom: true}},
+		{name: "From 无法解析", from: canaryName, extra: []string{"Return-Path: <" + canaryAddress + ">"},
+			want: live.ReturnPath{Count: 1, Role: "recipient"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			headers := replyHeaders(t, append([]string{
+				"Subject: " + encodedSubject(t, "回复："+live.SubjectTag(taskID, tokenText)+" 探测"),
+				"In-Reply-To: " + sentID,
+			}, c.extra...)...)
+			if c.from != "" {
+				headers[0] = "From: " + c.from
+			}
+			raw := rawMessage(t, headers, qqPlainBody(tokenText), qqHTMLBody(tokenText))
+			sample := analyze(t, raw, subjectTokenState(t))
+			if sample.ReturnPath != c.want {
+				t.Errorf("return_path = %+v，期望 %+v", sample.ReturnPath, c.want)
+			}
+			if sample.Auto.ReturnPathEmpty != c.want.Empty {
+				t.Errorf("auto.return_path_empty = %v，与 return_path.empty 不一致", sample.Auto.ReturnPathEmpty)
+			}
+			output := strings.ToLower(marshal(t, sample))
+			for _, canary := range []string{"example.invalid", "elsewhere.invalid", "canary", canaryPhone} {
+				if strings.Contains(output, canary) {
+					t.Errorf("样本中出现了地址或头部文字 %q", canary)
+				}
+			}
+		})
+	}
+}
+
 // TestRedactDataResponse 断言 DATA 响应按相等关系脱敏、候选 ID 按出现顺序去重，且候选可用于归类线程头。
 func TestRedactDataResponse(t *testing.T) {
 	st := testState(t)
@@ -405,20 +765,88 @@ func TestRedactDataResponse(t *testing.T) {
 	}
 }
 
-// TestComposeNotification 断言合成通知可被解析：含探测 ID、我方 Message-ID、Auto-Submitted 与页脚令牌，
-// 主题标签完整，且两个部件分别为 text/plain 与 text/html。
-func TestComposeNotification(t *testing.T) {
+// TestSubjectTag 断言主题标签的两种形态：带令牌时为 [TC <任务 ID> <令牌>]，共 64 个字符（加上「Subject: 」为 73 列，
+// 不到 go-message 折行的 76 列）；令牌为空时为旧形态 [TC <任务 ID>]，只用于 IDLE 自发邮件。
+func TestSubjectTag(t *testing.T) {
 	tokenText := testToken(t)
-	raw, err := live.ComposeNotification(live.Notification{
+	tag := live.SubjectTag(taskID, tokenText)
+	if tag != "[TC "+taskID+" "+tokenText+"]" {
+		t.Errorf("带令牌的标签形态不对（%d 个字符）", len(tag))
+	}
+	if len(tag) != 64 {
+		t.Errorf("带令牌的标签长度 = %d，期望 64", len(tag))
+	}
+	if got, want := live.SubjectTag(taskID, ""), "[TC "+taskID+"]"; got != want {
+		t.Errorf("旧形态标签 = %q，期望 %q", got, want)
+	}
+}
+
+// TestSchemaVersion 固定样本与状态文件的格式标识：L1b 的样本（主题标签携带令牌，另有 tag_state、tag_count、
+// subject_prefix 与 return_path）标为 turncourier-l1/4，读样本时据此与第一轮区分。
+func TestSchemaVersion(t *testing.T) {
+	if live.Schema != "turncourier-l1/4" {
+		t.Errorf("Schema = %q，期望 turncourier-l1/4", live.Schema)
+	}
+}
+
+// testNotification 返回一封合成通知：地址只用保留域名，主题由调用方给出的标签与标题组成，页脚含 tokenText。
+func testNotification(tag, title, tokenText string) live.Notification {
+	return live.Notification{
 		From:      "bot@example.invalid",
 		To:        "user.canary@example.invalid",
 		CC:        "bot@example.invalid",
-		Subject:   "[TC " + taskID + "] TurnCourier L1 探测 1/1",
+		Tag:       tag,
+		Title:     title,
 		MessageID: oursID,
 		ProbeID:   probeID,
 		Token:     tokenText,
 		Date:      time.UnixMilli(1_789_000_000_000).UTC(),
-	})
+	}
+}
+
+// subjectField 返回通知头部中 Subject 字段的全部物理行（首行与折行后的续行），以及用标准库独立解码的主题：
+// net/mail 展开折行，mime.WordDecoder 解码 encoded-word，与探测工具所用的 go-message 互不依赖。
+func subjectField(t *testing.T, raw []byte) ([]string, string) {
+	t.Helper()
+	header, _, ok := strings.Cut(string(raw), "\r\n\r\n")
+	if !ok {
+		t.Fatalf("通知中没有头部与正文之间的空行")
+	}
+	var lines []string
+	fields, inSubject := 0, false
+	for _, line := range strings.Split(header, "\r\n") {
+		switch {
+		case strings.HasPrefix(line, "Subject: "):
+			fields, inSubject = fields+1, true
+			lines = append(lines, line)
+		case inSubject && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")):
+			lines = append(lines, line)
+		default:
+			inSubject = false
+		}
+	}
+	if fields != 1 {
+		t.Fatalf("通知中有 %d 个 Subject 头，期望 1 个", fields)
+	}
+	message, err := netmail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("标准库无法解析通知: %v", err)
+	}
+	decoded, err := new(mime.WordDecoder).DecodeHeader(message.Header.Get("Subject"))
+	if err != nil {
+		t.Fatalf("标准库无法解码主题: %v", err)
+	}
+	return lines, decoded
+}
+
+// TestComposeNotification 断言合成通知可被解析：含探测 ID、我方 Message-ID、Auto-Submitted 与页脚令牌，
+// 两个部件分别为 text/plain 与 text/html；主题头的首行恰为「Subject: 」加完整的标签（标签之后才折行），
+// 解码后的主题等于「标签 + 空格 + 标题」。
+func TestComposeNotification(t *testing.T) {
+	tokenText := testToken(t)
+	tag := live.SubjectTag(taskID, tokenText)
+	title := "TurnCourier L1 探测 1/1"
+	raw, err := live.ComposeNotification(testNotification(tag, title, tokenText))
 	if err != nil {
 		t.Fatalf("渲染通知失败: %v", err)
 	}
@@ -435,11 +863,120 @@ func TestComposeNotification(t *testing.T) {
 			t.Errorf("通知中缺少 %q", want)
 		}
 	}
-	if !strings.Contains(text, tokenText) {
+	// 主题标签里也有令牌，页脚中的那一份只能在正文里找。
+	if _, body, _ := strings.Cut(text, "\r\n\r\n"); !strings.Contains(body, tokenText) {
 		t.Errorf("通知页脚中缺少令牌")
 	}
 	if strings.Count(text, "\n") != strings.Count(text, "\r\n") {
 		t.Errorf("通知中出现了裸换行，SMTP 要求每一行都以 CRLF 结束")
+	}
+	lines, decoded := subjectField(t, raw)
+	if lines[0] != "Subject: "+tag {
+		t.Errorf("主题头首行不是「Subject: 」加完整的标签（首行 %d 个字符）", len(lines[0]))
+	}
+	if decoded != tag+" "+title {
+		t.Errorf("解码后的主题不等于「标签 + 空格 + 标题」（得到 %d 个字符）", len(decoded))
+	}
+}
+
+// TestComposeNotificationSubjects 断言主题的编码结构与 4b 渲染器约定的一致：标签以原始 ASCII 位于主题头首行开头，
+// 从不进入 encoded-word，也不被折行折断；标题按 UTF-8 B 编码，足够长时拆成多个 encoded-word，纯 ASCII 时原样保留；
+// 标题为空时主题就是标签。旧形态标签（IDLE 自发邮件）同样适用。
+func TestComposeNotificationSubjects(t *testing.T) {
+	tokenText := testToken(t)
+	tag := live.SubjectTag(taskID, tokenText)
+	for _, c := range []struct {
+		name     string
+		tag      string
+		title    string
+		minWords int // Subject 字段中至少应有的 encoded-word 个数；为 0 时不应出现 encoded-word
+	}{
+		{name: "长标题拆成多个 encoded-word", tag: tag, title: strings.Repeat("探测标题很长", 12), minWords: 2},
+		{name: "纯 ASCII 标题原样保留", tag: tag, title: "TurnCourier L1 probe 1/1"},
+		{name: "标题为空", tag: tag},
+		{name: "旧形态标签", tag: live.SubjectTag(taskID, ""), title: "TurnCourier L1 IDLE 探测", minWords: 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw, err := live.ComposeNotification(testNotification(c.tag, c.title, tokenText))
+			if err != nil {
+				t.Fatalf("渲染通知失败: %v", err)
+			}
+			lines, decoded := subjectField(t, raw)
+			head := "Subject: " + c.tag
+			if first := lines[0]; !strings.HasPrefix(first, head) || (len(first) > len(head) && first[len(head)] != ' ') {
+				t.Errorf("主题头首行没有以完整的标签开头（首行 %d 个字符）", len(first))
+			}
+			want := c.tag
+			if c.title != "" {
+				want += " " + c.title
+			}
+			if decoded != want {
+				t.Errorf("解码后的主题不等于「标签 + 空格 + 标题」（得到 %d 个字符，期望 %d 个字符）", len(decoded), len(want))
+			}
+			words := strings.Count(strings.Join(lines, "\r\n"), "=?utf-8?b?")
+			if c.minWords == 0 && words != 0 {
+				t.Errorf("Subject 字段中出现了 %d 个 encoded-word，期望没有", words)
+			}
+			if words < c.minWords {
+				t.Errorf("Subject 字段中有 %d 个 encoded-word，期望至少 %d 个", words, c.minWords)
+			}
+		})
+	}
+}
+
+// TestComposeNotificationRejectsBadTag 断言形状不对的标签被拒绝：含 CR/LF（头部注入）、大写、长度不对、多余空白，
+// 或标签之前、之后有多余文字时返回 ErrInvalidTag 且不渲染任何字节，错误文本不回显输入（新形态的标签含令牌）。
+func TestComposeNotificationRejectsBadTag(t *testing.T) {
+	tokenText := testToken(t)
+	tag := live.SubjectTag(taskID, tokenText)
+	for _, c := range []struct {
+		name string
+		tag  string
+	}{
+		{name: "含 CR/LF", tag: tag + "\r\nBcc: " + canaryAddress},
+		{name: "结尾换行", tag: live.SubjectTag(taskID, "") + "\n"},
+		{name: "令牌大写", tag: live.SubjectTag(taskID, strings.ToUpper(tokenText))},
+		{name: "TC 小写", tag: "[tc " + taskID + " " + tokenText + "]"},
+		{name: "令牌少一位", tag: live.SubjectTag(taskID, tokenText[:47])},
+		{name: "任务 ID 多一位", tag: live.SubjectTag(taskID+"0", tokenText)},
+		{name: "两个空格", tag: live.SubjectTag(taskID, " "+tokenText)},
+		{name: "标签后有其他文字", tag: tag + " " + canaryPhone},
+		{name: "标签前有其他文字", tag: "x" + tag},
+		{name: "空标签", tag: ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw, err := live.ComposeNotification(testNotification(c.tag, "TurnCourier L1 探测 1/1", tokenText))
+			if !errors.Is(err, live.ErrInvalidTag) {
+				t.Fatalf("错误 = %v，期望 ErrInvalidTag", err)
+			}
+			if raw != nil {
+				t.Errorf("标签被拒绝时不应返回邮件字节")
+			}
+			for _, canary := range []string{tokenText, strings.ToUpper(tokenText), taskID, canaryAddress, canaryPhone} {
+				if strings.Contains(err.Error(), canary) {
+					t.Errorf("错误文本回显了输入")
+				}
+			}
+		})
+	}
+}
+
+// TestSendPrompt 断言逐封确认的文本含序号、两个地址、标题、是否抄送与「不回显」的说明，且不含任何 48 个字母表字符的串：
+// SendPrompt 的签名里没有标签参数，含令牌的标签无从进入 /dev/tty。
+func TestSendPrompt(t *testing.T) {
+	title := "TurnCourier L1 探测标题"
+	prompt := live.SendPrompt("bot@example.invalid", "user.canary@example.invalid", 2, 3, title, true)
+	for _, want := range []string{"2/3", "bot@example.invalid", "user.canary@example.invalid", title, "主题标签含一次性令牌，不回显"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("确认文本中缺少 %q：%s", want, prompt)
+		}
+	}
+	if prompt == live.SendPrompt("bot@example.invalid", "user.canary@example.invalid", 2, 3, title, false) {
+		t.Errorf("确认文本没有区分是否抄送机器人自己")
+	}
+	// 用比字母表更宽的 [0-9a-z] 检查：没有 48 个连续的这类字符，就更不会有 48 个连续的字母表字符。
+	if longRun := regexp.MustCompile(`(?i)[0-9a-z]{48}`); longRun.MatchString(prompt) {
+		t.Errorf("确认文本中出现了 48 个连续的字母表字符")
 	}
 }
 

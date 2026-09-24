@@ -249,6 +249,8 @@ go test -run='^$' -fuzz=FuzzNormalizeAddress -fuzztime=30s ./internal/config/
 
 运行探测的全部命令都要带 `-count=1`，否则 `go test` 可能直接显示缓存结果，看起来像是跑过了。
 
+自 L1b 起，`TestL1SendNotification` 发出的合成通知按 D4 定稿的格式把一次性令牌放在主题标签 `[TC <任务 ID> <令牌>]` 中（页脚仍有一份副本），逐封确认只回显标签之后的文字；样本另记录标签的状态、`Return-Path` 与自动回复的主题前缀，格式为 `turncourier-l1/4`。L1b 的规程见 [Phase 4 实施清单](plans/phase-04.md) 的「L1b」一节。
+
 `samples.jsonl` 只记录结构特征（地址换成角色、不输出正文、显示名、日期与完整主题），但它仍然来自真实邮件。样本进入仓库之前，必须由维护者逐条审阅并按 4b 的要求转为合成回归样本。
 
 ## 配置文件与数据目录

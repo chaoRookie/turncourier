@@ -1,5 +1,6 @@
-// Package live 为 L1 真机探测提供不访问外部资源的纯函数：合成通知的渲染、来信的脱敏归类、主题前缀白名单、
-// Message-ID 按相等关系归类、DATA 响应脱敏、IDLE 观测判定、探测状态与样本文件的读写，以及输出目录校验。
+// Package live 为 L1 真机探测提供不访问外部资源的纯函数：合成通知的渲染（含携带令牌的主题标签与逐封确认文本）、
+// 来信的脱敏归类（含主题标签状态、自动回复前缀与 Return-Path）、主题前缀白名单、Message-ID 按相等关系归类、DATA 响应脱敏、
+// IDLE 观测判定、探测状态与样本文件的读写，以及输出目录校验。
 // 本文件不带构建标签，随 make test 在 CI 中编译与测试；真正的探测在带 live 标签的文件中，只由维护者人工执行。
 // 这里的函数只处理传入的字节与值（输出目录校验与状态文件读写只接触调用方给出的路径），不读取配置、钥匙串、网络与环境变量。
 package live
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +19,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/charset"
@@ -24,8 +27,9 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
-// Schema 是样本与状态文件的格式标识。
-const Schema = "turncourier-l1/3"
+// Schema 是样本与状态文件的格式标识。turncourier-l1/4 起通知的主题标签携带令牌，来信样本增加 subject.tag_state、
+// subject.tag_count、auto.subject_prefix 与 return_path。
+const Schema = "turncourier-l1/4"
 
 const (
 	// ProbeHeader 是探测邮件自带的标识头，用来在「已发送」与抄送副本中找回同一封邮件。
@@ -87,12 +91,15 @@ type State struct {
 
 // Mail 是一封已发出的探测邮件：我方 ID、一次性令牌，以及 QQ 为它分配的各来源 ID。
 // 令牌由测试进程内随机生成、用后即弃的密钥签发，不能用于任何真实验证。
+// SubjectToken 为 true 表示这封邮件的主题标签携带令牌（L1b 起的新形态 [TC <任务 ID> <令牌>]）。第一轮留下的 state.json
+// 没有这个字段，读入后为 false，按旧形态 [TC <任务 ID>] 归类，因此复用旧输出目录也不会误判。
 // DeliveredData 不带 omitempty：没有候选时它必须写成空数组，以便与「这封邮件没记录过 DATA 候选」区分。
 type Mail struct {
 	ProbeID       string   `json:"probe_id"`
 	TaskID        string   `json:"task_id"`
 	MessageID     string   `json:"message_id"`
 	Token         string   `json:"token"`
+	SubjectToken  bool     `json:"subject_token,omitempty"`
 	DeliveredSent string   `json:"delivered_sent,omitempty"`
 	DeliveredCC   string   `json:"delivered_cc,omitempty"`
 	DeliveredData []string `json:"delivered_data"`
@@ -133,6 +140,7 @@ type Sample struct {
 	Plain           Plain       `json:"plain"`
 	HTML            HTML        `json:"html"`
 	Auto            Auto        `json:"auto"`
+	ReturnPath      ReturnPath  `json:"return_path"`
 	AuthResults     AuthResults `json:"auth_results"`
 }
 
@@ -142,10 +150,13 @@ type Thread struct {
 	References []string `json:"references"`
 }
 
-// Subject 是主题的脱敏描述：只输出白名单内的回复前缀、标签是否完整与编码方式。
+// Subject 是主题的脱敏描述：白名单内的回复前缀、主题标签的状态、D4 严格文法的命中次数与编码方式；
+// 不输出主题中的其他文字，也不输出标签里的任务 ID 与令牌。TagIntact 当且仅当 TagState 为 intact，保留它便于与第一轮的样本对照。
 type Subject struct {
 	Prefix    *string `json:"prefix"`
 	TagIntact bool    `json:"tag_intact"`
+	TagState  string  `json:"tag_state"`
+	TagCount  int     `json:"tag_count"`
 	Encoding  string  `json:"encoding"`
 }
 
@@ -174,12 +185,28 @@ type HTML struct {
 	Markers    []string `json:"markers"`
 }
 
-// Auto 是判断非人工来信所依据的头部信号。
+// Auto 是判断非人工来信所依据的信号：各头部信号，以及解码后的主题是否以自动回复前缀开头（SubjectPrefix）。
+// 第一轮实测的 QQ 假期自动回复不带任何头部信号，主题前缀是唯一可用的判据（D4）。
 type Auto struct {
 	AutoSubmitted   string `json:"auto_submitted"`
 	XAutoreply      bool   `json:"x_autoreply"`
 	Precedence      string `json:"precedence"`
 	ReturnPathEmpty bool   `json:"return_path_empty"`
+	SubjectPrefix   bool   `json:"subject_prefix"`
+}
+
+// ReturnPath 是 Return-Path 头的脱敏描述：头的个数、第一个取值是否为空信封 <>、第一个地址的角色（规则同 from_role；
+// 没有该头或为空信封时为空串，无法解析时为 other），以及它与 From 地址规范化后是否相同、域名是否相同（不区分大小写）。
+// 按 RFC 5321，Return-Path 由最终投递的服务器依据信封发件人（MAIL FROM）插在信头最前面，不是发信方写的；发信方另带的该头
+// 若被保留，会排在它之后，count 因此大于 1，这里只取第一个。QQ 要求信封发件人与登录账户一致，所以同域投递时它可能反映
+// 真实的发信账户，而 From 可以伪造；这一点有待 L1b 的样本印证。跨域来信的信封发件人由对方服务器决定，没有这层约束。
+// 与 from_role 一样只输出角色与布尔值，不输出地址。
+type ReturnPath struct {
+	Count            int    `json:"count"`
+	Empty            bool   `json:"empty"`
+	Role             string `json:"role"`
+	MatchesFrom      bool   `json:"matches_from"`
+	SameDomainAsFrom bool   `json:"same_domain_as_from"`
 }
 
 // AuthResults 是 Authentication-Results 头中的三项结果，只输出取值，不输出验证方与域名。
@@ -198,11 +225,13 @@ type Copy struct {
 }
 
 // Notification 是一封合成探测通知的内容；除收件地址来自配置外，各字段都由探测工具生成，不含个人信息。
+// 主题由 Tag 与 Title 组成，结构与 4b 渲染器约定的一致：Tag 以原始 ASCII 放在主题开头，Title 跟在一个空格之后、按需 B 编码。
 type Notification struct {
 	From      string
 	To        string
 	CC        string // 为空时不抄送
-	Subject   string
+	Tag       string // 主题开头的标签，必须是 SubjectTag 输出的形状；新形态含一次性令牌
+	Title     string // 标签之后的文字；为空时主题就是标签
 	MessageID string // 含尖括号
 	ProbeID   string
 	Token     string // 页脚中的一次性令牌文本；为空时不写令牌行
@@ -232,6 +261,12 @@ var (
 	tencentPattern = regexp.MustCompile(`^<tencent_[^<>@\s]*@qq\.com>$`)
 	// tokenPattern 匹配 48 个 Crockford base32 字符（不区分大小写）；边界另行检查，长于 48 的连续串不算令牌。
 	tokenPattern = regexp.MustCompile(`(?i)[0-9abcdefghjkmnpqrstvwxyz]{48}`)
+	// strictTagPattern 是 D4 的主题标签严格文法：[TC、一个 U+0020、10 个任务 ID 字符、恰好一个 U+0020、48 个令牌字符与 ]，
+	// 字符集为小写字母表、不区分大小写的匹配一律不算；tag_count 统计它在解码后的主题中不重叠命中的次数。
+	strictTagPattern = regexp.MustCompile(`\[TC [` + crockfordAlphabet + `]{10} [` + crockfordAlphabet + `]{48}\]`)
+	// tagShapePattern 是 ComposeNotification 接受的标签形状，即 SubjectTag 的两种输出：锚定整串，令牌部分可以没有。
+	// Go 正则的 $ 只匹配文本末尾，结尾带换行的标签同样被拒绝。
+	tagShapePattern = regexp.MustCompile(`^\[TC [` + crockfordAlphabet + `]{10}( [` + crockfordAlphabet + `]{48})?\]$`)
 	// encodedWordPattern 匹配主题中的第一个 RFC 2047 encoded-word，用于记录字符集与编码方式。
 	encodedWordPattern = regexp.MustCompile(`=\?([^?]+)\?([BbQq])\?`)
 	// quotePrefixPattern 匹配只由引用标记与空白组成的行前缀。
@@ -283,8 +318,28 @@ var authPatterns = map[string]*regexp.Regexp{
 // authValues 是 Authentication-Results 中各方法的已知结果取值（RFC 8601 第 2.7 节），其余记为 other。
 var authValues = []string{"pass", "fail", "none", "neutral", "softfail", "temperror", "permerror", "policy"}
 
-// replyPrefixes 是主题前缀白名单；前缀可以重复出现，去掉空白后只由它们组成时才原样输出。
-var replyPrefixes = []string{"回复：", "回复:", "答复：", "答复:", "转发：", "转发:", "Re:", "RE:", "re:", "Fwd:", "FW:", "Fw:"}
+// autoReplyPrefixes 是自动回复的主题前缀：自动回复、自動回覆、自动答复、Auto-Reply、AutoReply、AutomaticReply 六个词干
+// 各配全角与半角冒号，与 4b 契约中产品的主题前缀规则取同一组词干（D4 与「已定的实现细节」，2026-09-21 维护者确认的破例）。
+// 比较方式也与产品规则相同：先删去主题中的全部空白，再只折叠 ASCII 大小写，只看主题开头，因此 Automatic reply: 对应 AutomaticReply:。
+var autoReplyPrefixes = []string{
+	"自动回复：", "自动回复:", "自動回覆：", "自動回覆:", "自动答复：", "自动答复:",
+	"Auto-Reply:", "Auto-Reply：", "AutoReply:", "AutoReply：", "AutomaticReply:", "AutomaticReply：",
+}
+
+// replyPrefixes 是主题前缀白名单：回复、转发前缀与自动回复前缀，英文前缀同样接受全角冒号；按 ASCII 不区分大小写匹配
+// （非 ASCII 部分按原样比较），可以重复出现；[TC 之前去掉空白的文字只由它们组成时才输出来信中的原文，冒号的全角半角因此
+// 直接出现在样本里。每一项都以冒号结尾且冒号只出现在末尾，任何两项都不会同时是同一段文字的前缀，逐项贪心匹配没有歧义：
+// 全角冒号 U+FF1A 的 UTF-8 编码里没有 0x3A，Fwd： 与 FW： 折叠后在第三个字节就已不同。
+var replyPrefixes = slices.Concat([]string{
+	"回复：", "回复:", "答复：", "答复:", "转发：", "转发:", "Re:", "Re：", "Fwd:", "Fwd：", "FW:", "FW：",
+}, autoReplyPrefixes)
+
+// foldedReplyPrefixes 与 foldedAutoReplyPrefixes 是上面两张前缀表只折叠 ASCII 大小写后的形式，在包初始化时算好一次，
+// 逐封来信比较时不再重复折叠。
+var (
+	foldedReplyPrefixes     = foldAll(replyPrefixes)
+	foldedAutoReplyPrefixes = foldAll(autoReplyPrefixes)
+)
 
 // precedenceAuto 是判为非人工来信的 Precedence 取值。
 var precedenceAuto = []string{"auto_reply", "bulk", "junk", "list"}
@@ -329,7 +384,8 @@ func parseMessage(raw []byte) (*message.Entity, error) {
 
 // Analyze 解析一封来信并返回脱敏样本。ok 为 false 表示它没有引用任何探测邮件，或它本身就是探测邮件的副本
 // （带 ProbeHeader，或 Message-ID 等于已记录的我方、已发送、抄送副本 ID）。
-// 样本只含结构特征：不输出正文、显示名、日期、完整主题与 Received 头，地址一律换成角色。
+// 样本只含结构特征：不输出正文、显示名、日期、完整主题（主题标签只输出状态与命中次数，不输出其中的任务 ID 与令牌）
+// 与 Received 头，地址（含 Return-Path）一律换成角色。
 func Analyze(raw []byte, st State, roles Roles) (Sample, bool, error) {
 	entity, err := parseMessage(raw)
 	if err != nil {
@@ -345,7 +401,8 @@ func Analyze(raw []byte, st State, roles Roles) (Sample, bool, error) {
 	root := describePart(entity, &b, 0)
 	thread, ids := threadOf(h, st.Mails)
 	decoded, _ := h.Subject()
-	subject := subjectInfo(decoded, h.Get("Subject"), st.Mails)
+	text := newSubjectText(decoded)
+	subject := subjectInfo(text, h.Get("Subject"), st.Mails)
 	plain := analyzePlain(b.plain, st.Mails)
 	htmlTokens, htmlMatched, _ := findTokens(b.html, st.Mails)
 	if !referencesProbe(ids, decoded, plain.TokenMatchesSent || htmlMatched, st.Mails) {
@@ -353,7 +410,7 @@ func Analyze(raw []byte, st State, roles Roles) (Sample, bool, error) {
 	}
 
 	fromAddress := firstAddress(h, "From")
-	auto := autoSignals(h)
+	auto := autoSignals(h, text.squeezed)
 	sample := Sample{
 		Schema:          Schema,
 		Kind:            classifyKind(root.Type, fromAddress, auto, b.plain),
@@ -367,6 +424,7 @@ func Analyze(raw []byte, st State, roles Roles) (Sample, bool, error) {
 		Plain:           plain,
 		HTML:            HTML{Tokens: htmlTokens, Blockquote: strings.Contains(strings.ToLower(b.html), "<blockquote"), Markers: markersOf(b.html)},
 		Auto:            auto,
+		ReturnPath:      returnPathOf(h, fromAddress, roles),
 		AuthResults:     authResultsOf(h),
 	}
 	return sample, true, nil
@@ -527,26 +585,33 @@ func msgIDList(h mail.Header, key string) ([]string, string) {
 	return ids, raw
 }
 
-// subjectInfo 归类主题：找不到 [TC 时前缀为 null、标签不完整；找到时，[TC 之前去掉空白的文字只由白名单前缀组成才原样输出
+// subjectText 是解码后主题的几种形式，每封来信只计算一次，供标签状态、主题前缀与自动回复前缀共用。
+type subjectText struct {
+	decoded  string // 解码后的原文
+	folded   string // 只折叠 ASCII 大小写，与 decoded 逐字节对齐
+	squeezed string // 删去全部空白后只折叠 ASCII 大小写
+	tagAt    int    // 第一个 [tc（ASCII 不区分大小写）的字节下标，没有时为 -1；它在 folded 中求出，可以直接用于 decoded
+}
+
+// newSubjectText 一次算出解码后主题的各形式。先折叠再删空白与先删空白再折叠的结果相同：lowerASCII 只改写 A–Z，
+// 既不产生也不消除空白与非法 UTF-8 字节。大小写只折叠 ASCII：strings.ToLower 会把开尔文符号 U+212A 等非 ASCII 字符
+// 折成字母表中的 k，也会改变字节长度，按它求出的下标用于原文会错位甚至越界。
+func newSubjectText(decoded string) subjectText {
+	folded := lowerASCII(decoded)
+	return subjectText{decoded: decoded, folded: folded, squeezed: removeSpace(folded), tagAt: strings.Index(folded, "[tc")}
+}
+
+// subjectInfo 归类主题：tag_count 在这里求出，是 D4 严格文法在解码后的主题中不重叠命中的次数（不设上限）；tag_state 见 tagState。
+// 找不到 [TC（ASCII 不区分大小写）时前缀为 null；找到时，第一个 [TC 之前去掉空白的文字只由白名单前缀组成才输出原文
 // （至多 20 个字符），否则记为 other。不输出主题中的其他文字。
-func subjectInfo(decoded, rawValue string, mails []Mail) Subject {
-	subject := Subject{Encoding: encodingOf(rawValue)}
-	index := strings.Index(decoded, "[TC")
-	if index < 0 {
+func subjectInfo(text subjectText, rawValue string, mails []Mail) Subject {
+	count := len(strictTagPattern.FindAllStringIndex(text.decoded, -1))
+	state := tagState(text, count, mails)
+	subject := Subject{TagIntact: state == "intact", TagState: state, TagCount: count, Encoding: encodingOf(rawValue)}
+	if text.tagAt < 0 {
 		return subject
 	}
-	for _, m := range mails {
-		if m.TaskID != "" && strings.Contains(decoded, "[TC "+m.TaskID+"]") {
-			subject.TagIntact = true
-			break
-		}
-	}
-	cleaned := strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) || r == ' ' {
-			return -1
-		}
-		return r
-	}, decoded[:index])
+	cleaned := removeSpace(text.decoded[:text.tagAt])
 	prefix := "other"
 	if onlyReplyPrefixes(cleaned) {
 		prefix = truncateRunes(cleaned, maxPrefixRunes)
@@ -555,13 +620,167 @@ func subjectInfo(decoded, rawValue string, mails []Mail) Subject {
 	return subject
 }
 
-// onlyReplyPrefixes 判断去掉空白的文字是否只由白名单中的回复前缀组成（可重复）；空文字视为只有前缀。
+// expectedTag 是一封已记录邮件的期望标签：原文、只折叠 ASCII 大小写的形式、删去空白后再折叠的形式，
+// 以及截断判定要求公共前缀至少覆盖的字节数。
+type expectedTag struct {
+	text     string
+	folded   string
+	squeezed string
+	minKept  int
+}
+
+// expectedTags 为 state.json 中的每封邮件构造期望标签：SubjectToken 为 true 时是 SubjectTag(任务 ID, 令牌)，
+// 否则是旧形态 SubjectTag(任务 ID, "")。截断判定要求公共前缀至少覆盖 [tc 加完整的任务 ID（删去空白后二者之间没有空格）。
+// 没有任务 ID 的记录不产生期望标签，否则 [TC ] 这样的残片也会被当成某封邮件的标签。
+func expectedTags(mails []Mail) []expectedTag {
+	tags := make([]expectedTag, 0, len(mails))
+	for _, m := range mails {
+		if m.TaskID == "" {
+			continue
+		}
+		carried := ""
+		if m.SubjectToken {
+			carried = m.Token
+		}
+		text := SubjectTag(m.TaskID, carried)
+		folded := lowerASCII(text)
+		tags = append(tags, expectedTag{text: text, folded: folded, squeezed: removeSpace(folded), minKept: len("[tc") + len(m.TaskID)})
+	}
+	return tags
+}
+
+// tagState 按清单顺序返回第一个成立的主题标签状态：missing（没有 [TC，ASCII 不区分大小写）、multiple（严格文法命中 ≥2 次，
+// D4 一律拒绝）、intact（某封邮件的期望标签按字节原样出现）、case_changed（按 ASCII 不区分大小写出现）、
+// whitespace_changed（主题与期望标签都删去全部空白后按 ASCII 不区分大小写出现）、truncated（见 truncatedTag），其余为 other。
+// 每一步都与全部已记录邮件的期望标签逐一比较，任何一封邮件满足前一步都先于后一步；每一步都查找整个主题，
+// 不只看第一个 [tc 起的部分（主题中可以另有 [tcp] 这样的文字）。
+func tagState(text subjectText, count int, mails []Mail) string {
+	if text.tagAt < 0 {
+		return "missing"
+	}
+	if count >= 2 {
+		return "multiple"
+	}
+	tags := expectedTags(mails)
+	for _, tag := range tags {
+		if strings.Contains(text.decoded, tag.text) {
+			return "intact"
+		}
+	}
+	for _, tag := range tags {
+		if strings.Contains(text.folded, tag.folded) {
+			return "case_changed"
+		}
+	}
+	for _, tag := range tags {
+		if strings.Contains(text.squeezed, tag.squeezed) {
+			return "whitespace_changed"
+		}
+	}
+	for _, tag := range tags {
+		if truncatedTag(text.squeezed, tag) {
+			return "truncated"
+		}
+	}
+	return "other"
+}
+
+// truncatedTag 判断标签是否被截断：对 squeezed（删去空白、只折叠 ASCII 大小写的主题）中的每一个 [tc，求从它起的剩余部分
+// 与 tag.squeezed 的公共前缀长度 kept；kept 至少覆盖 [tc 加完整的任务 ID、又短于整个期望标签，且 cutAt 认定分岔处像截断时成立。
+func truncatedTag(squeezed string, tag expectedTag) bool {
+	for rest := squeezed; ; rest = rest[1:] {
+		index := strings.Index(rest, "[tc")
+		if index < 0 {
+			return false
+		}
+		rest = rest[index:]
+		kept := commonPrefixLen(rest, tag.squeezed)
+		if kept >= tag.minKept && kept < len(tag.squeezed) && cutAt(rest, tag.squeezed, kept) {
+			return true
+		}
+	}
+}
+
+// tailBytes 是判断标签在分岔之后是否又接上时比对的期望标签末尾：新形态为令牌的最后 7 个字符加 ]。
+const tailBytes = 8
+
+// cutAt 判断 rest 与期望标签 want 在第 kept 个字节处的分岔是否像截断，调用方保证 kept < len(want)。
+// 主题在此结束算截断。否则取分岔处的字符 r（按完整的 UTF-8 字符取出，占 n 个字节）：r 是 ]、ASCII 字母或数字时不算截断，
+// 标签是在此提前闭合或被改写（字母包括字母表之外的 i、l、o、u）。其余字符（例如省略号）之后，期望标签若又接上了，是改写而不是截断：
+// rest[kept+n:] 以 want[kept:] 开头说明 r 是插入的字符（零宽空格、软连字符、- 等），以 want[kept+1:] 开头说明 r 替换了一个字符，
+// 其后任意位置出现 want 的最后 tailBytes 个字节说明插入或替换了多个字符（分岔在这几个字节之内时，多个字符的改写仍记为截断）。
+// want 由 SubjectTag 的输出删去空白、折叠大小写而来，全是 ASCII，跳过一个字节就是跳过一个字符。
+// 分岔在 want 的最后一个字节（]）处时令牌完整，只有省略号一类的字符（…、⋯、.）像在 ] 之前被截断；
+// 全角括号、圆括号，或 ] 被删去而紧接着标题文字，都是改写。
+func cutAt(rest, want string, kept int) bool {
+	if kept == len(rest) {
+		return true
+	}
+	r, n := utf8.DecodeRuneInString(rest[kept:])
+	if r == ']' || isASCIIAlnum(r) {
+		return false
+	}
+	after := rest[kept+n:]
+	if strings.HasPrefix(after, want[kept:]) {
+		return false
+	}
+	if kept+1 == len(want) {
+		return r == '…' || r == '⋯' || r == '.'
+	}
+	if strings.HasPrefix(after, want[kept+1:]) {
+		return false
+	}
+	return !strings.Contains(after, want[len(want)-tailBytes:])
+}
+
+// isASCIIAlnum 判断字符是否为 ASCII 小写字母或数字；调用处的文字已折叠 ASCII 大小写，不会出现 ASCII 大写字母。
+func isASCIIAlnum(r rune) bool {
+	return ('a' <= r && r <= 'z') || ('0' <= r && r <= '9')
+}
+
+// commonPrefixLen 返回两段文字逐字节相同的前缀长度。
+func commonPrefixLen(a, b string) int {
+	n := min(len(a), len(b))
+	for i := range n {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return n
+}
+
+// removeSpace 删去文字中的全部空白（unicode.IsSpace，含全角空格 U+3000 与不换行空格 U+00A0）。
+func removeSpace(text string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+// lowerASCII 只把 ASCII 大写字母 A–Z 转成小写，其余字节原样保留：结果与原文逐字节对齐，
+// 按它求出的下标可以直接用于原文，也不会像 strings.ToLower 那样把非 ASCII 字符折成 ASCII 字母。
+func lowerASCII(text string) string {
+	b := []byte(text)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// onlyReplyPrefixes 判断去掉空白的文字是否只由白名单中的前缀组成（可重复，按 ASCII 不区分大小写）；空文字视为只有前缀。
+// 文字只折叠一次，与预先折叠好的 foldedReplyPrefixes 比较；lowerASCII 不改变字节长度，按前缀长度切片不会错位；
+// 非 ASCII 字节原样比较，全角冒号与半角冒号因此仍是两项。
 func onlyReplyPrefixes(text string) bool {
-	for text != "" {
+	folded := lowerASCII(text)
+	for folded != "" {
 		matched := false
-		for _, prefix := range replyPrefixes {
-			if strings.HasPrefix(text, prefix) {
-				text, matched = text[len(prefix):], true
+		for _, prefix := range foldedReplyPrefixes {
+			if strings.HasPrefix(folded, prefix) {
+				folded, matched = folded[len(prefix):], true
 				break
 			}
 		}
@@ -570,6 +789,27 @@ func onlyReplyPrefixes(text string) bool {
 		}
 	}
 	return true
+}
+
+// hasAutoReplyPrefix 判断主题是否以任一自动回复前缀开头，比较方式与产品的主题前缀规则相同：squeezed 是解码后的主题
+// 删去全部空白、只折叠 ASCII 大小写后的形式（subjectText.squeezed），与预先折叠好的 foldedAutoReplyPrefixes 比较；
+// 前缀之后是什么不影响判定。
+func hasAutoReplyPrefix(squeezed string) bool {
+	for _, prefix := range foldedAutoReplyPrefixes {
+		if strings.HasPrefix(squeezed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// foldAll 返回各项只折叠 ASCII 大小写后的副本，供包初始化时预先折叠前缀表。
+func foldAll(values []string) []string {
+	folded := make([]string, len(values))
+	for i, value := range values {
+		folded[i] = lowerASCII(value)
+	}
+	return folded
 }
 
 // encodingOf 记录主题的编码方式：第一个 encoded-word 的字符集与 B/Q，没有 encoded-word 时记为 plain 或 8bit。
@@ -754,14 +994,48 @@ func markersOf(html string) []string {
 	return markers
 }
 
-// autoSignals 读取判断非人工来信所依据的头部信号；Auto-Submitted 与 Precedence 只保留分号前的关键字。
-func autoSignals(h mail.Header) Auto {
+// autoSignals 读取判断非人工来信所依据的信号：Auto-Submitted 与 Precedence 只保留分号前的关键字，
+// SubjectPrefix 记录主题是否以自动回复前缀开头（squeezed 为 subjectText.squeezed）；它只看主题开头，与白名单输出的 prefix 无关。
+func autoSignals(h mail.Header, squeezed string) Auto {
 	return Auto{
 		AutoSubmitted:   keyword(h.Get("Auto-Submitted")),
 		XAutoreply:      h.Get("X-Autoreply") != "" || h.Get("X-Autorespond") != "",
 		Precedence:      keyword(h.Get("Precedence")),
 		ReturnPathEmpty: strings.TrimSpace(h.Get("Return-Path")) == "<>",
+		SubjectPrefix:   hasAutoReplyPrefix(squeezed),
 	}
+}
+
+// returnPathOf 描述 Return-Path 头：个数、第一个取值是否为空信封、第一个地址的角色（规则同 from_role：没有该头或为空信封时
+// 为空串，无法解析时为 other），以及它与 From 地址规范化后是否相同、域名是否相同（不区分大小写）。
+// 任一地址缺失或无法解析时两项对照都为 false；只输出角色与布尔值，地址本身不离开本函数。
+func returnPathOf(h mail.Header, fromAddress string, roles Roles) ReturnPath {
+	path := ReturnPath{Count: h.FieldsByKey("Return-Path").Len()}
+	if path.Count == 0 {
+		return path
+	}
+	if strings.TrimSpace(h.Get("Return-Path")) == "<>" {
+		path.Empty = true
+		return path
+	}
+	address := firstAddress(h, "Return-Path")
+	path.Role = roles.roleOf(address)
+	if address == "" || fromAddress == "" {
+		return path
+	}
+	path.MatchesFrom = normalizeAddress(address) == normalizeAddress(fromAddress)
+	domain := addressDomain(address)
+	path.SameDomainAsFrom = domain != "" && strings.EqualFold(domain, addressDomain(fromAddress))
+	return path
+}
+
+// addressDomain 取地址中最后一个 @ 之后的域名：带引号的本地部分可以含 @，所以按最后一个切分；没有 @ 时返回空串。
+func addressDomain(address string) string {
+	index := strings.LastIndexByte(address, '@')
+	if index < 0 {
+		return ""
+	}
+	return strings.TrimSpace(address[index+1:])
 }
 
 // keyword 取头部取值中分号之前的关键字，再经 safeLabel 约束为标签形状：这两个头同样完全由来信控制，
@@ -771,8 +1045,9 @@ func keyword(value string) string {
 	return safeCharset(value)
 }
 
-// classifyKind 判断来信类别：multipart/report 或来自 MAILER-DAEMON、postmaster 的记为 bounce；
-// 满足任一自动来信信号（含 QQ 假期自动回复的固定开头）记为 auto；其余记为 reply。
+// classifyKind 判断来信类别：multipart/report 或来自 MAILER-DAEMON、postmaster 的记为 bounce（先于其他判定）；
+// 满足任一自动来信信号记为 auto，其中包括与产品规则相同的主题前缀（auto.SubjectPrefix）与 QQ 假期自动回复的固定开头：
+// 第一轮的假期自动回复只有 text/html，后者只查纯文本、对它不起作用，前者补上了这一漏判。其余记为 reply。
 func classifyKind(mediaType, fromAddress string, auto Auto, plain string) string {
 	local, _, _ := strings.Cut(strings.ToLower(fromAddress), "@")
 	if mediaType == "multipart/report" || slices.Contains(daemonLocals, local) {
@@ -783,6 +1058,7 @@ func classifyKind(mediaType, fromAddress string, auto Auto, plain string) string
 		auto.XAutoreply,
 		slices.Contains(precedenceAuto, auto.Precedence),
 		auto.ReturnPathEmpty,
+		auto.SubjectPrefix,
 		strings.HasPrefix(strings.TrimSpace(plain), "这是来自QQ邮箱的假期自动回复邮件"):
 		return "auto"
 	default:
@@ -848,9 +1124,14 @@ func firstAddress(h mail.Header, key string) string {
 	return addresses[0].Address
 }
 
+// normalizeAddress 按 Phase 3 的规则规范化地址：去掉首尾空白并转小写（依据是 QQ 邮箱地址不区分大小写的假设）。
+func normalizeAddress(address string) string {
+	return strings.ToLower(strings.TrimSpace(address))
+}
+
 // roleOf 按规范化（去空白、转小写）后的地址判断角色：bot、recipient、allowed，其余为 other。
 func (r Roles) roleOf(address string) string {
-	normalized := strings.ToLower(strings.TrimSpace(address))
+	normalized := normalizeAddress(address)
 	switch {
 	case normalized == "":
 		return "other"
@@ -894,9 +1175,40 @@ func truncateRunes(text string, n int) string {
 	return string(runes[:n])
 }
 
+// ErrInvalidTag 表示通知的主题标签不是 SubjectTag 输出的形状；错误文本固定，不回显标签（新形态的标签含令牌）。
+var ErrInvalidTag = errors.New("notification subject tag does not have the expected shape")
+
+// SubjectTag 返回主题标签：tokenText 非空时为 D4 的新形态 [TC <任务 ID> <令牌>]（10 位任务 ID 与 48 位令牌时共 64 个字符），
+// 为空时为旧形态 [TC <任务 ID>]，只用于 IDLE 自发邮件（它不写入 state.json）。
+// 新形态的返回值含一次性令牌，调用方只能把它交给 ComposeNotification，不得写入日志、错误文本、样本或 /dev/tty。
+func SubjectTag(taskID, tokenText string) string {
+	if tokenText == "" {
+		return "[TC " + taskID + "]"
+	}
+	return "[TC " + taskID + " " + tokenText + "]"
+}
+
+// SendPrompt 渲染逐封确认的文本：发件账户、收件地址、第几封、主题标签之后的文字与是否抄送机器人自己。
+// 签名里没有标签参数：新形态的标签含一次性令牌，确认文本只注明「主题标签含一次性令牌，不回显」，令牌因此无从进入 /dev/tty。
+func SendPrompt(bot, recipient string, index, total int, title string, ccBot bool) string {
+	return fmt.Sprintf("将用 %s 向 %s 发送第 %d/%d 封合成探测邮件，主题标签之后的文字为「%s」（主题标签含一次性令牌，不回显），抄送机器人自己：%v。",
+		bot, recipient, index, total, title, ccBot)
+}
+
 // ComposeNotification 渲染一封合成探测通知：multipart/alternative、Auto-Submitted: auto-generated、
-// 带探测 ID 头，正文页脚含说明句与单独占一行的一次性令牌。返回的字节可直接交给 smtp.Send。
+// 带探测 ID 头，正文页脚含说明句与单独占一行的一次性令牌（D4：页脚只是给人看的副本）。返回的字节可直接交给 smtp.Send。
+// 主题头的原始取值是 Tag，Title 非空时再接一个空格与 mime.BEncoding.Encode("utf-8", Title)（纯 ASCII 的 Title 原样保留），
+// 不对整个主题调用 SetSubject：标签因此以原始 ASCII 出现在头部、从不进入 encoded-word；「Subject: 」加 64 个字符的新形态标签
+// 共 73 列，go-message 按 76 列折行时只会在标签之后的空格处折行，标签本身不会被折断。
+// Tag 不是 SubjectTag 输出的形状（含 CR/LF、大写、长度不对等）时返回 ErrInvalidTag，不渲染任何字节，也不回显输入。
 func ComposeNotification(n Notification) ([]byte, error) {
+	if !tagShapePattern.MatchString(n.Tag) {
+		return nil, ErrInvalidTag
+	}
+	subject := n.Tag
+	if n.Title != "" {
+		subject += " " + mime.BEncoding.Encode("utf-8", n.Title)
+	}
 	var h mail.Header
 	h.SetContentType("multipart/alternative", nil)
 	h.SetAddressList("From", []*mail.Address{{Address: n.From}})
@@ -904,7 +1216,7 @@ func ComposeNotification(n Notification) ([]byte, error) {
 	if n.CC != "" {
 		h.SetAddressList("Cc", []*mail.Address{{Address: n.CC}})
 	}
-	h.SetSubject(n.Subject)
+	h.Set("Subject", subject)
 	h.SetDate(n.Date)
 	h.Set("Message-Id", n.MessageID)
 	h.Set("Auto-Submitted", "auto-generated")
