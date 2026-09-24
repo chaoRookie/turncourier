@@ -1,10 +1,10 @@
 # HANDOFF
 
-**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）、Phase 4a（邮件闭环的离线实现）与 L1 真机探测已完成，4b 任务契约已起草并经维护者确认（D6–D8，2026-09-24），当前处于 4b 逐任务实施之中（Task 1–4 已实现并审查，Task 5、6 实现中），L1b 待维护者执行。
-**更新于**：2026-09-24 · claude-code（第二个云端会话）
+**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）、Phase 4a（邮件闭环的离线实现）与 L1 真机探测已完成，4b 任务契约已起草并经维护者确认（D6–D8，2026-09-24），当前处于 4b 逐任务实施之中：Task 1–7 已实现并合入工作分支，其中 Task 1、2 已全部完成（含独立复查），Task 3–7 还有审查、修复或复查没做完（见「未完成」）；维护者 2026-09-24 因额度用完暂停了本轮工作。L1b 待维护者执行。
+**更新于**：2026-09-24 · claude-code（第二个云端会话，暂停前）
 **项目目录**：本仓库根目录（含 `go.mod` 的目录）
-**基线 commit**：main `2afc52c`（PR #15 合并：L1b 探测工具、4b 任务契约与 D6–D8 的确认；合并后 main 的 CI 与 Security 成功）。4b 的实现提交在分支 `claude/project-handoff-continuation-wt9hh9` 上逐个推送，尚未开 PR（4b 的 PR 要等 Task 18 与 L1b）。以 `git log --oneline -3` 与 `git status --short` 核对。
-**暂停原因**：没有阻塞项；4b 正按 Task 1–18 推进，每个任务的实施说明与审查记录写在 phase-04.md 对应任务之下。仍等维护者的只有一件事：在本机按「L1b」一节执行真机补采（新主题格式往返复核、别名与 `Return-Path` 样本）；它不阻塞 4b 的实现，但 4b 的 PR 合并之前必须完成。探测工具已为 L1b 改好。
+**基线 commit**：main `2afc52c`（PR #15 合并：L1b 探测工具、4b 任务契约与 D6–D8 的确认；合并后 main 的 CI 与 Security 成功）。4b 的实现提交在分支 `claude/project-handoff-continuation-wt9hh9` 上逐个推送（暂停时为 `8855c62` 之后的交接提交），尚未开 PR（4b 的 PR 要等 Task 18 与 L1b）。以 `git log --oneline -3` 与 `git status --short` 核对。
+**暂停原因**：维护者额度用完，主动暂停；没有技术阻塞。4b 正按 Task 1–18 推进，每个任务的实施说明、审查发现与修正记录写在 phase-04.md 对应任务之下（「尚未进行」的步骤都写明了）。等维护者的有两件事：一是 Task 3–4 审查发现的 B 组（解析规则的七处取舍，须在冻结解析规则之前决定，见 phase-04.md Task 4 之下）；二是在本机按「L1b」一节执行真机补采（新主题格式往返复核、别名与 `Return-Path` 样本）；它不阻塞 4b 的实现，但 4b 的 PR 合并之前必须完成。探测工具已为 L1b 改好。
 
 ## 已完成
 
@@ -36,13 +36,24 @@
 - [x] 2026-09-24（第二个云端会话）：维护者确认 D6–D8，均采用建议方案（含 D8 对 D4 字面的那一处解释：M 超出时推迟发信并告警，不暂停任务）。确认记入 phase-04.md 末尾「已确认事项」第 2 条与 4b 各状态行；design.md、README 中英、architecture.md 与 CHANGELOG 中「等待确认」的说法同步改为已确认。经维护者同意开 PR #15 合并入 main（squash，`2afc52c`），同一 PR 补上 README 树形图漏列的 `tests/docs/imports_test.go`。
 - [x] 4b Task 1（主题标签，`internal/security/token`）：实现、规格与质量审查、修复、独立复查与细节处理全部完成（`1878181`、`1a2b17a`、`567deff`）。审查补出的要点：守卫测试原先跳过以「.」「_」开头的目录与 `testdata`（显式导入时照样编进产品），现在一律扫描；`deps_test.go`、`imports_test.go` 同理改为只跳过根目录下的这类目录；`%w` 与 `%p` 一样会绕过脱敏，写进注释；解析出的任务 ID 不再与主题共用内存。
 - [x] 4a 遗留缺陷修复（`5215fb5`）：服务器在正文字面量中途以 close_notify 正常关闭时，go-imap 把 `io.EOF` 当作字面量结束，`Session.body` 随后调用 `Next` 与解码协程争用读缓冲（数据竞争，负载高时 `make check` 会报）。读到的字节少于声明长度即按连接断开处理；假服务器新增 `faultCloseAfter`。
-- [x] 4b Task 2（存储补充）：实现（`8006f73`）与修复（`25bc695`）已合入；修复的独立复查进行中。修复要点：并入 6 个用例拦下 7 个存活变异；本地人工核对也以进入 UNCERTAIN 的时刻为 `sent_at`；`AbandonedSince`、`SentWithoutDeliveredID` 改为游标分页。审查意见中属于后续任务用法的（Task 5、9、10、11、13）已写入对应契约（`06ca434`、`1bde490`）。
-- [x] 4b Task 3、4（解析器与合成样本、自动回复与退信判定）：实现已合入（`91377e4`、`291abe5`），规格与质量审查进行中。
+- [x] 4b Task 2（存储补充）：实现（`8006f73`）、修复（`25bc695`）与修复复查的细节（`e2a7d77`）都已合入，全部完成。修复要点：并入 6 个用例拦下 7 个存活变异；本地人工核对也以进入 UNCERTAIN 的时刻为 `sent_at`；`AbandonedSince`、`SentWithoutDeliveredID` 改为游标分页。审查意见中属于后续任务用法的（Task 5、9、10、11、13）已写入对应契约（`06ca434`、`1bde490`）。
+- [x] 4b Task 3、4（解析器与合成样本、自动回复与退信判定）：实现已合入（`91377e4`、`291abe5`）；规格审查（修复后合入）与质量审查（可以合入）都已完成，发现记在 phase-04.md Task 4 之下：A 组 8 条直接修，B 组 7 条待维护者决定。修复与独立复查未做。
+- [x] 4b Task 5（渲染器、内容过滤与 `notify.content`）：实现已合入（`360dbfc`），142 个变异中 139 个被拦下、3 个等价；实现中发现并修复一处私钥正文可能漏过过滤的顺序问题（PEM 规则提前到围栏之后）。规格与质量审查、独立复查都未做。
+- [x] 4b Task 6（IMAP 扩展）：实现（`5003bd9`）、规格与质量审查、修复（`2e732d2`）都已合入。修复的要点是质量审查的一处主要问题：「已发送」中列出却取不到头部的副本原先被越过、随后仍算作一次完整补扫，会凭空产生 D6 的缺失证据，现在按本轮失败处理。修复的独立复查未做。审查中属于后续任务的约束已写入 Task 10、13、16 的契约与「风险与后续」（`8f22c01`）。另更正了 `5215fb5` 提交说明中「每次都报告竞争」的说法（实测不稳定，已由纯函数测试 `TestReadLiteral` 确定地钉住）。
+- [x] 4b Task 7（QQ 行为模拟器 `tests/qqsim`）：实现已合入（`ca9d412`），29 个变异全部被拦下；规格与质量审查在暂停时仍在进行，结果见下方「未完成」。
 
 ## 未完成
 
 - [ ] **L1b（维护者本机执行）**：按 phase-04.md「L1b」一节的规程，新建 0700 输出目录，发 1 封新格式通知，用 QQ 邮箱 App 与网页版各回复一次（有别名的再用别名回复一次，可选 Foxmail/Apple Mail/Gmail），运行 `TestL1Replies`，把结论写进新增的「L1b 结果」一节。另有两个可选步骤：向同域不存在的地址发一封以核实 D7 的前提；再开一次假期自动回复看它的回复频率。L1b 是 4b Task 1 冻结主题解析器的门槛，4b 的 PR 合并之前必须完成。
-- [ ] **4b 实现（进行中）**：Task 2 修复的独立复查、Task 3–4 的审查与修复、Task 5（渲染器）与 Task 6（IMAP 扩展）的实现正在进行；其后是 Task 7（QQ 模拟器）、8–13（`internal/app`）、14–18。做法：每个任务由子代理在 `.local/worktrees/` 下的独立 worktree 中实现（先写失败的测试），再由规格与质量两名审查子代理复核（含变异测试），修复后独立复查；主会话按顺序把提交 cherry-pick 到本分支，合入后跑一次 `make check` 再推送。阶段末整阶段审查后开 PR；合并后维护者执行 L2 验收。
+- [ ] **4b 实现（暂停中）**：恢复时按这个顺序处理已有的积压，再往下推进——
+  1. Task 7 的规格与质量审查（结果若没有写进 phase-04.md Task 7 之下，就重新审查）→ 修复 → 独立复查。
+  2. Task 3–4 的 A 组修复（phase-04.md Task 4 之下「审查发现」，质量审查的测试草稿条目已抄在那里）→ 独立复查；B 组先请维护者逐条决定，定了再改。
+  3. Task 5 的规格与质量审查 → 修复 → 独立复查（核对 Task 3 审查要求的页脚整句断言）。
+  4. Task 6 修复（`2e732d2`）的独立复查。
+  5. Task 8（单实例锁与密钥读取，新建 `internal/app`）：`secrets.go` 导入存储，所以产品代码不能导入 `internal/mail/renderer`（`tests/docs/imports_test.go` 此时仍禁止同时导入邮件与存储，Task 9 才放开）；`*Secrets` 以方法集满足 `renderer.Scrubber`，编译期断言与「放进 `renderer.Options` 后打印」的测试写在 `_test.go` 里。
+  6. 之后 Task 9–13（`internal/app`，基本是串行依赖：9 用 8 的密钥，11 用 5、7、8，13 装配全部）、14–18。
+
+  做法：每个任务由子代理在 `.local/worktrees/` 下的独立 worktree 中实现（先写失败的测试），再由规格与质量两名审查子代理复核（含变异测试），修复后独立复查；主会话按顺序把提交 cherry-pick 到本分支，合入后跑一次 `make check` 再推送。阶段末整阶段审查后开 PR；合并后维护者执行 L2 验收。
 - [ ] macOS 断电持久性（`fullfsync`）留到安全与恢复阶段评估。
 - [ ] 关注 actions/setup-go 补丁版本：7.0.0 打包的 undici、brace-expansion 有已公开安全公告（旧版同样受影响，本仓库输入不触及），上游已修复未发版；Dependabot 提出后按同样流程评审。
 - [ ] Codex、Claude 适配器与后台服务属于后续阶段。真实邮箱各十轮验收之前不打 `v0.1.0-alpha`。
@@ -85,6 +96,7 @@ git diff --check
   - 探测工具的修改与审查修复之后：`make check` 通过（覆盖率 93.38%）、`make secrets`、`go vet -tags live ./tests/live/`、两个平台的 vet 通过；变异测试 57 个全部被杀死；没有运行任何真机探测，没有登录邮箱、没有发信，也没有读写钥匙串。
   - 探测工具第二轮修复之后：`make check` 通过（覆盖率 93.39%）、`go test -cover ./tests/live/`（92.4%）、`make secrets`、`go vet -tags live ./tests/live/`、两个平台的 vet 通过；本轮 18 个变异全部被杀死；三个探测文件中没有不可见字符。
   - 远端：本分支没有开 PR，推送不会自动触发 CI，改为手动触发。`80a8627` 上 CI（run 35957494468）与 Security（run 35957496330）成功；最后一次改动代码的提交 `c5bcd3d` 之后，在 `e0f5d3f` 上再次触发 CI（run 35959190404：`quality (ubuntu-24.04)`、`quality (macos-15)`，含 CLI 冒烟与 actionlint）与 Security（run 35959192725：gitleaks 与 govulncheck），均成功。这补上了云端无法运行的 macOS 测试与 govulncheck。之后的提交只改文档。
+- 2026-09-24 云端（第二个云端会话，分支 `claude/project-handoff-continuation-wt9hh9`）：每个任务的提交拣选到分支后都在合并后的代码上跑一次 `make check` 再推送，全部通过，总覆盖率依次为：Task 6 合入后 94.26%、Task 7 合入后 94.65%、Task 6 修复合入后 94.61%、Task 5 合入后 94.90%（4462/4702）；每次推送前 `make secrets` 无泄漏。各任务另跑的 `-race` 重复、两个平台的 vet、模糊测试与变异测试记在 phase-04.md 对应任务之下。**govulncheck 未运行**（云端网络策略拒绝 vuln.go.dev），本分支也还没有在远端触发 CI 与 Security。
 - 2026-09-17 本地：`make check` 通过（覆盖率 97.35%，294/302）；`make security`、`make workflows`、`make build` 通过；`GOOS=linux/windows go vet ./...` 通过；冒烟退出码符合契约。
 - Actions 固定 SHA 经 GitHub API 核对：公开时为 checkout v5.1.0、setup-go v6.5.0、upload-artifact v4.6.2；2026-09-18 升级为 checkout v7.0.1、setup-go v7.0.0、upload-artifact v7.0.1。
 - 2026-09-17 远端：首次推送的 CI（`quality (ubuntu-24.04)`、`quality (macos-15)`）与 Security（`security`）成功；私密漏洞报告 `enabled: true`；GitHub 识别许可证 Apache-2.0。
@@ -96,7 +108,7 @@ git diff --check
 ## 关键文件
 
 - `docs/zh-CN/design.md` — 产品范围、开发顺序、安全和持久化边界。
-- `docs/zh-CN/plans/phase-04.md` — Phase 4：D1–D5、4a 契约与验证、L1 结果、L1b、4b 任务契约（D6–D8 待确认）。
+- `docs/zh-CN/plans/phase-04.md` — Phase 4：D1–D5、4a 契约与验证、L1 结果、L1b、4b 任务契约（D6–D8 已确认）与各任务的实施说明、审查发现和修正记录。
 - `docs/zh-CN/plans/phase-03.md` — Phase 3 清单、已确认决策（D1、D2）、审查后修正与验证记录。
 - `docs/zh-CN/development.md` — 工具链、make 目标、依赖政策、测试约定、真机探测。
 - `docs/en/architecture.md` — 包依赖方向、持久化与恢复语义、已知局限。
@@ -131,4 +143,7 @@ git diff --check
 - **cherry-pick 与 rebase 也要带单次身份**：`git -c user.name=chaoRookie -c user.email=179816769+chaoRookie@users.noreply.github.com cherry-pick …`，否则提交者会变成容器默认的身份（`1878181`、`8006f73` 两个提交就是这样，已推送，未改写）。
 - **结束一轮对话前工作区必须干净且已推送**（云端环境的停止钩子会检查）：子代理不要在主目录里改文件，主会话的改动先提交再结束。
 - **go-imap 的字面量读取器把中途的 `io.EOF` 当作字面量结束**：凡是「部分读取字面量、再由 `Next` 丢弃其余部分」的写法，都要先确认读到的字节数达到声明长度（或上限），否则与解码协程争用读缓冲；Task 6 的 `ScanHeaders` 同样适用。
+- **worktree 里的分支只在本地**：云端容器被回收时，`.local/worktrees/` 与其中的 `task/*`、`fix/*` 分支一起消失。子代理的提交要拣选到工作分支并推送之后才算保住；审查报告与测试草稿放在会话的临时目录里，也会随会话结束消失，所以暂停前要把结论写进 phase-04.md（本次已这样做）。
+- **云端的停止钩子会提示「Unverified」**：它要求提交者邮箱为 `noreply@anthropic.com` 并建议改写提交。本仓库的约定是上面那个单次身份（维护者选定），所以没有照做，GitHub 上显示 Unverified 是预期的。若维护者改变主意，只改以后的提交，不改写已推送的历史。
+- **`tests/qqsim` 的 `Deliver` 有一处限制**：imapmemserver 取回邮件时会重新解析头部，头部无法解析的字节经 IMAP 取回是空的。需要投递畸形头部的测试（例如 Task 9 的畸形来信）直接构造 `imap.Batch`。
 - 在 Go 源码里写 `"\u200b"`、`"\ufffd"` 这类转义时，编辑工具可能把它们直接写成不可见字符的原文（本次有 4 行测试源码如此，提交前扫描发现并改回转义）。改动含这类转义的文件后，提交前扫一遍 Unicode 类别为 Cf、Co、Cs 的字符与 U+FFFD。
