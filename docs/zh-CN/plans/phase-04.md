@@ -2580,7 +2580,7 @@ internal/
 │   └── subject_test.go
 ├── mail/
 │   ├── gateway.go                   # 邮件契约：页脚标记行、页脚固定句子与 X-TurnCourier-ID 头名（只有常量）
-│   ├── imap/                        # 修改：FolderSent、ScanHeaders、Watcher 的「已发送」补扫、Wake、ErrDefer、Scanned、SkipHistory
+│   ├── imap/                        # 修改：FolderSent、ScanHeaders、Watcher 的「已发送」补扫、Wake、ErrDefer、Scanned、SkipHistory、Now
 │   ├── parser/
 │   │   ├── parser.go                # MIME 解析：头部解码、线程头、纯文本部件、大小与深度上限；Message 的脱敏输出
 │   │   ├── charset.go               # GBK 系列标签映射到 GB18030
@@ -2751,7 +2751,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 - **残留检查：** 剥离之后的新正文中出现令牌形状的串、`[TC`、我方页脚的标记行或页脚的固定句子（「已定的实现细节」中的「引用与签名剥离」），返回 `ErrUncertain`。页脚标记行、页脚固定句子与自定义头名定义在 `internal/mail/gateway.go`（设计目录中的「邮件契约」，包 `mail`，只有常量），解析器、渲染器与 `internal/app` 共用，不在各包重复定义。
 - 解析器输出必须确定：同一输入字节永远得到同一新正文（键控摘要依赖它）。
 
-**合成回归样本（`tests/fixtures/mail/`）：** 每个样本是一份**模板**加一份期望结果（新正文，或期望的错误名）。模板保存头部与各部件解码后的文字，并声明每个部件的字符集与传输编码；测试加载时先把占位符 `{{TASK}}`、`{{TOKEN}}`、`{{DELIVERED}}` 换成运行时签发的值，再按声明的编码（例如 utf-8/base64、gbk/base64）组装为原始字节——直接存 base64 的 `.eml` 无法替换占位符，而把令牌写进文件又违反密钥扫描的约定。样本全部合成，地址用 `example.invalid`。按 L1 实测结构合成的有：QQ 邮箱 App 回复（`multipart/alternative`，两部分均 utf-8/base64，纯文本带「原始邮件」分隔线与引用头块，HTML 用 QQ 自有标记、不用 blockquote，页脚令牌行在引用中且没有引用前缀，引用头块的「主题:」行也带着标签与令牌）、QQ 邮箱网页版回复（完全没有引用）、QQ 假期自动回复（只有 `text/html`，主题 `自动回复: `，只有 `In-Reply-To`，没有四项头部信号）、退信（`multipart/report`，子部件 `text/html` 与 `application/octet-stream`，`Auto-Submitted: auto-generated`，发件人含大写字母，线程头指向实际投递 ID）。按公开资料合成、待 L1b 或以后真机样本核实的有：Foxmail 式头块（没有 `In-Reply-To`）、Apple Mail 的「写道：」加 `>` 引用、Gmail 的 `wrote:` 加 `gmail_quote`、标注 gbk 而含 GB18030 四字节字符的回复、带 `-- ` 签名与「发自我的iPhone」的回复、只有 HTML 的真人回复（`ErrNoPlainText`）、引用没有分隔线而带我方页脚的回复（`ErrUncertain`）、行内逐段回复（带「wrote:」引用头与不带引用头的各一份，都是 `ErrUncertain`）、用户自己用 `>` 标出命令而没有引用我方通知的回复（`ErrUncertain`）、正文里写着「日志里写道：」但其后不是引用的回复（整段保留）。每个样本的来源（L1 实测结构 / 公开资料推断）写在 `tests/fixtures/mail/README.md`。
+**合成回归样本（`tests/fixtures/mail/`）：** 每个样本是一份**模板**加一份期望结果（新正文，或期望的错误名）。模板保存头部与各部件解码后的文字，并声明每个部件的字符集与传输编码；测试加载时先把占位符 `{{TASK}}`、`{{TOKEN}}`、`{{DELIVERED}}` 换成运行时签发的值，再按声明的编码（例如 utf-8/base64、gbk/base64）组装为原始字节——直接存 base64 的 `.eml` 无法替换占位符，而把令牌写进文件又违反密钥扫描的约定。样本全部合成，地址用 `example.invalid`。按 L1 实测结构合成的有：QQ 邮箱 App 回复（`multipart/alternative`，两部分均 utf-8/base64，纯文本带「原始邮件」分隔线与引用头块，HTML 用 QQ 自有标记、不用 blockquote，页脚令牌行在引用中且没有引用前缀，引用头块的「主题:」行也带着标签与令牌）、QQ 邮箱网页版回复（完全没有引用）、QQ 假期自动回复（只有 `text/html`，主题 `自动回复: `，只有 `In-Reply-To`，没有四项头部信号）、退信（`multipart/report`，子部件 `text/html` 与 `application/octet-stream`，`Auto-Submitted: auto-generated`，发件人含大写字母，线程头指向实际投递 ID）。按公开资料合成、待 L1b 或以后真机样本核实的有：Foxmail 式头块（没有 `In-Reply-To`）、Apple Mail 的「写道：」加 `>` 引用、Gmail 的 `wrote:` 加 `gmail_quote`、标注 gbk 而含 GB18030 四字节字符的回复、带 `-- ` 签名与「发自我的iPhone」的回复、只有 HTML 的真人回复（`ErrNoPlainText`）、引用没有分隔线而带我方页脚的回复（`ErrUncertain`）、行内逐段回复（带「wrote:」引用头与不带引用头的各一份，都是 `ErrUncertain`；不带引用头的那份，`>` 块中含我方页脚的标记行、块后是用户的作答，这样判为不确定的是行内回复检查，而不是「没有页脚标记」那一条，去掉规则 4 的行内检查的变异才会被拦下）、用户自己用 `>` 标出命令而没有引用我方通知的回复（`ErrUncertain`）、正文里写着「日志里写道：」但其后不是引用的回复（整段保留）。每个样本的来源（L1 实测结构 / 公开资料推断）写在 `tests/fixtures/mail/README.md`。
 
 **测试（先写并确认失败）：** 逐个样本比对期望结果；头部解析的边界（多个 `From`、缺失 `Message-Id`、`In-Reply-To` 含多个 ID、encoded-word 主题标注 gbk）；上述五类引用边界各自的正反用例（包括单独一行 `From:`、后面不是引用的「写道：」都不被当作边界，不含页脚标记与 `[TC` 的 `>` 行返回 `ErrUncertain`）；签名剥离（`-- ` 与靠近末尾的 `--`、远离末尾的 `--` 不算）；残留检查的四种触发；非法 UTF-8 的正文；`Message` 的 `%v`、`%+v` 与 `slog` 输出不含主题；上限（深度、部件数、1 MiB）；确定性（同一输入重复解析结果相同）；模糊测试（任意字节不 panic、`NewText` 的结果不超过 1 MiB 且是合法 UTF-8）；错误文本不含来信字节。
 
