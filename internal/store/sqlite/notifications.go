@@ -564,20 +564,23 @@ func (s *Store) CountNotificationsSince(ctx context.Context, since time.Time) (i
 
 // AbandonedSince 返回原因为 expired 或 task_closed、位于游标 (since, afterID) 之后的 ABANDONED 通知——updated_at 晚于 since，或恰为
 // since（按毫秒）且 id 大于 afterID——按 (updated_at, id) 升序，至多 100 条；发送循环据此在本地提示「令牌将过期而放弃」与「任务已关闭
-// 而放弃」（4a「风险与后续」要求 4b 在本地提示）。调用方记住上一次返回的最后一行的 (updated_at, id) 作为下一次的游标，返回满 100 条时
+// 而放弃」（4a「风险与后续」要求 4b 在本地提示）。同一轮内以上一页最后一行的 (updated_at, id) 作为下一页的游标，返回满 100 条时
 // 接着取，直到不足 100 条：同一毫秒放弃的通知多于 100 条时（例如关闭一个积压很多通知的任务）也因此不重不漏，而只以时刻作游标，
-// 要么重复返回那一毫秒，要么漏掉其中第 100 条之后的。游标的前提是通知按 (updated_at, id) 的先后被放弃：放弃都以当前时间写 updated_at，
-// ABANDONED 是终态，之后 updated_at 不再改变；时钟回拨，或同一毫秒内读取之后才放弃一条 id 更小的通知时，它落在游标之前，不会返回。
+// 要么重复返回那一毫秒，要么漏掉其中第 100 条之后的。跨轮不要直接以上一轮最后一行作游标：同一毫秒内读取之后才放弃的、id 更小的通知
+// 会落在它之前；下一轮应从上一轮最后一行那一毫秒的 id 0 起重读，按已提示过的通知 ID 去重（4b Task 11）。游标的前提是通知按
+// updated_at 的先后被放弃：放弃都以当前时间写 updated_at，ABANDONED 是终态，之后 updated_at 不再改变；时钟回拨期间放弃的通知落在
+// 游标之前，不会返回。
 func (s *Store) AbandonedSince(ctx context.Context, since time.Time, afterID int64) ([]Notification, error) {
 	at := since.UnixMilli()
 	return s.listNotifications(ctx, abandonedSince, string(queue.OutboxAbandoned), abandonExpired, abandonTaskClosed, at, at, afterID, maxNotificationList)
 }
 
 // SentWithoutDeliveredID 返回 sent_at 早于 sentBefore（按毫秒，恰在 sentBefore 的不返回）、仍没有实际投递 ID、id 大于 afterID 的 SENT
-// 通知，按 id 升序，至多 100 条；供「「已发送」中找不到通知副本」告警（4b Task 10）。调用方记住已报告的最大 id 作为下一次的 afterID
-// （第一次为 0），返回满 100 条时以本页最后一行的 id 接着取：关闭「保存到已发送」后这类通知只增不减，不带游标时一次只能取到最旧的
-// 100 条，此后的通知永远不会被报告。以最大 id 为游标的前提是通知按 id 的先后越过 sentBefore：id 较小的通知因重新排队而较晚发出、
-// 在 id 较大的通知被报告之后才越过 sentBefore 时，它落在游标之前，不会返回。
+// 通知，按 id 升序，至多 100 条；供「「已发送」中找不到通知副本」告警（4b Task 10）。afterID 只用于同一轮内逐页取完：第一页为 0，
+// 返回满 100 条时以本页最后一行的 id 接着取——关闭「保存到已发送」后这类通知只增不减，不带游标时一次只能取到最旧的 100 条。
+// 跨轮不要以已报告的最大 id 作游标，而应每轮从 0 起重读、按已报告的通知 ID 去重：通知越过 sentBefore 的先后与 id 的先后不一致——
+// id 较小的通知可能因重新排队而较晚发出，也可能在较晚时才被本地核对为已送达（sent_at 回溯到进入 UNCERTAIN 的时刻）——
+// 以最大 id 作游标时，这样的通知永远不会被报告。
 func (s *Store) SentWithoutDeliveredID(ctx context.Context, sentBefore time.Time, afterID int64) ([]Notification, error) {
 	return s.listNotifications(ctx, sentWithoutDelivered, string(queue.OutboxSent), sentBefore.UnixMilli(), afterID, maxNotificationList)
 }

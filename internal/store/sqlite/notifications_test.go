@@ -714,9 +714,13 @@ func TestNotificationOutcomes(t *testing.T) {
 	requireNotification(t, store, pending.ID, queue.OutboxPending, "", 1)
 
 	mustClaimNotification(t, store)
-	if _, err := store.ResolveUncertainNotification(ctx, pending.ID, false); !errors.Is(err, queue.ErrInvalidOutboxTransition) {
-		t.Errorf("SENDING 上的 ResolveUncertainNotification: err = %v; want queue.ErrInvalidOutboxTransition", err)
+	// 两个方向的本地核对都只接受 UNCERTAIN：核对为已送达也不能把 SENDING 的通知改为 SENT、删掉它的正文。
+	for _, delivered := range []bool{true, false} {
+		if _, err := store.ResolveUncertainNotification(ctx, pending.ID, delivered); !errors.Is(err, queue.ErrInvalidOutboxTransition) {
+			t.Errorf("SENDING 上的 ResolveUncertainNotification(%t): err = %v; want queue.ErrInvalidOutboxTransition", delivered, err)
+		}
 	}
+	requireNotification(t, store, pending.ID, queue.OutboxSending, "", 1)
 	uncertain := must(t, "MarkNotificationUncertain")(store.MarkNotificationUncertain(ctx, pending.ID))
 	if uncertain.State != queue.OutboxUncertain || !uncertain.SentAt.IsZero() {
 		t.Errorf("MarkNotificationUncertain = %+v; want UNCERTAIN", uncertain)
@@ -1997,16 +2001,17 @@ func TestAbandonedSince(t *testing.T) {
 		}
 	}
 
-	t.Run("逐页取完 250 条", func(t *testing.T) {
+	t.Run("逐页取完 258 条", func(t *testing.T) {
 		store, _, running := newNotificationStore(t)
 		// row 是一条应返回的通知：放弃时刻与 id。
 		type row struct{ updatedAt, id int64 }
 		var want []row
 		for n := 1; n <= 300; n++ {
-			// 放弃时刻分散在 60 个毫秒中，每一毫秒 5 条，先后与 id 的先后不同；每 6 条中有 1 条原因为 rejected，不返回。
+			// 放弃时刻分散在 60 个毫秒中，每一毫秒 5 条，先后与 id 的先后不同；每 7 条中有 1 条原因为 rejected，不返回。
+			// 7 与 60 互素，被排除的行散布在各个毫秒中，两个分页边界因此都落在某一毫秒的中间，跨页续取会走「同一毫秒、id 更大」的分支。
 			updatedAt, reason := at+int64(n*37%60), "expired"
 			switch {
-			case n%6 == 0:
+			case n%7 == 0:
 				reason = "rejected"
 			case n%2 == 0:
 				reason = "task_closed"
@@ -2021,8 +2026,8 @@ func TestAbandonedSince(t *testing.T) {
 		for _, r := range want {
 			wantIDs = append(wantIDs, r.id)
 		}
-		if sizes, got := drainAbandoned(t, store, time.Time{}, 0); !slices.Equal(sizes, []int{100, 100, 50}) || !slices.Equal(got, wantIDs) {
-			t.Errorf("各页条数 %v，id %v; want [100 100 50]，按 (updated_at, id) 排列的 %v", sizes, got, wantIDs)
+		if sizes, got := drainAbandoned(t, store, time.Time{}, 0); !slices.Equal(sizes, []int{100, 100, 58}) || !slices.Equal(got, wantIDs) {
+			t.Errorf("各页条数 %v，id %v; want [100 100 58]，按 (updated_at, id) 排列的 %v", sizes, got, wantIDs)
 		}
 	})
 
