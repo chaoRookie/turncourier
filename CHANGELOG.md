@@ -69,6 +69,7 @@ Phase 4 is split into 4a (offline), L1 (a manual probe the maintainer runs again
 - `tests/docs`: checks the dependency tables in `docs/en/architecture.md` and `docs/zh-CN/development.md` against `go.mod` and the actual imports.
 - `tests/live`: the L1 probes, run only by the maintainer. They need the `live` build tag, `TURNCOURIER_LIVE=1` and interactive confirmations, refuse to run when `CI` is set, and write only redacted structural samples to a directory outside the repository. `make vet` and `make lint` compile-check them; nothing runs them.
 - Dependencies `golang.org/x/term` v0.46.0, `github.com/emersion/go-smtp` v0.25.0, `github.com/emersion/go-imap/v2` v2.0.0-beta.8, `github.com/emersion/go-message` v0.18.2, `github.com/emersion/go-sasl` and `golang.org/x/text` v0.42.0, with `golang.org/x/sys` raised to v0.48.0.
+- `internal/security/token` (4b Task 1): the subject tag `[TC <task ID> <token>]` (`Tag`, `NewTag`, `ParseSubject`) with the strict grammar frozen in D4. A subject is accepted only with exactly one tag; no tag, several tags and a damaged tag each get their own error, and nothing is repaired. Tags redact themselves like tokens. `tests/docs/reveal_test.go` allows product code to reference `Reveal` and `RevealToken` only in the token package and the renderer.
 
 ### Changed
 
@@ -83,11 +84,11 @@ Phase 4 is split into 4a (offline), L1 (a manual probe the maintainer runs again
 - `tests/live` (L1b): the probe notifications carry their one-shot token in the subject tag `[TC <task ID> <token>]`, the format frozen after L1, with a copy in the footer; the tag stays raw ASCII at the start of the `Subject` header so folding never splits it. Samples record the tag's state (intact, missing, several tags, case or whitespace changed, truncated, rewritten), `Return-Path` as roles and booleans, and auto-reply subject prefixes with either colon width; when the server rejects a probe mail, the probe still checks whether a copy reached the Sent folder, and every copy record says whether the scan completed, so a failed scan is not read as a missing copy. The per-message confirmation no longer echoes the tag. The sample schema is `turncourier-l1/4`.
 - The Phase 4 plan records the L1 results and drafts the 4b task contracts; the maintainer confirmed their new decisions D6–D8.
 
-### Security
 ### Fixed
 
 - `internal/mail/imap`: when the server closed the connection cleanly in the middle of a body literal, go-imap reported the literal as complete, and `Scan` then discarded the rest of it while the library's decoder was reading the same buffer. That was a data race. A body shorter than its declared length is now treated as a dropped connection. `make check` hit the race under load; a new fault in the fake server reproduces it every time under `-race`.
 
+### Security
 
 - The Keychain threat model is documented in `docs/zh-CN/design.md`, `SECURITY.md` and the output of `init`: entries written with `/usr/bin/security` can be read silently by any process of the same user, including a shell command an Agent runs; in L1 this was measured, not assumed, for the shells of both Claude Code and Codex. Such a process can sign a valid token, forge a reply that passes the sender, thread, subject and token checks, inject content into any task and rewrite the local queue. TurnCourier does not defend against processes of the same user. The Keychain protects against plaintext in the configuration file, the repository, logs and backups; against other system users; and against offline disk access without the login password. Use a dedicated bot mailbox, and disable the authorization code in QQ Mail if it may have leaked.
 - Pending bodies are the only content on disk, and only as ciphertext. `secure_delete` is `ON` rather than `FAST`, and a TRUNCATE checkpoint follows a cleanup, so neither the database file nor the WAL keeps a copy. Ciphertext in an APFS snapshot or a Time Machine backup is outside what SQLite can reach and stays decryptable while the key is in the Keychain. Restoring the data directory from an old backup can resend a notification that was already sent and re-dispatch a reply that was already acknowledged.

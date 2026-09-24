@@ -12,12 +12,15 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"unicode"
+	"unsafe"
 )
 
 // tagMarker 是规格规定的标签脱敏文本，直接写出以钉住输出，不引用被测包的常量。
 const tagMarker = "[redacted subject tag]"
 
-// tagHolder 含导出的标签字段，用来确认 fmt 与 slog 格式化嵌套字段时同样调用标签的格式化方法。
+// tagHolder 含导出的标签字段：fmt 以 %v、%+v 等动词格式化嵌套字段时同样调用标签的格式化方法（slog 的文本处理器也走这条路）；
+// slog 的 JSON 处理器对它走 encoding/json，标签没有导出字段，编码为 {}，同样不含明文。
 type tagHolder struct {
 	T Tag
 }
@@ -148,7 +151,13 @@ func subjectCases(tb testing.TB) []subjectCase {
 		{name: "kid 为 0", subject: build("[TC ", idA, " ", rawText(0x01, 0x00)), err: ErrMalformed},
 	}
 	for _, c := range []string{"i", "l", "o", "u"} {
-		cases = append(cases, subjectCase{name: "令牌含 " + c, subject: build("[TC ", idA, " ", withChar(textA, 9, c)), err: ErrTagDamaged})
+		cases = append(cases,
+			subjectCase{name: "令牌含 " + c, subject: build("[TC ", idA, " ", withChar(textA, 9, c)), err: ErrTagDamaged},
+			subjectCase{name: "任务 ID 含 " + c, subject: build("[TC ", withChar(idA, 9, c), " ", textA), err: ErrTagDamaged})
+	}
+	// 开尔文符号与长 s 经 Unicode 大小写折叠分别对应 k 与 s；文法只接受 ASCII 的字母表字符，它们都不算命中。
+	for _, c := range []string{"\u212a", "\u017f"} {
+		cases = append(cases, subjectCase{name: "任务 ID 含非 ASCII 的 " + c, subject: build("[TC ", withChar(idA, 9, c), " ", textA), err: ErrTagDamaged})
 	}
 	return cases
 }
@@ -373,6 +382,17 @@ func TestTagRedaction(t *testing.T) {
 			clean(fmt.Sprintf("%s of %T", verb, v), out)
 		}
 	}
+	// 除 %T、%p 与 %w 之外，每个字母动词作用于值与指针都恰好得到脱敏文本；这三个动词由 fmt 先于 Format 处理，见 Tag 的说明。
+	for v := 'A'; v <= 'z'; v++ {
+		if !unicode.IsLetter(v) || strings.ContainsRune("Tpw", v) {
+			continue
+		}
+		for _, arg := range []any{tag, &tag} {
+			if out := fmt.Sprintf("%"+string(v), arg); out != tagMarker {
+				t.Errorf("%%%c of %T is not the redaction marker", v, arg)
+			}
+		}
+	}
 	for _, v := range []any{&tag, []Tag{tag}, map[string]Tag{"t": tag}, &tagHolder{T: tag}, &embedded} {
 		if out := fmt.Sprintf("%p", v); !strings.HasPrefix(out, "0x") || strings.ContainsAny(out, "{[ ") {
 			t.Errorf("%%p of %T = %q, want an address", v, out)
@@ -402,6 +422,22 @@ func TestTagRedaction(t *testing.T) {
 		if v.Kind() != slog.KindString || v.String() != tagMarker {
 			t.Errorf("LogValue resolves to kind %v, want the redaction marker", v.Kind())
 		}
+	}
+}
+
+// TestParseSubjectCopiesTaskID 确认 ParseSubject 返回的任务 ID 不与传入的主题共用底层内存：若是子串，标签活多久，
+// 整条解码后的主题（含令牌明文与用户写的标题）就会被它多留多久，与 D4「主题不进长生命周期变量」的要求相悖。
+func TestParseSubjectCopiesTaskID(t *testing.T) {
+	tag := issueTag(t, "0123456789", 1, 0x33)
+	subject := "Re: " + tag.Reveal() + " 标题"
+	got, err := ParseSubject(subject)
+	if err != nil {
+		t.Fatalf("ParseSubject: %v", err)
+	}
+	start := uintptr(unsafe.Pointer(unsafe.StringData(subject)))
+	id := uintptr(unsafe.Pointer(unsafe.StringData(got.TaskID())))
+	if id >= start && id < start+uintptr(len(subject)) {
+		t.Error("the parsed task id shares memory with the subject")
 	}
 }
 

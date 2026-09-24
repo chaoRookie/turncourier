@@ -2665,10 +2665,26 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 - 金丝雀：`fmt` 的全部常用动词、`%+v` 嵌入结构体（导出字段）、`slog` 的 JSON 处理器都不输出任务 ID 之外的标签内容与令牌文本；三个错误的文本不含输入。
 - 变异测试：去掉「恰好一次」改为取第一个、文法改为不区分大小写、`[TC` 的查找改为区分大小写，都应被用例拦下。
 
-- [ ] **Step 1：** 写 `subject_test.go` 与 `reveal_test.go`，运行确认 `subject_test.go` 失败（`Tag` 等标识符未定义）。
-- [ ] **Step 2：** 实现 `subject.go`，更新 `Reveal` 注释。
-- [ ] **Step 3：** `go test -count=1 ./internal/security/token/ ./tests/docs/`、`make check`、`make secrets` 通过；变异测试逐条记录。
-- [ ] **Step 4：** `git commit -m "feat(token): subject tag type and anchored subject parsing"`
+- [x] **Step 1：** 写 `subject_test.go` 与 `reveal_test.go`，运行确认 `subject_test.go` 失败（`Tag` 等标识符未定义）。
+- [x] **Step 2：** 实现 `subject.go`，更新 `Reveal` 注释。
+- [x] **Step 3：** `go test -count=1 ./internal/security/token/ ./tests/docs/`、`make check`、`make secrets` 通过；变异测试逐条记录。
+- [x] **Step 4：** `git commit -m "feat(token): subject tag type and anchored subject parsing"`
+
+**实施说明（2026-09-24）：** 由独立子代理按上述契约实现。先写测试，失败基线为编译失败：`Tag`、`NewTag`、`ParseSubject`、`ErrInvalidTag`、`ErrTagMissing`、`ErrTagDamaged`、`ErrTagMultiple` 未定义。`reveal_test.go` 是守卫测试，写下时即通过；临时在 `internal/cli/cli.go`（一处调用、一处方法值）、只在 darwin 编译的 `terminal_darwin.go` 与 `cmd/turncourier/main.go` 中引入违规，四处都被报出，恢复后 SHA-256 不变。
+
+- **新增用例：** `TestParseSubjectGrammar`（文法表 56 行：字面 52 行，另由 i、l、o、u 生成 4 行；拒绝时同时断言零值标签与哨兵的固定文本）、`TestParseSubjectRoundTrip`、`TestTagReveal`、`TestNewTagRejects`（12 种任务 ID、零值令牌、kid 为 0，并钉住 kid 255、`Parse` 得到的令牌与字母表两端的字符）、`TestTagZeroValue`、`TestTagRedaction`、`TestSubjectErrorsFixed`、`FuzzParseSubject`（以文法表为种子，与不用正则的逐字节参考实现做差分）；`tests/docs/reveal_test.go` 的 `TestRevealReferences` 与 `TestRevealSelectorsDetector`。
+- **变异测试：** 52 个。契约列出的三个都被拦下；另 49 个涉及计数与判定、错误出口、文法各部分、`[TC` 的查找、`NewTag` 与 `validTaskID` 的各边界、`Reveal` 与 `RevealToken`、四个脱敏出口。「不检查 C」「不检查 T」「`LogValue` 用指针接收者」起初存活，补用例后被拦下；「删除 `Format`」「`Format` 用指针接收者」在普通 `go test` 中由 vet 的 printf 检查拦下。「命中计数改为重叠计数」与「`[TC` 的查找改用 `strings.ToLower`」是等价变异：标签以 `[` 开头、其后 63 个字符都不是 `[`，两个命中不可能重叠；穷举全部码点，没有非 ASCII 字符经 Unicode 折叠变成 `t`、`c` 或 `[`。
+- **按字面解释或补充的地方：** ① 恰好一个严格命中时，主题中其余的 `[TC` 残片、令牌为大写的第二个标签都不影响接受；两个命中中有一个版本字节不对，按 `ErrTagMultiple` 拒绝（先计数、后解析）。② `[` 与 `TC` 之间有空格时主题中没有 `[TC`，记为 `ErrTagMissing`；旧形态 `[TC <任务 ID>]` 记为 `ErrTagDamaged`，与 L1b 探测工具的归类一致。③ `ParseSubject` 只检查格式，不验证 MAC；令牌解析失败时返回 `ErrMalformed` 本身，只需区分零次、一次与至少两次，所以最多取前两个命中。④ 零值 `Tag` 不做特殊处理：它的 `Reveal` 不被 `ParseSubject` 接受，也不能再用来 `NewTag`，格式化输出照样脱敏。⑤ 任务 ID 的规则抽成 `validTaskID`，由 `Claims.valid` 与 `NewTag` 共用，行为不变。⑥ 包注释改为「载体是主题标签，本包定义类型与严格文法」。
+- **本地模糊测试：** 按默认的 `-fuzzminimizetime` 运行 `FuzzParseSubject`，几秒后执行数会停在 0/秒：工作进程在最小化一个约 6.5 KB 的输入，尝试次数随长度平方增长，被测代码没有挂起。改用 `-fuzzminimizetime=2s` 后，120 秒 430 万次执行，没有失败。development.md 的模糊测试一节已补上这条提示。
+- **验证：** `go test -count=1 ./internal/security/token/ ./tests/docs/`（token 包覆盖率 100%）与 `-race`、`make check`（总覆盖率 93.4447%，2908/3112）、`make secrets`、`GOOS=windows go vet ./...`、`GOOS=linux go vet ./...`、两个包的 `CGO_ENABLED=0 go test`、不可见字符检查均通过。L1b 尚未执行，文法已实现但尚未按「门槛」冻结。
+
+**审查后的修正（Task 1，2026-09-24）：** 规格与质量两名审查子代理各自复核，结论都是「修复后合入」，没有「主要」问题。确认并修复的问题如下，修复都先写失败的用例（或先确认用例能拦下对应的变异）：
+
+1. **守卫测试的盲区（规格审查，次要）。** 原实现与 go 工具的通配规则一样，跳过以「.」「_」开头的目录与 `testdata`。但这些目录只是不参与 `./...`，被显式导入时照样编译进产品：审查员在 `internal/_x` 与 `internal/doctor/testdata/y` 中放了引用、由产品包导入，`go build ./cmd/turncourier` 成功而守卫没有报。现在目录一律进入，只跳过以「.」「_」开头的文件（go/build 确实忽略它们）、非 `.go` 文件与测试文件。仓库中目前没有这类目录，改动不会新增误报。
+2. **守卫的遍历与允许列表没有测试（质量审查，次要）。** 「允许列表多一个包」「允许列表改成前缀 `internal/`」「按构建约束跳过文件」三个变异都存活。遍历抽成 `revealViolations(root, roots)`，新增 `TestRevealViolationsTree`：在临时目录中搭 11 个文件的合成源码树，期望恰好报出 6 处（含以「.」「_」开头的目录、`testdata`、只在 darwin 编译的文件与允许包的子目录），`_skip.go` 与测试文件不报，并钉住允许列表与契约逐字相同。上述三个变异与「跳过这类目录」都被它拦下。文件头注明按名字的反射调用与模板字段访问（`{{.Reveal}}`）查不出来，仍靠代码审查（两名审查员的细节项）。
+3. **任务 ID 含 i、l、o、u 没有用例（质量审查，次要）。** 把正则中任务 ID 的字符类放宽为 `[0-9a-z]` 的变异存活，它会接受 `NewTag` 拒绝的任务 ID。文法表补上任务 ID 含 i、l、o、u 的 4 行，另加开尔文符号（U+212A）与长 s（U+017F）的 2 行（期望 `ErrTagDamaged`），文法表共 62 行。
+4. **`%w` 也先于 `Format` 处理（质量审查，次要）。** `fmt.Errorf(f, tag)` 这类对非 error 操作数使用 `%w` 的调用，fmt 在调用 `Format` 之前按错误动词处理，标签值与指针都按原始字段打印，足以还原令牌；格式串为常量时 vet 的 printf 检查会拦下。类型本身无法拦截，因此写进 `Tag` 的已知局限与 `Tag.Format`、`Token.Format` 的注释（契约原文只写了「`%T`、`%p` 之外」）。
+5. **细节：** 金丝雀的动词表只是抽样，「`Format` 对 `%U` 或 `%c` 输出明文」存活，现逐一检查 `%T`、`%p`、`%w` 之外的全部字母动词；解析得到的任务 ID 是主题的子串、与整条主题共用底层内存，改为 `strings.Clone`，新增 `TestParseSubjectCopiesTaskID`（先失败）；`tagHolder` 的注释误称 slog 的 JSON 处理器会调用标签的方法，已更正；实现子代理的提交说明把文法表写成 57 行、称变异全部被拦下，实际为 56 行、另有上面第 3 条的存活变异，以本节为准。development.md 补上 `imports_test.go`、`reveal_test.go` 与 `FuzzParseSubject`，architecture.md 的 `tests/docs` 一行补上 `imports_test.go` 与守卫的扫描范围。
 
 ### Task 2：存储补充（`internal/store/sqlite`）
 
@@ -2823,6 +2839,8 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 - [ ] **Step 3：** `make check` 通过（`internal/mail/imap` 覆盖率不低于 96%：`make test` 的 `-race -covermode=atomic` 下当前为 97% 左右，普通 `go test -cover` 略低）；变异测试：「已发送」排到 INBOX 之后、「已发送」照 Junk 降级、`ErrDefer` 当普通错误处理、`Wake` 不结束 IDLE、`Scanned` 在失败时也调用，都应被拦下。
 - [ ] **Step 4：** `git commit -m "feat(imap): scan Sent headers first, wake on demand, defer batches and skip history"`
 
+**开工前修复的 4a 缺陷（2026-09-24）：** 验证 Task 1 时，`make check` 在机器负载较高时于 `TestCommandDeadlines/body_literal_stalls_halfway` 报告数据竞争。根因在 `Session.body`：服务器在正文字面量中途以 close_notify 正常关闭连接时，go-imap 的字面量读取器把 `io.EOF` 当作字面量结束，`io.ReadAll` 带着不完整的正文「成功」返回，解码协程也被放行；随后的 `msg.Next()` 丢弃剩余字面量时再次读取同一个读缓冲，与解码协程争用。4a 的注释只防住了「读取失败」这一条路径。修法：读到的字节少于字面量声明的长度（且未到上限）时，与读取失败同样处理，按连接断开结束本命令、不再调用 `Next`。假服务器新增故障 `faultCloseAfter`（转发 N 字节后以 close_notify 关闭），新用例 `TestScanBodyLiteralCutShort` 在修复前于 `-race` 下稳定报告竞争，修复后通过。本任务新增的 `ScanHeaders` 读取头部字面量时须沿用同一条检查。
+
 ### Task 7：QQ 行为模拟器（`tests/qqsim`）
 
 **Files:**
@@ -2838,8 +2856,6 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 - 模拟器是测试基础设施，放在 `tests/` 下，不进入产品二进制；它有自己的测试，计入覆盖率。
 
 **测试（先写并确认失败）：** 用 `internal/mail/smtp.Send` 发一封信后，「已发送」中出现改写了 ID 的副本且 `X-OQ-MSGID` 等于原 ID；`imap.Session` 能登录、`ScanHeaders` 取到副本；每种故障注入都产生对应的客户端错误分类（`ErrAuth`、`*ReplyError` 4xx/5xx、`ErrUncertain`、`ErrAuthFailed`、`ErrNoFolder`、断开后的 `ErrClosed`）；延迟写入的副本在延迟之后才出现。
-
-**开工前修复的 4a 缺陷（2026-09-24）：** 验证 Task 1 时，`make check` 在机器负载较高时于 `TestCommandDeadlines/body_literal_stalls_halfway` 报告数据竞争。根因在 `Session.body`：服务器在正文字面量中途以 close_notify 正常关闭连接时，go-imap 的字面量读取器把 `io.EOF` 当作字面量结束，`io.ReadAll` 带着不完整的正文「成功」返回，解码协程也被放行；随后的 `msg.Next()` 丢弃剩余字面量时再次读取同一个读缓冲，与解码协程争用。4a 的注释只防住了「读取失败」这一条路径。修法：读到的字节少于字面量声明的长度（且未到上限）时，与读取失败同样处理，按连接断开结束本命令、不再调用 `Next`。假服务器新增故障 `faultCloseAfter`（转发 N 字节后以 close_notify 关闭），新用例 `TestScanBodyLiteralCutShort` 在修复前于 `-race` 下稳定报告竞争，修复后通过。本任务新增的 `ScanHeaders` 读取头部字面量时须沿用同一条检查。
 
 - [ ] **Step 1：** 写失败的测试。
 - [ ] **Step 2：** 实现；更新两份依赖表。

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"regexp"
+	"strings"
 )
 
 const (
@@ -39,7 +40,9 @@ var subjectTagPattern = regexp.MustCompile(`\[TC ([` + alphabet + `]{10}) ([` + 
 // Tag 是主题标签 [TC <任务 ID> <令牌>] 的值：任务 ID 与令牌。零值不可用：标签只能由 NewTag 或 ParseSubject 得到，
 // 零值的 Reveal 不是合法标签。String、Format 与 LogValue 一律输出脱敏文本，只有 Reveal 与 RevealToken 返回明文。
 // 已知局限与 Token 相同：Tag 作为其他包中结构体的未导出字段时，fmt 无法调用它的方法，会按原始字段打印任务 ID 与令牌字节；
-// %p 作用于标签值（或含标签的结构体值、数组值）时同样如此。4b 以装配后的金丝雀测试覆盖实际路径（Task 11、13、14）。
+// %p 作用于标签值（或含标签的结构体值、数组值）时同样如此；%w 作用于标签值或指针时，fmt 在调用 Format 之前就按错误动词处理
+// 非 error 的操作数，同样按原始字段打印（格式串为常量时 vet 的 printf 检查会拦下）。4b 以装配后的金丝雀测试覆盖实际路径
+// （Task 11、13、14）。
 type Tag struct {
 	taskID string
 	token  Token
@@ -78,7 +81,8 @@ func ParseSubject(subject string) (Tag, error) {
 	if err != nil {
 		return Tag{}, ErrMalformed
 	}
-	return Tag{taskID: subject[m[2]:m[3]], token: parsed}, nil
+	// 复制任务 ID：子串会与整条主题共用底层内存，标签活多久，主题中的令牌明文与标题就被多留多久。
+	return Tag{taskID: strings.Clone(subject[m[2]:m[3]]), token: parsed}, nil
 }
 
 // hasTagOpening 判断主题中是否出现 [TC，T 与 C 只按 ASCII 不区分大小写，不做 Unicode 大小写折叠。
@@ -118,7 +122,7 @@ func (g Tag) String() string {
 	return redactedTag
 }
 
-// Format 对 %T、%p 之外的 fmt 动词输出脱敏文本；fmt 先于 Format 处理 %p，其局限见 Tag 的说明。
+// Format 对 %T、%p、%w 之外的 fmt 动词输出脱敏文本；fmt 先于 Format 处理这三个动词，%p 与 %w 的局限见 Tag 的说明。
 func (g Tag) Format(f fmt.State, _ rune) {
 	io.WriteString(f, redactedTag)
 }
