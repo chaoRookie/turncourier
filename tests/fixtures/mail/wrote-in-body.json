@@ -1,0 +1,35 @@
+{
+  "source": "public",
+  "note": "正文里写着「日志里写道：」、其后却不是 > 引用的回复：以「写道：」结尾的行只有在其后第一个非空行以 > 开头时才是引用头，这里整段新文字都保留；真正的引用在后面的 QQ 式「原始邮件」分隔线处被剥离。",
+  "message": {
+    "headers": [
+      {"name": "From", "words": [{"text": "用户", "charset": "utf-8"}, {"raw": " <user@example.invalid>"}]},
+      {"name": "To", "words": [{"text": "TurnCourier", "charset": "utf-8"}, {"raw": " <bot@example.invalid>"}]},
+      {"name": "Subject", "words": [{"text": "Re: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:21:15 +0800"},
+      {"name": "Message-Id", "value": "<tencent_wrote_in_body_0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "text/plain",
+    "charset": "utf-8",
+    "encoding": "base64",
+    "lines": [
+      "我看了一下，日志里写道：",
+      "connection refused (127.0.0.1:5432)",
+      "应该是数据库没启动，先启动数据库再重跑。",
+      "",
+      "------------------ 原始邮件 ------------------",
+      "发件人: \"TurnCourier\" <bot@example.invalid>;",
+      "发送时间: 2026年9月24日(星期三) 下午3:00",
+      "主题: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新",
+      "",
+      "任务 {{TASK}} 回合完成。",
+      "---- TurnCourier ----",
+      "令牌副本（仅供核对）：",
+      "{{TOKEN}}"
+    ]
+  },
+  "expect": {"new_text": "我看了一下，日志里写道：\nconnection refused (127.0.0.1:5432)\n应该是数据库没启动，先启动数据库再重跑。"}
+}

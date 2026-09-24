@@ -187,7 +187,8 @@ turncourier/
 │   │   ├── process_unix.go          # Unix：终止版本子进程所在进程组
 │   │   ├── process_other.go         # 其他平台：默认取消方式
 │   │   └── process_unix_test.go     # 进程组终止测试
-│   ├── mail/                        # 邮件客户端；不依赖存储与配置
+│   ├── mail/                        # 邮件契约、客户端与解析器；不依赖存储与配置
+│   │   ├── gateway.go               # 邮件契约：页脚标记行、固定句子、自定义头名
 │   │   ├── imap/                    # 只读 IMAP，只用隐式 TLS
 │   │   │   ├── session.go           # 登录、EXAMINE、UID 补扫、PEEK、IDLE
 │   │   │   ├── watcher.go           # 长连接循环：看门狗与退避重连
@@ -195,6 +196,13 @@ turncourier/
 │   │   │   ├── session_test.go      # 无标签 BAD、半开连接、UIDVALIDITY 变化
 │   │   │   ├── watcher_test.go      # 退避、登录频率上限、认证失败暂停
 │   │   │   └── source_test.go       # 源码检查：DialTLS、只读、PEEK
+│   │   ├── parser/                  # 入站邮件的 MIME、引用与签名解析
+│   │   │   ├── parser.go            # Parse、ParseHeader、NewText；Message 脱敏
+│   │   │   ├── charset.go           # GBK 系列标签按 GB18030 解码
+│   │   │   ├── quote.go             # 引用与签名剥离、残留检查
+│   │   │   ├── parser_test.go       # 样本、头部、字符集、上限与脱敏测试
+│   │   │   ├── quote_test.go        # 边界规则、签名与残留触发测试
+│   │   │   └── fuzz_test.go         # 模糊测试：不 panic、输出合法且有界
 │   │   └── smtp/                    # 只用隐式 TLS 发送单封邮件
 │   │       ├── smtp.go              # 逐步期限与投递结果三分类
 │   │       ├── smtp_test.go         # go-smtp 假服务器与明文防护
@@ -252,6 +260,10 @@ turncourier/
 │   │   ├── deps_test.go             # 依赖表与 go.mod、实际导入的比对
 │   │   ├── imports_test.go          # 整仓扫描包的依赖方向
 │   │   └── reveal_test.go           # 令牌明文方法只在 token 与 renderer 中引用
+│   ├── fixtures/mail/               # 合成邮件回归样本：JSON 模板
+│   │   ├── README.md                # 模板格式与每个样本的来源
+│   │   ├── mailfixture.go           # 替换占位符并组装原始字节
+│   │   └── mailfixture_test.go      # 用标准库解码回来核对
 │   ├── integration/                 # 跨包测试
 │   │   ├── lifecycle_test.go        # 配置、存储与状态机的完整生命周期
 │   │   └── payload_test.go          # 通知、令牌、摘要与正文密文的生命周期

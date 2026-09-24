@@ -1,0 +1,33 @@
+{
+  "source": "public",
+  "note": "不带引用头的行内回复：客户端没有写引用头，> 引用块里含我方页脚的标记行（因而认得出是在引用我方通知），块之后是用户的作答。判为不确定的是「引用块之后又出现作答」这条行内回复检查，而不是「> 行没有页脚标记」那一条。",
+  "message": {
+    "headers": [
+      {"name": "From", "value": "User <user@example.invalid>"},
+      {"name": "To", "value": "bot@example.invalid"},
+      {"name": "Subject", "words": [{"raw": "Re: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:19:10 +0800"},
+      {"name": "Message-Id", "value": "<inline-bare-0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "User-Agent", "value": "Mutt/2.2"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "text/plain",
+    "charset": "utf-8",
+    "encoding": "quoted-printable",
+    "lines": [
+      "逐条回复如下。",
+      "",
+      "> 任务 {{TASK}} 回合完成。",
+      "> 部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？",
+      ">",
+      "> ---- TurnCourier ----",
+      "> 任务 {{TASK}} · 回合完成",
+      "> 令牌副本（仅供核对）：",
+      "> {{TOKEN}}",
+      "继续执行，并清理旧的构建缓存。"
+    ]
+  },
+  "expect": {"error": "ErrUncertain"}
+}

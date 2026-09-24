@@ -1,0 +1,40 @@
+{
+  "source": "public",
+  "note": "带 wrote: 引用头的行内逐段回复（Gmail 与 Apple Mail 最常见的形态）：引用头之后，> 引用块与用户的作答交替出现。只丢弃引用头及其后的全部内容会让 Agent 只收到第一段，所以判为不确定。",
+  "message": {
+    "headers": [
+      {"name": "MIME-Version", "value": "1.0"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "From", "value": "User <user@example.invalid>"},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:18:30 +0800"},
+      {"name": "Message-ID", "value": "<CAFx7yQ2p-synthetic-inline-0001@mail.example.invalid>"},
+      {"name": "Subject", "words": [{"raw": "Re: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "UTF-8"}]},
+      {"name": "To", "value": "TurnCourier <bot@example.invalid>"}
+    ],
+    "type": "text/plain",
+    "charset": "UTF-8",
+    "encoding": "base64",
+    "lines": [
+      "见下方逐条回复。",
+      "",
+      "On Wed, Sep 24, 2026 at 3:00 PM TurnCourier <bot@example.invalid> wrote:",
+      "",
+      "> 任务 {{TASK}} 回合完成。",
+      "> 部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？",
+      "",
+      "继续执行。",
+      "",
+      "> 另外，是否需要清理旧的构建缓存？",
+      "",
+      "需要，清理之后再跑一次。",
+      "",
+      "> ---- TurnCourier ----",
+      "> 任务 {{TASK}} · 回合完成",
+      "> 直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。",
+      "> 令牌副本（仅供核对）：",
+      "> {{TOKEN}}"
+    ]
+  },
+  "expect": {"error": "ErrUncertain"}
+}

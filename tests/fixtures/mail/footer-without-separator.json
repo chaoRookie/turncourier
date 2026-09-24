@@ -1,0 +1,34 @@
+{
+  "source": "public",
+  "note": "引用没有分隔线、引用头与 > 前缀、却带着我方页脚的回复：客户端把原文直接接在新文字之后。没有任何引用边界可以命中，新正文里留下页脚的标记行、固定句子、[TC 与令牌副本，残留检查判为不确定。",
+  "message": {
+    "headers": [
+      {"name": "From", "value": "User <user@example.invalid>"},
+      {"name": "To", "value": "bot@example.invalid"},
+      {"name": "Subject", "words": [{"raw": "Re: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:17:00 +0800"},
+      {"name": "Message-Id", "value": "<footer-residue-0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "text/plain",
+    "charset": "utf-8",
+    "encoding": "base64",
+    "lines": [
+      "继续执行集成测试。",
+      "",
+      "任务 {{TASK}} 回合完成。",
+      "部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？",
+      "",
+      "---- TurnCourier ----",
+      "任务 {{TASK}} · 回合完成",
+      "直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。",
+      "令牌副本（仅供核对）：",
+      "{{TOKEN}}",
+      "请把机器人地址加入通讯录，以免通知落进垃圾箱。",
+      "请不要在接收本通知的邮箱中开启假期自动回复。"
+    ]
+  },
+  "expect": {"error": "ErrUncertain"}
+}

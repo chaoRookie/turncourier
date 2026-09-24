@@ -1,0 +1,25 @@
+{
+  "source": "public",
+  "note": "只有 HTML 的真人回复：单个 text/html 部件（utf-8/quoted-printable），没有 text/plain；线程头与主题标签都正常。解析器不做 HTML 转文本，期望 ErrNoPlainText。",
+  "message": {
+    "headers": [
+      {"name": "From", "value": "User <user@example.invalid>"},
+      {"name": "To", "value": "bot@example.invalid"},
+      {"name": "Subject", "words": [{"raw": "Re: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:16:05 +0800"},
+      {"name": "Message-Id", "value": "<html-only-reply-0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "text/html",
+    "charset": "utf-8",
+    "encoding": "quoted-printable",
+    "lines": [
+      "<html><body><p>继续执行，完成后把结果发给我。</p>",
+      "<blockquote style=\"border-left: 2px solid #ccc; padding-left: 8px;\">任务 {{TASK}} 回合完成。<br>---- TurnCourier ----<br>令牌副本（仅供核对）：<br>{{TOKEN}}</blockquote>",
+      "</body></html>"
+    ]
+  },
+  "expect": {"error": "ErrNoPlainText"}
+}

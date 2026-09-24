@@ -1,0 +1,27 @@
+{
+  "source": "public",
+  "note": "用户自己用 > 标出命令、没有引用我方通知的回复：> 行里既没有页脚标记行也没有 [TC，它可能是命令或引文而不是引用，按引用丢弃会让 Agent 只收到「请运行：」，所以判为不确定。块之后只有「发自我的iPhone」这样的客户端签名。",
+  "message": {
+    "headers": [
+      {"name": "From", "words": [{"text": "用户", "charset": "utf-8"}, {"raw": " <user@example.invalid>"}]},
+      {"name": "To", "value": "bot@example.invalid"},
+      {"name": "Subject", "words": [{"raw": "Re: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:20:00 +0800"},
+      {"name": "Message-Id", "value": "<quoted-command-0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "text/plain",
+    "charset": "utf-8",
+    "encoding": "quoted-printable",
+    "lines": [
+      "请在仓库根目录运行：",
+      "",
+      "> make test",
+      "",
+      "发自我的iPhone"
+    ]
+  },
+  "expect": {"error": "ErrUncertain"}
+}

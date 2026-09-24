@@ -1,0 +1,59 @@
+{
+  "source": "public",
+  "note": "Apple Mail（iOS）的回复：multipart/alternative，纯文本与 HTML 都是 utf-8/quoted-printable；主题中的 ASCII 部分原样、中文部分编为 utf-8/B；正文先是新文字与「发自我的iPhone」，再是以「写道：」结尾的引用头，隔一个空行后是整段 > 引用（引用中的空行写作单独的 >）；HTML 用 blockquote type=\"cite\"。",
+  "message": {
+    "headers": [
+      {"name": "Content-Transfer-Encoding", "value": "7bit"},
+      {"name": "From", "words": [{"text": "用户", "charset": "utf-8"}, {"raw": " <user@example.invalid>"}]},
+      {"name": "Mime-Version", "value": "1.0 (1.0)"},
+      {"name": "Subject", "words": [{"raw": "Re: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:08:31 +0800"},
+      {"name": "Message-Id", "value": "<3F2A1B0C-5D6E-4F70-8192-A3B4C5D6E7F8@example.invalid>"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "To", "value": "TurnCourier <bot@example.invalid>"},
+      {"name": "X-Mailer", "value": "iPhone Mail (22A3354)"}
+    ],
+    "type": "multipart/alternative",
+    "boundary": "Apple-Mail-6D9D5F8A-1B2C-4D3E-9F10-111213141516",
+    "parts": [
+      {
+        "type": "text/plain",
+        "charset": "utf-8",
+        "encoding": "quoted-printable",
+        "lines": [
+          "可以，按这个方案继续。",
+          "",
+          "发自我的iPhone",
+          "",
+          "在 2026年9月24日，15:00，TurnCourier <bot@example.invalid> 写道：",
+          "",
+          "> 任务 {{TASK}} 回合完成。",
+          "> 部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？",
+          ">",
+          "> ---- TurnCourier ----",
+          "> 任务 {{TASK}} · 回合完成",
+          "> 直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。",
+          "> 令牌副本（仅供核对）：",
+          "> {{TOKEN}}",
+          "> 请把机器人地址加入通讯录，以免通知落进垃圾箱。",
+          "> 请不要在接收本通知的邮箱中开启假期自动回复。",
+          ">"
+        ]
+      },
+      {
+        "type": "text/html",
+        "charset": "utf-8",
+        "encoding": "quoted-printable",
+        "lines": [
+          "<html><head><meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\"></head><body dir=\"auto\">",
+          "<div dir=\"ltr\">可以，按这个方案继续。</div><div dir=\"ltr\"><br></div><div dir=\"ltr\">发自我的iPhone</div>",
+          "<div dir=\"ltr\"><br><blockquote type=\"cite\">在 2026年9月24日，15:00，TurnCourier &lt;bot@example.invalid&gt; 写道：<br><br></blockquote></div>",
+          "<blockquote type=\"cite\"><div dir=\"ltr\">任务 {{TASK}} 回合完成。<br>---- TurnCourier ----<br>令牌副本（仅供核对）：<br>{{TOKEN}}</div></blockquote>",
+          "</body></html>"
+        ]
+      }
+    ]
+  },
+  "expect": {"new_text": "可以，按这个方案继续。"}
+}

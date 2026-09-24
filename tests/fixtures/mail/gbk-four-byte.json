@@ -1,0 +1,35 @@
+{
+  "source": "public",
+  "note": "标注 gbk 而实为 GB18030 的回复：单个 text/plain 部件标注 charset=gbk、base64，新文字中含 GB18030 的四字节字符（扩展 A 区的「㐀」、扩展 B 区的「𠮷」与表情「😀」，GBK 编不出它们），部件内的换行是单独的 LF；主题与发件人显示名的编码词同样标注 gbk；引用沿用 QQ 的「原始邮件」分隔线。",
+  "message": {
+    "headers": [
+      {"name": "From", "words": [{"text": "用户", "charset": "gbk"}, {"raw": " <user@example.invalid>"}]},
+      {"name": "To", "value": "bot@example.invalid"},
+      {"name": "Subject", "words": [{"text": "回复：[TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新", "charset": "gbk"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:13:40 +0800"},
+      {"name": "Message-Id", "value": "<gbk-reply-0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "text/plain",
+    "charset": "gbk",
+    "encoding": "base64",
+    "newline": "lf",
+    "lines": [
+      "报告里的「𠮷」和「㐀」两个字都显示正常，继续部署。😀",
+      "",
+      "------------------ 原始邮件 ------------------",
+      "发件人: \"TurnCourier\" <bot@example.invalid>;",
+      "发送时间: 2026年9月24日(星期三) 下午3:00",
+      "主题: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新",
+      "",
+      "任务 {{TASK}} 回合完成。",
+      "---- TurnCourier ----",
+      "直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。",
+      "令牌副本（仅供核对）：",
+      "{{TOKEN}}"
+    ]
+  },
+  "expect": {"new_text": "报告里的「𠮷」和「㐀」两个字都显示正常，继续部署。😀"}
+}

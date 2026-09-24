@@ -187,7 +187,8 @@ turncourier/
 │   │   ├── process_unix.go          # Unix: kill the version process group
 │   │   ├── process_other.go         # Other platforms: default cancellation
 │   │   └── process_unix_test.go     # Process group termination test
-│   ├── mail/                        # Mail clients; no storage, no config
+│   ├── mail/                        # Mail contract, clients, parser; no storage, no config
+│   │   ├── gateway.go               # Contract: footer marker and sentence, ID header
 │   │   ├── imap/                    # Read-only IMAP over implicit TLS
 │   │   │   ├── session.go           # Login, EXAMINE, UID rescan, PEEK, IDLE
 │   │   │   ├── watcher.go           # Long loop: watchdog, backoff reconnect
@@ -195,6 +196,13 @@ turncourier/
 │   │   │   ├── session_test.go      # Bare BAD, half-open, UIDVALIDITY change
 │   │   │   ├── watcher_test.go      # Backoff, login rate limit, auth pause
 │   │   │   └── source_test.go       # Source check: DialTLS, read-only, PEEK
+│   │   ├── parser/                  # Inbound MIME, quotes and signatures
+│   │   │   ├── parser.go            # Parse, ParseHeader, NewText; redacted Message
+│   │   │   ├── charset.go           # GBK labels decoded as GB18030
+│   │   │   ├── quote.go             # Quote and signature stripping, residue check
+│   │   │   ├── parser_test.go       # Samples, headers, charsets, limits, redaction
+│   │   │   ├── quote_test.go        # Boundary rules, signatures, residue triggers
+│   │   │   └── fuzz_test.go         # Fuzzing: no panic, bounded valid output
 │   │   └── smtp/                    # Submit one message over implicit TLS
 │   │       ├── smtp.go              # Per-step deadlines, outcome classification
 │   │       ├── smtp_test.go         # go-smtp fake server, plaintext guard
@@ -252,6 +260,10 @@ turncourier/
 │   │   ├── deps_test.go             # Dependency tables against go.mod and imports
 │   │   ├── imports_test.go          # Package dependency direction across the repo
 │   │   └── reveal_test.go           # Reveal and RevealToken only in token, renderer
+│   ├── fixtures/mail/               # Synthetic mail samples: JSON templates
+│   │   ├── README.md                # Template format, source of each sample
+│   │   ├── mailfixture.go           # Fill placeholders, assemble raw bytes
+│   │   └── mailfixture_test.go      # Decode back with the standard library
 │   ├── integration/                 # Cross-package tests
 │   │   ├── lifecycle_test.go        # Config, storage and state machines together
 │   │   └── payload_test.go          # Notifications, tokens, digests, ciphertext

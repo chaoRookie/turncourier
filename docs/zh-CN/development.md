@@ -70,9 +70,9 @@ git check-ignore .local/toolchains/go/bin/go
 | `golang.org/x/term` | v0.46.0 | BSD-3-Clause | `internal/cli`；`init` 以不回显方式读入授权码 |
 | `github.com/emersion/go-smtp` | v0.25.0 | MIT | `internal/mail/smtp` 用它的客户端发信，测试用它的服务端作离线假服务器。选它而不用已冻结的 `net/smtp`：它自带命令超时，`CloseWithResponse` 还能取回服务端的 DATA 响应文本（L1 需要它查找 QQ 分配的 ID）。它不阻止在明文连接上发送凭据，因此只允许 `DialTLS`，并由源码测试钉住 |
 | `github.com/emersion/go-imap/v2` | v2.0.0-beta.8 | MIT | `internal/mail/imap` 只用 `imapclient`；`imapserver` 与 `imapmemserver` 只在测试中用作离线假服务器。仍是 beta，各 beta 之间有破坏性 API 变更，因此固定精确版本、封装在本包之后，升级 PR 须人工审阅 |
-| `github.com/emersion/go-message` | v0.18.2 | MIT | 随 `imapclient`（它导入 `go-message/mail`）进入 `internal/mail/imap`；`tests/live` 直接导入它与 `charset` 解码 GB18030、GBK |
+| `github.com/emersion/go-message` | v0.18.2 | MIT | `internal/mail/parser` 用它读取来信的头部与 MIME 结构，经 `charset` 解码字符集（并在其中把 GBK 系列标签映射到 GB18030）；随 `imapclient`（它导入 `go-message/mail`）进入 `internal/mail/imap`；`tests/live` 直接导入它与 `charset` 解码 GB18030、GBK |
 | `github.com/emersion/go-sasl` | 伪版本 `b788ff22d5a6` | MIT | `internal/mail/smtp` 用 `NewPlainClient` 做 `AUTH PLAIN`；go-imap/v2 也会引入它 |
-| `golang.org/x/text` | v0.42.0 | BSD-3-Clause | `tests/live/sample.go` 直接导入 `encoding/simplifiedchinese`，`go-message/charset` 也需要它，因此经 `tests/live` 进入构建图。显式固定：go-message 要求的 v0.14.0 有模块级漏洞 GO-2026-5970，修复于 v0.39.0 |
+| `golang.org/x/text` | v0.42.0 | BSD-3-Clause | `internal/mail/parser` 与 `tests/live`（`sample.go`）直接导入 `encoding/simplifiedchinese`，把 GBK 系列标签映射到 GB18030 解码器，`go-message/charset` 也需要它；`tests/fixtures/mail` 用它的 GB18030 编码器组装合成回归样本。显式固定：go-message 要求的 v0.14.0 有模块级漏洞 GO-2026-5970，修复于 v0.39.0 |
 | `golang.org/x/sys` | v0.48.0 | BSD-3-Clause | `internal/cli`；在 macOS 上经 termios 关闭终端回显。同时也是 `golang.org/x/term` 与 `modernc.org/sqlite` 的依赖 |
 
 `modernc.org/sqlite` 另外带入 `dustin/go-humanize`、`google/uuid`、`mattn/go-isatty`、`ncruces/go-strftime`、`remyoudompheng/bigfft`、`modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory`，许可证均为 MIT 或 BSD 风格；`golang.org/x/sys` 固定在 v0.48.0，这是 `golang.org/x/term` v0.46.0 的要求。选型理由与实测记录见 [Phase 3 实施清单](plans/phase-03.md) 的决策 D1 与 [Phase 4 实施清单](plans/phase-04.md) 的决策 D2。
@@ -190,6 +190,7 @@ go run ./tools/commentcheck .
 - 配置测试把合成的 TOML 写入 `t.TempDir()` 并设为 0600，环境变量通过注入的 `getenv` 或 `t.Setenv` 提供，断言错误文本不含临时目录路径。
 - SQLite 测试使用临时目录中的真实数据库，不用内存库或替身驱动。`t.TempDir()` 按 umask 创建（通常为 0755），会被数据目录的权限检查拒绝，因此数据目录用它下面尚不存在、由 `sqlite.Open` 以 0700 新建的子目录。时钟与随机源通过 `sqlite.Options` 注入。验证事务回滚时，在测试中直接对数据库创建触发器注入故障，例如 `CREATE TRIGGER boom BEFORE INSERT ON replies BEGIN SELECT RAISE(ABORT, 'boom'); END;`，再断言相关表的行数和状态没有变化。
 - 测试数据全部使用合成内容。需要邮箱地址时，使用 `.invalid` 这类保留域名。
+- 入站邮件的回归样本放在 `tests/fixtures/mail/`：每个 JSON 模板只保存头部与各部件解码后的文字，并声明字符集与传输编码；令牌、任务 ID 与实际投递 ID 用占位符 `{{TOKEN}}`、`{{TASK}}`、`{{DELIVERED}}`，测试把令牌用 `security/token` 在运行时签发，交给包 `mailfixture` 替换并组装成原始字节。不要保存 base64 的 `.eml`：那样无法替换占位符，而把令牌写进文件又违反密钥扫描的约定。模板格式与每个样本的来源见该目录的 `README.md`。
 
 常用命令：
 

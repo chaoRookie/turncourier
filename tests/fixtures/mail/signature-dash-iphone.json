@@ -1,0 +1,37 @@
+{
+  "source": "public",
+  "note": "带 RFC 3676 签名分隔线与客户端签名的回复：单个 text/plain 部件（utf-8/8bit），新文字之后是恰为「-- 」的一行、签名文字与「发自我的iPhone」，再接 QQ 式的「原始邮件」引用。",
+  "message": {
+    "headers": [
+      {"name": "From", "value": "User <user@example.invalid>"},
+      {"name": "To", "value": "bot@example.invalid"},
+      {"name": "Subject", "words": [{"raw": "Re: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:15:20 +0800"},
+      {"name": "Message-Id", "value": "<signature-reply-0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "text/plain",
+    "charset": "utf-8",
+    "encoding": "8bit",
+    "lines": [
+      "好的，按这个方案继续，完成后告诉我。",
+      "",
+      "-- ",
+      "张三 · 平台组",
+      "发自我的iPhone",
+      "",
+      "------------------ 原始邮件 ------------------",
+      "发件人: \"TurnCourier\" <bot@example.invalid>;",
+      "发送时间: 2026年9月24日(星期三) 下午3:00",
+      "主题: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新",
+      "",
+      "任务 {{TASK}} 回合完成。",
+      "---- TurnCourier ----",
+      "令牌副本（仅供核对）：",
+      "{{TOKEN}}"
+    ]
+  },
+  "expect": {"new_text": "好的，按这个方案继续，完成后告诉我。"}
+}

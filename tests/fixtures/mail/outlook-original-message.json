@@ -1,0 +1,51 @@
+{
+  "source": "public",
+  "note": "Outlook 的回复：multipart/alternative，纯文本与 HTML 都是 utf-8/quoted-printable；新文字之后是「-----Original Message-----」分隔线，再是 From:/Sent:/To:/Subject: 头块与原文。它是契约样本清单之外补充的一份，用来拦下「去掉 Outlook 分隔线规则」的变异。",
+  "message": {
+    "headers": [
+      {"name": "From", "value": "User <user@example.invalid>"},
+      {"name": "To", "value": "\"TurnCourier\" <bot@example.invalid>"},
+      {"name": "Subject", "words": [{"raw": "RE: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:22:40 +0800"},
+      {"name": "Message-ID", "value": "<outlook-reply-0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "X-Mailer", "value": "Microsoft Outlook 16.0"},
+      {"name": "MIME-Version", "value": "1.0"}
+    ],
+    "type": "multipart/alternative",
+    "boundary": "----=_NextPart_000_0001_01DC2D3E.4F506172",
+    "parts": [
+      {
+        "type": "text/plain",
+        "charset": "utf-8",
+        "encoding": "quoted-printable",
+        "lines": [
+          "继续执行，完成后发一份摘要。",
+          "",
+          "-----Original Message-----",
+          "From: TurnCourier <bot@example.invalid>",
+          "Sent: Wednesday, September 24, 2026 3:00 PM",
+          "To: user@example.invalid",
+          "Subject: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新",
+          "",
+          "任务 {{TASK}} 回合完成。",
+          "---- TurnCourier ----",
+          "令牌副本（仅供核对）：",
+          "{{TOKEN}}"
+        ]
+      },
+      {
+        "type": "text/html",
+        "charset": "utf-8",
+        "encoding": "quoted-printable",
+        "lines": [
+          "<html><body><div class=\"WordSection1\"><p class=\"MsoNormal\">继续执行，完成后发一份摘要。</p>",
+          "<div style=\"border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0cm 0cm 0cm\"><p class=\"MsoNormal\"><b>From:</b> TurnCourier &lt;bot@example.invalid&gt;<br><b>Sent:</b> Wednesday, September 24, 2026 3:00 PM<br><b>To:</b> user@example.invalid<br><b>Subject:</b> [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新</p></div>",
+          "<p class=\"MsoNormal\">任务 {{TASK}} 回合完成。<br>---- TurnCourier ----<br>令牌副本（仅供核对）：<br>{{TOKEN}}</p></div></body></html>"
+        ]
+      }
+    ]
+  },
+  "expect": {"new_text": "继续执行，完成后发一份摘要。"}
+}

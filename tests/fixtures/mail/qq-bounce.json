@@ -1,0 +1,50 @@
+{
+  "source": "l1",
+  "note": "QQ 为外域不存在的收件地址异步发回的退信：顶层 multipart/report，子部件为 text/html 与 application/octet-stream（原信以 octet-stream 而不是 message/rfc822 附上）；Auto-Submitted: auto-generated；发件人不在白名单内且含大写字母；In-Reply-To 与 References 都指向实际投递 ID；主题是退信自己的文字，不含标签。report-type 参数与 HTML 的文字按公开资料补写。",
+  "message": {
+    "headers": [
+      {"name": "From", "words": [{"text": "系统退信", "charset": "utf-8"}, {"raw": " <PostMaster@example.invalid>"}]},
+      {"name": "To", "value": "bot@example.invalid"},
+      {"name": "Subject", "words": [{"text": "系统退信", "charset": "utf-8"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:01:30 +0800"},
+      {"name": "Message-Id", "value": "<bounce_0001@example.invalid>"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "Auto-Submitted", "value": "auto-generated"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "multipart/report",
+    "params": {"report-type": "delivery-status"},
+    "boundary": "----=_Bounce_68D39C1A_2C3D4E5F",
+    "parts": [
+      {
+        "type": "text/html",
+        "charset": "utf-8",
+        "encoding": "base64",
+        "lines": [
+          "<html><body><p>很抱歉，您发送的邮件未能送达以下收件人：</p><p>nobody@remote.example.invalid</p><p>原因：收件地址不存在。</p></body></html>"
+        ]
+      },
+      {
+        "type": "application/octet-stream",
+        "encoding": "base64",
+        "lines": [
+          "From: TurnCourier <bot@example.invalid>",
+          "To: nobody@remote.example.invalid",
+          "Subject: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新",
+          "Date: Wed, 24 Sep 2026 15:00:00 +0800",
+          "Message-Id: {{DELIVERED}}",
+          "Auto-Submitted: auto-generated",
+          "Mime-Version: 1.0",
+          "Content-Type: text/plain; charset=utf-8",
+          "",
+          "任务 {{TASK}} 回合完成。",
+          "---- TurnCourier ----",
+          "令牌副本（仅供核对）：",
+          "{{TOKEN}}"
+        ]
+      }
+    ]
+  },
+  "expect": {"error": "ErrNoPlainText"}
+}

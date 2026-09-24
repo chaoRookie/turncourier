@@ -1,0 +1,52 @@
+{
+  "source": "public",
+  "note": "Gmail 的回复：multipart/alternative，纯文本与 HTML 都标注大写的 UTF-8、base64；主题中的 ASCII 部分原样、中文部分编为 UTF-8/B；纯文本是新文字、以 wrote: 结尾的引用头、空行与整段 > 引用；HTML 用 gmail_quote 的 div 与 blockquote。",
+  "message": {
+    "headers": [
+      {"name": "MIME-Version", "value": "1.0"},
+      {"name": "References", "value": "{{DELIVERED}}"},
+      {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
+      {"name": "From", "value": "User <user@example.invalid>"},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:10:02 +0800"},
+      {"name": "Message-ID", "value": "<CAFx7yQ2p-synthetic-reply-0001@mail.example.invalid>"},
+      {"name": "Subject", "words": [{"raw": "Re: [TC {{TASK}} {{TOKEN}}] "}, {"text": "回合完成：部署脚本已更新", "charset": "UTF-8"}]},
+      {"name": "To", "value": "TurnCourier <bot@example.invalid>"}
+    ],
+    "type": "multipart/alternative",
+    "boundary": "000000000000a1b2c3d4e5f6a7b8",
+    "parts": [
+      {
+        "type": "text/plain",
+        "charset": "UTF-8",
+        "encoding": "base64",
+        "lines": [
+          "继续，把失败的用例单独列出来。",
+          "",
+          "On Wed, Sep 24, 2026 at 3:00 PM TurnCourier <bot@example.invalid> wrote:",
+          "",
+          "> 任务 {{TASK}} 回合完成。",
+          "> 部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？",
+          ">",
+          "> ---- TurnCourier ----",
+          "> 任务 {{TASK}} · 回合完成",
+          "> 直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。",
+          "> 令牌副本（仅供核对）：",
+          "> {{TOKEN}}",
+          "> 请把机器人地址加入通讯录，以免通知落进垃圾箱。",
+          "> 请不要在接收本通知的邮箱中开启假期自动回复。",
+          ">"
+        ]
+      },
+      {
+        "type": "text/html",
+        "charset": "UTF-8",
+        "encoding": "base64",
+        "lines": [
+          "<div dir=\"ltr\">继续，把失败的用例单独列出来。</div><br><div class=\"gmail_quote gmail_quote_container\"><div dir=\"ltr\" class=\"gmail_attr\">On Wed, Sep 24, 2026 at 3:00 PM TurnCourier &lt;<a href=\"mailto:bot@example.invalid\">bot@example.invalid</a>&gt; wrote:<br></div>",
+          "<blockquote class=\"gmail_quote\" style=\"margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex\"><div>任务 {{TASK}} 回合完成。<br>---- TurnCourier ----<br>令牌副本（仅供核对）：<br>{{TOKEN}}</div></blockquote></div>"
+        ]
+      }
+    ]
+  },
+  "expect": {"new_text": "继续，把失败的用例单独列出来。"}
+}

@@ -1,0 +1,59 @@
+{
+  "source": "public",
+  "note": "Foxmail 式回复：没有分隔线，引用直接以「发件人：」头块开始，其后是「发送时间：」「收件人：」「主题：」（全角冒号）；纯文本与 HTML 都标注 gb2312，纯文本 base64、HTML quoted-printable；没有 In-Reply-To（也没有 References）。空行里带一个空格。",
+  "message": {
+    "headers": [
+      {"name": "From", "words": [{"text": "用户", "charset": "gb2312"}, {"raw": " <user@example.invalid>"}]},
+      {"name": "To", "value": "\"TurnCourier\" <bot@example.invalid>"},
+      {"name": "Subject", "words": [{"text": "回复: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新", "charset": "gb2312"}]},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 15:12:10 +0800"},
+      {"name": "Message-ID", "value": "<202609241512100261234@example.invalid>"},
+      {"name": "X-Mailer", "value": "Foxmail 7.2"},
+      {"name": "Mime-Version", "value": "1.0"}
+    ],
+    "type": "multipart/alternative",
+    "boundary": "----=_001_NextPart000000000001_=----",
+    "parts": [
+      {
+        "type": "text/plain",
+        "charset": "gb2312",
+        "encoding": "base64",
+        "lines": [
+          "继续执行，结果直接发到这个邮箱。",
+          "",
+          " ",
+          "",
+          "发件人： TurnCourier",
+          "发送时间： 2026-09-24 15:00",
+          "收件人： 用户",
+          "主题： [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新",
+          " ",
+          "任务 {{TASK}} 回合完成。",
+          "部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？",
+          "",
+          "---- TurnCourier ----",
+          "任务 {{TASK}} · 回合完成",
+          "直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。",
+          "令牌副本（仅供核对）：",
+          "{{TOKEN}}",
+          "请把机器人地址加入通讯录，以免通知落进垃圾箱。",
+          "请不要在接收本通知的邮箱中开启假期自动回复。"
+        ]
+      },
+      {
+        "type": "text/html",
+        "charset": "gb2312",
+        "encoding": "quoted-printable",
+        "lines": [
+          "<html><head><meta http-equiv=\"content-type\" content=\"text/html; charset=gb2312\"></head><body>",
+          "<div>继续执行，结果直接发到这个邮箱。</div><div><br></div>",
+          "<hr style=\"width: 210px; height: 1px;\" color=\"#b5c4df\" size=\"1\" align=\"left\">",
+          "<div style=\"padding-top: 3pt;\"><b>发件人：</b>&nbsp;TurnCourier</div><div><b>发送时间：</b>&nbsp;2026-09-24&nbsp;15:00</div><div><b>收件人：</b>&nbsp;用户</div><div><b>主题：</b>&nbsp;[TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新</div>",
+          "<div style=\"white-space: pre-wrap;\">任务 {{TASK}} 回合完成。<br>---- TurnCourier ----<br>令牌副本（仅供核对）：<br>{{TOKEN}}</div>",
+          "</body></html>"
+        ]
+      }
+    ]
+  },
+  "expect": {"new_text": "继续执行，结果直接发到这个邮箱。"}
+}
