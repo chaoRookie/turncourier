@@ -1,6 +1,6 @@
 # TurnCourier v0.1.0-alpha 设计
 
-状态：设计和 Phase 0–1 已批准并完成核心验证；Phase 2 工程骨架（help、version、doctor 与质量门槛）已实现并公开，远端 CI 结果见 `plans/phase-02.md`；Phase 3 的配置、存储与状态机已作为内部包实现并通过测试，范围与验证见 `plans/phase-03.md`。Phase 4 拆分为 4a（离线实现）、L1（维护者在本机执行的真机探测）与 4b（依据 L1 结果实现）：4a 已实现 Keychain 封装、回复令牌、正文加密、迁移 `0002`、待发通知状态机与存储、SMTP 与 IMAP 客户端及其离线假服务器、只由人工执行的 `tests/live` 探测工具，以及第一个使用配置与存储的命令 `turncourier init`；TurnCourier 仍不能收发邮件，通知渲染、入站验证流水线与收发循环属于 4b，init 的环境诊断（复用 `doctor`）与真实往返测试同样在 4b 接入。L1 已完成，结论写在 `plans/phase-04.md`；余下的真机补采合为 L1b，待维护者执行；4b 的任务契约已起草，其中 D6–D8 待维护者确认。范围与验证见 `plans/phase-04.md`。接口验证中的细化记录在 `research/phase-01.md`，不得把候选能力写成已实现功能。
+状态：设计和 Phase 0–1 已批准并完成核心验证；Phase 2 工程骨架（help、version、doctor 与质量门槛）已实现并公开，远端 CI 结果见 `plans/phase-02.md`；Phase 3 的配置、存储与状态机已作为内部包实现并通过测试，范围与验证见 `plans/phase-03.md`。Phase 4 拆分为 4a（离线实现）、L1（维护者在本机执行的真机探测）与 4b（依据 L1 结果实现）：4a 已实现 Keychain 封装、回复令牌、正文加密、迁移 `0002`、待发通知状态机与存储、SMTP 与 IMAP 客户端及其离线假服务器、只由人工执行的 `tests/live` 探测工具，以及第一个使用配置与存储的命令 `turncourier init`；TurnCourier 仍不能收发邮件，通知渲染、入站验证流水线与收发循环属于 4b，init 的环境诊断（复用 `doctor`）与真实往返测试同样在 4b 接入。L1 已完成，结论写在 `plans/phase-04.md`；余下的真机补采合为 L1b，待维护者执行；4b 的任务契约已起草，其中新增的决策 D6–D8 已由维护者确认。范围与验证见 `plans/phase-04.md`。接口验证中的细化记录在 `research/phase-01.md`，不得把候选能力写成已实现功能。
 
 ## 产品与阶段
 

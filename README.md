@@ -18,7 +18,7 @@ These packages are implemented and tested; `init` uses some of them, and the res
 - `internal/security/keychain`, `token` and `payload` hold the Keychain wrapper, reply tokens and body encryption.
 - `internal/mail/smtp` and `internal/mail/imap` are the mail clients: implicit TLS only and a deadline on every step; the IMAP client only reads the mailbox and never changes it.
 
-TurnCourier still cannot send or receive email: nothing renders a notification, parses an inbound message or runs a send and receive loop. Those are Phase 4b. The L1 probe against a real mailbox is done, and the 4b task contracts built on its results are drafted and waiting for the maintainer's confirmation; both are in the [Phase 4 plan](docs/zh-CN/plans/phase-04.md). There are no agent adapters and no background service. There are no releases or tags; the default branch is `main`.
+TurnCourier still cannot send or receive email: nothing renders a notification, parses an inbound message or runs a send and receive loop. Those are Phase 4b. The L1 probe against a real mailbox is done, and the 4b task contracts built on its results are drafted and confirmed by the maintainer; both are in the [Phase 4 plan](docs/zh-CN/plans/phase-04.md). There are no agent adapters and no background service. There are no releases or tags; the default branch is `main`.
 
 The Phase 0–1 research probes (Node.js scripts, not product code) resumed the same Codex and Claude Code sessions from a new process on one Mac. Claude Code's first attempt exited abnormally on its second turn, for a reason not yet determined; the retest passed. No real mail round trip has been tested. See the [research report](docs/zh-CN/research/phase-01.md) (Chinese) for evidence and limits.
 

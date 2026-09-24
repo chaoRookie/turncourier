@@ -1,10 +1,10 @@
 # HANDOFF
 
-**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）、Phase 4a（邮件闭环的离线实现）与 L1 真机探测已完成，当前处于 4b 任务契约待确认、L1b 待维护者执行的阶段。
-**更新于**：2026-09-24 · claude-code（云端会话）
+**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）、Phase 4a（邮件闭环的离线实现）与 L1 真机探测已完成，4b 任务契约已起草并经维护者确认（D6–D8，2026-09-24），当前处于 4b 实现开始、L1b 待维护者执行的阶段。
+**更新于**：2026-09-24 · claude-code（第二个云端会话）
 **项目目录**：本仓库根目录（含 `go.mod` 的目录）
-**基线 commit**：`7f5fcc6`（L1 收尾的 PR #14 合并后的 main，CI 与 Security 通过）；本次改动在分支 `claude/upbeat-lamport-jw9yo9`，尚未开 PR。以 `git log --oneline -3` 与 `git status --short` 核对。
-**暂停原因**：两件事等维护者：① 确认 `docs/zh-CN/plans/phase-04.md`「4b 任务契约」中的 D6–D8（见该文件末尾「待维护者确认」），确认前不开始 4b 实现；② 在本机按「L1b」一节执行真机补采（新主题格式往返复核、别名与 `Return-Path` 样本）。探测工具已为 L1b 改好。
+**基线 commit**：`7f5fcc6`（L1 收尾的 PR #14 合并后的 main，CI 与 Security 通过）；第一个云端会话的改动（L1b 探测工具、4b 任务契约）在分支 `claude/upbeat-lamport-jw9yo9`；第二个会话把它快进到分支 `claude/project-handoff-continuation-wt9hh9`，记入 D6–D8 的确认，经维护者同意开 PR 合并入 main。以 `git log --oneline -3` 与 `git status --short` 核对。
+**暂停原因**：维护者已于 2026-09-24 确认 D6–D8（均采用建议方案，含 D8 对 D4 字面的解释，记录见 phase-04.md 末尾「已确认事项」第 2 条），4b 可以按 Task 1–18 开始实现。仍等维护者的只有一件事：在本机按「L1b」一节执行真机补采（新主题格式往返复核、别名与 `Return-Path` 样本）；它不阻塞 4b 的实现，但 4b 的 PR 合并之前必须完成。探测工具已为 L1b 改好。
 
 ## 已完成
 
@@ -15,7 +15,7 @@
 - [x] Phase 3（PR #6–#9）：状态机、严格配置、SQLite 存储（迁移、去重、FIFO、崩溃后转 UNCERTAIN 且永不自动重发）、集成测试与文档。验证记录见 `docs/zh-CN/plans/phase-03.md` 末尾。
 - [x] Phase 4a（PR #12，合并为 `4f646c6`）：Keychain 封装、`turncourier init`、回复令牌、正文加密、迁移 `0002`、待发通知状态机与存储、SMTP 与 IMAP 客户端及离线假服务器、`tests/live` 探测工具与文档同步。
 - [x] L1（PR #13、#14，2026-09-20 至 21，维护者本机）：第 1–5 步全部完成，并补采了假期自动回复与退信样本。结论见 `docs/zh-CN/plans/phase-04.md`「L1 结果」：QQ 改写 Message-ID（实际投递 ID 取自「已发送」副本）；D4 定稿为令牌放主题标签、只接受最新通知的令牌、`TokenTTL` 默认 72h；QQ 假期自动回复不带任何头部信号，维护者确认按主题前缀识别，并另设回环刹车；退信有两条强信号；两个 Agent 的 shell 都能静默读出 Keychain（D3 由推断变为实测）。
-- [x] 2026-09-24（本次，云端会话）：
+- [x] 2026-09-24（第一个云端会话）：
   - 探测工具为 L1b 修改（`tests/live`）：令牌进入主题标签、主题以原始 ASCII 标签开头不被折断、样本记录标签状态与 `Return-Path`、自动回复前缀（含全角冒号与「自动答复」）、逐封确认不回显标签，被拒邮件另查「已发送」副本（核实 D7 的前提；副本记录带 `searched`，把「补扫失败」与「确实没有副本」分开），样本格式 `turncourier-l1/4`。经独立质量审查、修复与两轮复查：第一轮 57 个变异、第二轮 18 个变异全部被杀死；第二轮另把「`]` 换成全角括号等」与「插入或替换多个字符」从截断改判为改写。契约、规程与审查记录见 phase-04.md「L1b」。
   - 起草「4b 任务契约」（phase-04.md）：新决策 D6–D8、已定的实现细节、门槛、文件结构、依赖方向、Task 1–18、完成标准。两名独立审查子代理（一致性与可行性、安全与正确性）共提出约 30 条意见，全部采纳，要点：
     - 任何一封来信都不能卡住收取循环（单封错误映射为原因码、已拒绝的不翻案、首次运行跳过历史）；
@@ -33,21 +33,21 @@
 
     第三次复查确认上述 11 条全部修复，又提出 2 条次要（1 条是此前漏掉的）与 7 条细节，也全部采纳（提交 `0787971`）：较新的通知仍是没有定论的 UNCERTAIN 时，对上一条通知的回复先延后、等副本或缺失证据出现再判，不再直接以 `token_superseded` 永久拒绝；「wrote:」引用头之后的行内逐段回复同样判为不确定；其余是「已发送」副本中的非法 ID、抹除机密不随授权码缓存清空、提交阶段 550 的告警措辞、证据时刻与存储共用一个时钟、核心接口清单、保留期与令牌有效期上限的依赖、哨兵改名为 `ErrInvalidArgument`。最后一次复查确认这 9 条全部修复，只余两处措辞（`fb9c828` 已改），4b 契约没有未处理的审查意见。
   - 文档同步：design.md 状态行与「接收通知的邮箱不要开启假期自动回复」；README 中英、architecture.md、development.md、CHANGELOG 的过时状态；architecture.md 中「令牌默认七天有效」「主题与页脚的令牌须一致」两处过时说法（代码默认值自 L1 起就是 72 小时，且只读主题）。
+- [x] 2026-09-24（第二个云端会话）：维护者确认 D6–D8，均采用建议方案（含 D8 对 D4 字面的那一处解释：M 超出时推迟发信并告警，不暂停任务）。确认记入 phase-04.md 末尾「已确认事项」第 2 条与 4b 各状态行；design.md、README 中英、architecture.md 与 CHANGELOG 中「等待确认」的说法同步改为已确认。
 
 ## 未完成
 
-- [ ] **维护者确认 D6–D8**（phase-04.md「待维护者确认」）。
 - [ ] **L1b（维护者本机执行）**：按 phase-04.md「L1b」一节的规程，新建 0700 输出目录，发 1 封新格式通知，用 QQ 邮箱 App 与网页版各回复一次（有别名的再用别名回复一次，可选 Foxmail/Apple Mail/Gmail），运行 `TestL1Replies`，把结论写进新增的「L1b 结果」一节。另有两个可选步骤：向同域不存在的地址发一封以核实 D7 的前提；再开一次假期自动回复看它的回复频率。L1b 是 4b Task 1 冻结主题解析器的门槛，4b 的 PR 合并之前必须完成。
-- [ ] **4b 实现**：D6–D8 确认后，在新特性分支按 Task 1–18 逐任务实施（先写失败的测试，子代理实现，规格与质量审查含变异测试，修复与独立复查），阶段末整阶段审查后开 PR；合并后维护者执行 L2 验收。
+- [ ] **4b 实现**：D6–D8 已确认，按 Task 1–18 逐任务实施（先写失败的测试，子代理实现，规格与质量审查含变异测试，修复与独立复查），阶段末整阶段审查后开 PR；合并后维护者执行 L2 验收。
 - [ ] macOS 断电持久性（`fullfsync`）留到安全与恢复阶段评估。
 - [ ] 关注 actions/setup-go 补丁版本：7.0.0 打包的 undici、brace-expansion 有已公开安全公告（旧版同样受影响，本仓库输入不触及），上游已修复未发版；Dependabot 提出后按同样流程评审。
 - [ ] Codex、Claude 适配器与后台服务属于后续阶段。真实邮箱各十轮验收之前不打 `v0.1.0-alpha`。
 
 ## 下一步
 
-1. 读 `AGENTS.md`，核对 `git status --short`、`git log --oneline -3` 与 `gh run list --repo chaoRookie/turncourier --limit 5`。本次的改动（L1b 探测工具、4b 任务契约与文档）在分支 `claude/upbeat-lamport-jw9yo9` 上，尚未开 PR；维护者同意后开 PR，三项必需检查通过再合并。L1b 可以在该分支上执行，也可以等合并后在 main 上执行。
+1. 读 `AGENTS.md`，核对 `git status --short`、`git log --oneline -3` 与 `gh run list --repo chaoRookie/turncourier --limit 5`。L1b 探测工具、4b 任务契约与 D6–D8 的确认经 PR 合并入 main 后，L1b 直接在 main 上执行。
 2. `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`，运行下方验证命令，确认仍全部通过。
-3. 若维护者已确认 D6–D8：把确认写进 phase-04.md 的「已确认事项」，建特性分支，从 4b Task 1 开始实施。
+3. 4b 从 Task 1 开始按顺序实施（D6–D8 已确认）；每完成一个任务，把实施说明与验证结果写进 phase-04.md 对应任务之下，并更新本文件。
 4. 若维护者已执行 L1b：把样本结论写进「L1b 结果」，按 4b「门槛」判断 Task 1 的文法能否冻结。
 
 ## 验证方式
@@ -76,7 +76,7 @@ git diff --check
 
 ### 验证记录
 
-- 2026-09-24 云端（本次，分支 `claude/upbeat-lamport-jw9yo9`）：
+- 2026-09-24 云端（第一个云端会话，分支 `claude/upbeat-lamport-jw9yo9`）：
   - 基线（main `7f5fcc6`）：`make check` 通过（覆盖率 93.2062%，2785/2988；staticcheck 须以 go1.27.1 重装，见「坑」）；`make secrets` 无泄漏；`make workflows`、`make build`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...`、`CGO_ENABLED=0 go test ./...` 通过；`go version -m` 只列出 toml、x/term、sqlite 及其依赖，没有邮件模块；`help`、`version` 退出 0，Linux 上 `doctor --json` 退出 1（平台不受支持，属预期）。**govulncheck 未运行**：云端网络策略拒绝 vuln.go.dev。
   - 探测工具的修改与审查修复之后：`make check` 通过（覆盖率 93.38%）、`make secrets`、`go vet -tags live ./tests/live/`、两个平台的 vet 通过；变异测试 57 个全部被杀死；没有运行任何真机探测，没有登录邮箱、没有发信，也没有读写钥匙串。
   - 探测工具第二轮修复之后：`make check` 通过（覆盖率 93.39%）、`go test -cover ./tests/live/`（92.4%）、`make secrets`、`go vet -tags live ./tests/live/`、两个平台的 vet 通过；本轮 18 个变异全部被杀死；三个探测文件中没有不可见字符。

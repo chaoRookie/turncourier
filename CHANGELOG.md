@@ -81,7 +81,7 @@ Phase 4 is split into 4a (offline), L1 (a manual probe the maintainer runs again
 - `inbound_messages.body_sha256` keeps its name, published in `0001`, but from `0002` on it holds a keyed HMAC-SHA256 digest rather than a bare SHA-256.
 - `make vet` and `make lint` each run a second time with `-tags live` over `tests/live`.
 - `tests/live` (L1b): the probe notifications carry their one-shot token in the subject tag `[TC <task ID> <token>]`, the format frozen after L1, with a copy in the footer; the tag stays raw ASCII at the start of the `Subject` header so folding never splits it. Samples record the tag's state (intact, missing, several tags, case or whitespace changed, truncated, rewritten), `Return-Path` as roles and booleans, and auto-reply subject prefixes with either colon width; when the server rejects a probe mail, the probe still checks whether a copy reached the Sent folder, and every copy record says whether the scan completed, so a failed scan is not read as a missing copy. The per-message confirmation no longer echoes the tag. The sample schema is `turncourier-l1/4`.
-- The Phase 4 plan records the L1 results and drafts the 4b task contracts, whose new decisions D6–D8 await the maintainer's confirmation.
+- The Phase 4 plan records the L1 results and drafts the 4b task contracts; the maintainer confirmed their new decisions D6–D8.
 
 ### Security
 
