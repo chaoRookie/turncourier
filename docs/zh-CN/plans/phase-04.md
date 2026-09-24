@@ -2813,10 +2813,27 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 
 **测试（先写并确认失败）：** 逐个样本比对期望结果；头部解析的边界（多个 `From`、缺失 `Message-Id`、`In-Reply-To` 含多个 ID、encoded-word 主题标注 gbk）；上述五类引用边界各自的正反用例（包括单独一行 `From:`、后面不是引用的「写道：」都不被当作边界，不含页脚标记与 `[TC` 的 `>` 行返回 `ErrUncertain`）；签名剥离（`-- ` 与靠近末尾的 `--`、远离末尾的 `--` 不算）；残留检查的四种触发；非法 UTF-8 的正文；`Message` 的 `%v`、`%+v` 与 `slog` 输出不含主题；上限（深度、部件数、1 MiB）；确定性（同一输入重复解析结果相同）；模糊测试（任意字节不 panic、`NewText` 的结果不超过 1 MiB 且是合法 UTF-8）；错误文本不含来信字节。
 
-- [ ] **Step 1：** 写样本模板、期望结果与失败的测试。
-- [ ] **Step 2：** 实现 `parser.go`、`charset.go`、`quote.go`；更新两份依赖表。
-- [ ] **Step 3：** `make check`、`make secrets` 通过；变异测试：逐条去掉引用边界规则、去掉「写道：」之后须是引用的条件、`>` 行不要求页脚标记或 `[TC`、去掉行内回复的不确定判定（规则 3 与规则 4 分别去掉）、去掉 GB18030 映射、去掉残留检查，都应被样本拦下。
-- [ ] **Step 4：** `git commit -m "feat(parser): parse inbound mail and strip quotes and signatures"`
+- [x] **Step 1：** 写样本模板、期望结果与失败的测试。
+- [x] **Step 2：** 实现 `parser.go`、`charset.go`、`quote.go`；更新两份依赖表。
+- [x] **Step 3：** `make check`、`make secrets` 通过；变异测试：逐条去掉引用边界规则、去掉「写道：」之后须是引用的条件、`>` 行不要求页脚标记或 `[TC`、去掉行内回复的不确定判定（规则 3 与规则 4 分别去掉）、去掉 GB18030 映射、去掉残留检查，都应被样本拦下。
+- [x] **Step 4：** `git commit -m "feat(parser): parse inbound mail and strip quotes and signatures"`
+
+**实施说明（2026-09-24）：** 由独立子代理按上述契约实现（提交 `91377e4`，由 worktree 中的 `7e37c74` 拣选而来）。先写样本模板与测试，失败基线为：`internal/mail/parser` 因 `internal/mail` 包尚不存在而 setup failed；`tests/fixtures/mail` 编译失败（`Values`、`Names`、`All` 等未定义）。
+
+- **新增用例：** 解析器 18 个测试函数（`TestFixtureSamples` 逐个比对 16 份样本并确认重复解析、重复调用 `NewText` 结果相同，以及头部、正文选取、字符集、规范化、上限、`BodyPrefix`、脱敏、错误文本）；引用与签名 9 个（五类边界各自的正反用例、边界的先后、签名、残留检查的四种触发且每个用例只满足一种、页脚常量）；模糊测试 `FuzzParse`、`FuzzNewTextBody`（经 MIME 与不经 MIME 两条路径的结果必须相同）；样本组装 10 个（组装结果用标准库独立解码回来核对，四份 L1 样本的结构逐项核对）。
+- **变异测试：** 契约列出的 11 个全部被样本拦下（`TestFixtureSamples` 在每一个上都失败）；另拟 43 个也全部被拦下（签名、规范化、残留检查的各条触发、部件选取与上限、解码、头部字段、规则细节与脱敏）。每次恢复后 SHA-256 相同。
+- **按字面解释或补充的地方：**
+  1. 页脚常量定义在 `internal/mail/gateway.go`：`FooterMarker` 为 `---- TurnCourier ----`；`FooterNotice` 只取回复说明的前半句「直接回复本邮件即可把新消息交给该任务」，渲染器写作「FooterNotice；请保留主题中的 [TC …] 标签，不要改动。」——后半句带着 `[TC`，不放进常量，两条残留检查因此各自独立；`IDHeader` 为 `X-TurnCourier-ID`。
+  2. x/text 的解码器遇到非法字节不报错而写出 U+FFFD，所以经过字符集转换的部件（charset 不是 utf-8、us-ascii 或缺省）出现 U+FFFD 即按「解码失败」报 `ErrMalformed`；代价是正文里原本就有 U+FFFD 的非 UTF-8 来信被误拒（安全方向）。
+  3. `Parse` 只因头部失败（含主题编码词的字符集未知：自动回复前缀可能藏在其中；发件人显示名的字符集未知同样如此）；正文的问题留给 `NewText`，保证 `Classify` 仍能识别正文古怪的退信与自动回复。在找到纯文本之前就遇到结构损坏或超过上限，报 `ErrMalformed`；纯文本与 HTML 都已找到后遍历停止。
+  4. 只拒绝重复的 `From` 头，多个 `Subject` 或 `Message-Id` 取第一个（见下方审查发现 A4）。线程头按 `<左部@右部>` 逐个提取，不因逗号、注释中断（go-message 的 `MsgIDList` 在第一个坏片段处就停止）；`MediaType` 在参数写坏时也取分号前的部分。
+  5. 规则 4 的「连续的 `>` 行」遇空行即断开；`>` 行允许行首空白；页脚标记拼接去掉引用前缀的各行、删去空白后查找，`[TC` 按行查找；规则 3 只认不带引用前缀的引用头；一行内先判规则 4，再依次判规则 1/2、3、5。残留检查中的标记行与固定句子忽略空白；令牌形状按「恰好 48 个字母表字符的最长连续段」判断，正则在运行时由字母表常量拼出。
+  6. 签名：「-- 」与「--」按整行精确匹配；客户端签名表 10 项（契约的 5 项，加 iPad 两种、「发自网易邮箱大师」与 Outlook 移动版两句）；引用块之后的行内回复检查用同样三条签名规则。
+  7. 头部上限显式写为 1 MiB；深度从根部件的 0 算起，最多读到 8；「1 MiB」指传输编码与字符集两层解码之后的大小；format=flowed 的软换行不合并。
+  8. `Message` 另外实现脱敏的 `MarshalJSON`（slog 的 JSON 处理器对嵌套的结构体走 encoding/json）；`BodyPrefix` 返回 `(plain, html []byte, err error)` 的副本，`ParseHeader` 得到的 `Message` 调用它返回 `ErrNoPlainText`。
+  9. 每个样本的模板与期望结果放在同一个 JSON 文件里。组装代码 `tests/fixtures/mail/mailfixture.go`（包 `mailfixture`）不在契约文件清单中：Task 4、7、9、14 要复用它；它导入 x/text，两份依赖表因此点名 `tests/fixtures/mail`。在契约清单之外补了 `outlook-original-message` 样本，使「去掉规则 2」的变异也能被样本拦下。按推断补写的样本细节写进样本说明与 README（标注不全，见审查发现 A2）。
+  10. 已知局限：Gmail 可能把 `On … wrote:` 折成两行，前半行会留在新正文里（见审查发现 A6）。
+- **验证：** `go test -count=1 ./internal/mail/... ./tests/fixtures/... ./tests/docs/` 通过（parser 覆盖率 99.5%，mailfixture 99.1%）；`make check` 第一次因 4a 遗留的 imap 竞争失败（已由 `5215fb5` 修复），重跑通过，总覆盖率 94.14%；`make secrets`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...` 通过；两个模糊目标各跑 60 秒（约 78 万次与 106 万次）没有失败；源码中没有不可见字符。
 
 ### Task 4：自动回复与退信判定（`internal/mail/parser`）
 
@@ -2827,10 +2844,40 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 
 **测试（先写并确认失败）：** Task 3 的四份 L1 样本分别得到 `Human`、`Human`、`AutoReply`（信号 `subject_prefix`）、`Bounce`；每条规则单独成立时都命中（每个用例只满足一条）；主题前缀的全部条目（表驱动）、全角与半角冒号、大小写、前缀前后的空白；主题以 `Auto-Reply:` 开头的 `multipart/report` 仍是 `Bounce`；`Re: 自动回复:` 与正文中间出现「自动回复」都不命中；`Auto-Submitted: no` 不命中。
 
-- [ ] **Step 1：** 写失败的测试。
-- [ ] **Step 2：** 实现。
-- [ ] **Step 3：** `make check` 通过；变异测试逐条删除规则、把主题前缀判定挪到退信之前。
-- [ ] **Step 4：** `git commit -m "feat(parser): classify auto-replies and bounces before any token check"`
+- [x] **Step 1：** 写失败的测试。
+- [x] **Step 2：** 实现。
+- [x] **Step 3：** `make check` 通过；变异测试逐条删除规则、把主题前缀判定挪到退信之前。
+- [x] **Step 4：** `git commit -m "feat(parser): classify auto-replies and bounces before any token check"`
+
+**实施说明（2026-09-24）：** 由独立子代理按上述契约实现（提交 `291abe5`，由 worktree 中的 `07ce45e` 拣选而来）。先写 `classify_test.go`，失败基线为编译失败：`Verdict`、`Human`、`AutoReply`、`Bounce`、`Classify` 与各信号常量未定义。
+
+- **新增用例：** `TestClassifyL1Samples`（四份 L1 样本分别为 Human、Human、AutoReply（`subject_prefix`）、Bounce（`multipart_report`），其余 12 份合成样本都是 Human）、`TestClassifySingleRules`（每个用例只满足一条）、`TestClassifySubjectPrefixes`、`TestClassifyBounceFirst`、`TestClassifySignalOrder`、`TestClassifyHumanLookalikes`、`TestClassifyPrefixWindow`、`TestKindString`。
+- **变异测试：** 契约列出的 9 个（逐条删除 8 条规则、把主题前缀判定挪到退信之前）与另拟的 20 个全部被拦下。其中「按第一个 @ 切分本地部分」起初存活，补用例后被拦下：net/mail 把 `"postmaster@relay"@…` 去掉引号放进地址，本地部分是 `postmaster@relay` 而不是 `postmaster`。
+- **按字面解释或补充的地方：** `Verdict` 为 `{Kind, Signal}`，`Kind` 的文字形式为 human、auto_reply、bounce，信号名导出为常量；同时命中多条自动回复规则时按契约列出的顺序取第一条，退信先判 multipart/report 再判发件人；发件人按最后一个 @ 切出本地部分，按 ASCII 不区分大小写与 MAILER-DAEMON、postmaster 精确比较，没有 @ 时不算；Auto-Submitted 与 Precedence 取分号前的关键字、折叠大小写，空的 Auto-Submitted 不算信号；Return-Path 删去空白后与 `<>` 比较；`Classify` 自己把正文截到前 512 字节；`Classify` 要求 `Message` 非 nil。
+- **验证：** `make check` 一次通过（总覆盖率 94.19%，parser 99.6%）；`make secrets`（提交前后）、`GOOS=windows go vet ./...`、`CGO_ENABLED=0 go test ./internal/mail/... ./tests/fixtures/... ./tests/docs/` 通过；源码中没有不可见字符。
+
+**审查发现（Task 3 与 Task 4，2026-09-24，待处理）：** 规格审查（结论「修复后合入」：2 条次要、6 条细节）与质量审查（结论「可以合入」：没有主要问题，4 条次要、6 条细节，49 个变异中 13 个存活）都已完成；**修正与独立复查尚未进行**（维护者 2026-09-24 暂停本轮工作，留给下一次会话）。两名审查者都实测确认：没有 panic、没有超线性耗时（最慢约 170 ms/MiB）、错误文本与 `Message` 的各种格式化出口都不回显来信内容、合理的客户端变换下令牌没有漏进新正文的路径。下列各条中，B 组改的是解析规则，**必须在冻结解析规则之前决定**：键控摘要依赖解析器的确定性，冻结后再改会在补扫时产生多余的 `message_conflict`（「解析器变更与摘要」）。
+
+A 组：直接修（下一次会话先做）
+
+1. **A1 附件的定义过窄（规格，次要）：** `parser.go` 的 `dispositionOf` 只按 `Content-Disposition: attachment` 跳过，`inline; filename=…` 或只带 `name=` 的 text/plain 会被选为新正文，违背 design.md「附件不作为指令输入」，还绕开了「只有 HTML 的来信以 `parse_uncertain` 拒绝」（正文只有 HTML、另附内联 .txt 时，文件内容成为给 Agent 的指令）。修法：disposition 为 attachment、或 Content-Disposition 带 `filename`、或 Content-Type 带 `name`，任一成立即算附件；改掉用例「inline with file name」，补两例：带文件名的 text/plain 在正文之前（期望取后面的正文）、HTML 正文加内联 .txt（期望 `ErrNoPlainText`）。
+2. **A2 推断写成了 L1 实测（规格，次要）：** `classify.go` 中「L1 补采样本中它位于只有 HTML 的正文开头」的注释、`qq-vacation-auto-reply.json` 的 note（HTML 以固定句子开头）、`qq-bounce.json` 的发件人 `PostMaster`、显示名与主题「系统退信」、`tests/fixtures/mail/README.md` 的对应两行，都把推断写成了实测：L1 只记了假期回复「只有 text/html」，没有记正文；退信只记了「非白名单、含大写字母」，没有记本地部分（样本因此比实测多命中一条 `daemon_sender`）。修法：注释写明固定句来自 4a 特征表与探测工具、L1 没有记录、这条规则不承重；两份 JSON 的 note 与 README 标出推断部分；L1b「待补」加一条：记录假期回复的 HTML 是否含这句固定句。
+3. **A3 补测试钉住存活变异（质量 S4 与规格细节 7）：** 质量审查的 12 个存活变异（QQ 分隔线的全角空格、Outlook 分隔线左侧须有破折号、「写道：」与 `wrote:` 须在行尾、头块关键词「发送时间」与「主题」、From 行区分大小写、冒号前的全角空格与不换行空格、U+FFFD 检查的标签大小写与 us-ascii、样本的 base64 行宽与 quoted-printable 硬换行）都有草稿用例（表格条目见质量审查报告，`TestSeparatorBoundaries`、`TestAttributionBoundaries`、`TestHeaderBlockBoundaries`、`TestNewTextCharsets` 各补几行，mailfixture 补 `TestBuildEncodingShape`；字符串中的全角空格、不换行空格与 U+FFFD 必须写成 `\u` 转义）。另补 `ParseHeader` 处理「没有结尾空行的纯头部」的三例（CRLF 结尾无空行、最后一行没有换行、只用 LF；Task 10 依赖 `BODY[HEADER]` 不带结尾空行也能解析）。
+4. **A4 重复的 Subject、Message-Id、In-Reply-To、References 静默取第一个（规格，细节，待确认）：** RFC 5322 规定这四个头至多一个；D4 对标签要求「恰好一个，不做取第一个」，现在第二个 Subject 里的标签被忽略。建议对重复的这四个头返回 `ErrMalformed`。
+5. **A5 不带尖括号的线程 ID 被丢弃（规格，细节，待确认）：** `In-Reply-To: tencent_abc@qq.example.invalid` 解析后为空，Task 9 会当作「完全没有线程头」立即 `thread_mismatch`。建议头部里没有任何 `<…>`、取值又是单个 `左@右` 时补上尖括号。
+6. **A6 折成两行的引用头（规格细节 6、质量 D1）：** Gmail 把「On … <bot@…>」与「wrote:」拆成两行时（Apple Mail 的 format=flowed 软换行同样如此），前半行（含机器人地址）留在新正文里。先加一个钉住现状的用例并记为已知局限，是否修改规则并入 B 组决定。
+7. **A7 文档现状描述滞后（规格细节 8）：** `README.md`、`README.zh-CN.md` 的现状段落仍写「没有…来信解析」，`docs/en/architecture.md` 的 Mail clients 行没有提 parser、另一处写「MIME parsing … are all Phase 4b」，与同文件的树形图矛盾；可以随 A 组一起改，最迟在 Task 17。
+8. **A8 其余细节：** 质量 D5（`newText` 两次 `strings.Split`，1 MiB 输入瞬时分配约 30 MiB，线性、有上界，可只切分一次）；质量 D6（含编码词的样本主题行超过 RFC 2047 的 76 列，只影响样本像不像真实客户端；模板文字里不能出现字面的 `{{`，README 注明）；质量 D3 中「松散的 Content-Type 使部件被跳过而得到 `ErrNoPlainText`」与「只去掉正文最开头的一个 BOM」两点失败方向安全，写进注释即可。Task 5 的测试补一条「纯文本页脚含 `mail.FooterNotice + "；请保留…"`」（规格细节 3），交给 Task 5 的审查核对。
+
+B 组：须维护者在冻结解析规则之前决定（均按契约字面实现，都会静默截断或误判用户正文）
+
+1. **B1 规则 3 不核对引用内容（质量 S1 / 规格的契约观察）：** 用户自己写的「文档里写道：」加 `> 先备份数据库再升级`，引文被静默丢掉，Agent 只收到「好的。」——与契约给规则 4 的理由（按引用丢弃会让 Agent 只收到「请运行：」）直接矛盾。建议：规则 3 的引用块也要求引用了我方通知（页脚标记行或标签），否则 `ErrUncertain`。我方通知的引用一定带标记行，正常回复不受影响；只引用了通知一部分的回复改判为 `ErrUncertain`（安全方向）。
+2. **B2 规则 4 用宽泛的 `[TC` 认定「引用的是我方通知」（质量 S2 / 规格的契约观察）：** 用户 `>` 块里的 `[TCP] connection reset` 会被当作通知丢掉。残留检查用宽泛匹配是安全方向（多拒），规则 4 用同一个匹配决定「放行并丢弃」是不安全方向（多删）。建议：`quotesNotice` 改认标签文法的前缀（`[TC ` 加 10 个字母表字符，不区分大小写）或页脚标记行，残留检查仍用宽泛的 `[TC`；现有用例 `tag opening` 随之改成合法形状。
+3. **B3 多个非附件 text/plain 部件只取第一个（质量 S3 / 规格的契约观察）：** Apple Mail 纯文本模式在正文中间插入内联图片时，后面的段落（可能正是指令）被静默丢掉。建议：选中纯文本之后继续遍历，其后还有非附件的 text/plain 即 `ErrUncertain`；至少把这一局限写进契约。
+4. **B4 规则 5 与签名规则误切用户正文（质量 D2）：** 正文里的 `From: …`/`To: …` 两行（例如要加进配置的内容）被当作头块截断；结尾 6 行内单独一行 `--`（命令行参数分隔）被当作签名截断。
+5. **B5 没有识别的分隔线（质量 D1）：** Outlook 的一整行 `________________________________`、中文 Outlook 的 `-----邮件原件-----` 留在新正文里（不泄漏令牌，Agent 多收到一行）；建议规则 2 增加这两种，并决定 A6 的折行引用头是一并丢弃上一行还是 `ErrUncertain`。
+6. **B6 字符集别名（质量 D3，超出契约列表）：** 只注册了契约列出的 5 个标签；`csgb2312`、`chinese`、`gb_2312-80`、`iso-ir-58`、`csiso58gb231280`、`ms936` 走 GBK 解码器（四字节字符得到 `ErrMalformed`），`euc-cn`、`x-euc-cn`、`x-cp936` 是未知标签（任何正文都 `ErrMalformed`）。建议把 GB2312/GBK 的全部 IANA/WHATWG 别名与 euc-cn 一并映射到 GB18030。`utf8` 等 UTF-8 别名经 x/text 转换，正文里原本就有的 U+FFFD 也会 `ErrMalformed`（安全方向，写进注释）。
+7. **B7 判定的边角（质量 D4）：** 过宽——`Auto-Submitted: no (comment)` 被判为 `auto_submitted`（RFC 3834 允许关键字后跟注释，建议先去掉括号注释）；过窄——两个 Auto-Submitted 头而第一个是 `no`、未按 RFC 2047 编码的 8 位 GBK 主题「自动回复:」、词干表以外的前缀（`[自动回复]`、`Out of Office:`、`Réponse automatique :`）都判为 Human，由 D8 的回环刹车兜底。
 
 ### Task 5：通知渲染、敏感信息过滤与 `notify.content`（`internal/mail/renderer`、`internal/config`）
 
