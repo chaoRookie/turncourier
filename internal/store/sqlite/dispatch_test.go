@@ -1,6 +1,6 @@
 // Package sqlite 的派发测试用临时目录中的真实 SQLite 数据库验证回复的 FIFO 派发、确认、不确定与未送达的处理、
 // 崩溃后的在途回复恢复、两个存储实例的并发派发、数据库对同一任务至多一条在途回复的兜底，
-// 以及派发时解密正文、正文无法读出时不派发和正文随回复状态的清理。
+// 派发时解密正文、正文无法读出时不派发并返回未改动的快照、正文随回复状态的清理，以及派发循环所用的可派发任务列表。
 package sqlite
 
 import (
@@ -816,20 +816,27 @@ func TestReplyOperationsRollBackOnFailure(t *testing.T) {
 	}
 }
 
-// TestReplyOperationsCanceledContext 验证上下文已取消时各方法在开始事务时返回 context.Canceled，不改动任何数据。
+// TestReplyOperationsCanceledContext 验证输入合法而上下文已取消时各方法返回 context.Canceled（不是 ErrInvalidArgument），
+// 不改动任何数据。
 func TestReplyOperationsCanceledContext(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	completed, replies := completedTask(t, store, 1)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	calls := map[string]func() error{
-		"ClaimNextReply":        func() error { _, _, _, err := store.ClaimNextReply(ctx, completed.ID); return err },
-		"AcknowledgeReply":      func() error { _, _, err := store.AcknowledgeReply(ctx, replies[0].Seq); return err },
-		"ResolveUncertainReply": func() error { _, _, err := store.ResolveUncertainReply(ctx, replies[0].Seq, true); return err },
-		"RecoverInFlight":       func() error { _, err := store.RecoverInFlight(ctx); return err },
+		"ClaimNextReply":         func() error { _, _, _, err := store.ClaimNextReply(ctx, completed.ID); return err },
+		"AcknowledgeReply":       func() error { _, _, err := store.AcknowledgeReply(ctx, replies[0].Seq); return err },
+		"ResolveUncertainReply":  func() error { _, _, err := store.ResolveUncertainReply(ctx, replies[0].Seq, true); return err },
+		"RecoverInFlight":        func() error { _, err := store.RecoverInFlight(ctx); return err },
+		"TasksWithQueuedReplies": func() error { _, err := store.TasksWithQueuedReplies(ctx); return err },
+		"CountAcceptedRepliesSince": func() error {
+			_, err := store.CountAcceptedRepliesSince(ctx, completed.ID, time.Time{})
+			return err
+		},
+		"InboundByMessageID": func() error { _, err := store.InboundByMessageID(ctx, botAccount, "<1@example.invalid>"); return err },
 	}
 	for name, call := range calls {
-		if err := call(); !errors.Is(err, context.Canceled) {
+		if err := call(); !errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s: err = %v; want context.Canceled", name, err)
 		}
 	}
@@ -842,7 +849,8 @@ func TestReplyOperationsCanceledContext(t *testing.T) {
 // TestClaimNextReplyUnreadablePayload 验证正文无法读出时不派发：没有正文密钥、密文的 key_id 与当前密钥不符或该 kid 已不是 active
 // 时返回 ErrPayloadKeyUnavailable，正文行被删除（模拟 0002 之前写入的 QUEUED 回复）返回 ErrPayloadMissing，去掉不可改写触发器后
 // 翻转密文一个字节返回包装 payload.ErrDecrypt 的错误；各情况下回复仍为 QUEUED，任务状态、版本与事件、正文行都不变，
-// 返回的正文为 nil，错误文本不含正文。
+// 返回的正文为 nil，错误文本不含正文；返回值是该回复未改动的 QUEUED 快照与任务的当前快照而不是零值，
+// 派发循环据此发出带回复序号的事件。
 func TestClaimNextReplyUnreadablePayload(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -899,6 +907,9 @@ func TestClaimNextReplyUnreadablePayload(t *testing.T) {
 				reply, current, body, err := store.ClaimNextReply(t.Context(), completed.ID)
 				if body != nil {
 					t.Errorf("返回的正文 = %q; want nil", body)
+				}
+				if reply != queued || current != completed {
+					t.Errorf("返回的快照 = %+v, %+v; want 未改动的回复 %+v 与任务 %+v", reply, current, queued, completed)
 				}
 				return reply, current, err
 			})
@@ -999,4 +1010,55 @@ func TestReplyPayloadLifecycle(t *testing.T) {
 		requirePayload("fail", reply.Seq, 0)
 	}
 	requireWALEmpty(t, store, "fail")
+}
+
+// TestTasksWithQueuedReplies 验证派发循环的任务列表：只返回有 QUEUED 回复、且任务为 COMPLETED 或 WAITING_INPUT 的任务，按各自最早
+// QUEUED 回复的序号升序（不看已确认的更早回复）；RUNNING、WAITING_APPROVAL、DELIVERY_UNCERTAIN、FAILED、CLOSED 与 CREATED 的任务
+// 即使有 QUEUED 回复也被排除，回复都已确认或被拒绝的可派发任务同样被排除；没有回复时返回空；任务状态不在已知集合时返回错误。
+func TestTasksWithQueuedReplies(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	ctx := t.Context()
+	if got, err := store.TasksWithQueuedReplies(ctx); err != nil || got != nil {
+		t.Fatalf("空库 TasksWithQueuedReplies = %q, %v; want 空", got, err)
+	}
+	// exec 绕过 API 执行 query：任务状态直接设置（FAILED 与 CLOSED 经 API 进入时会拒绝排队回复，这里保留 QUEUED 回复，
+	// 证明排除的原因是任务状态），回复状态同样直接改写。
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := store.db.ExecContext(ctx, query, args...); err != nil {
+			t.Fatalf("执行 %q 失败: %v", query, err)
+		}
+	}
+	completed := startTask(t, store)
+	earliest := enqueueReplies(t, store, completed.ID, 1)[0]
+	waiting := startTask(t, store)
+	enqueueReplies(t, store, waiting.ID, 1)
+	excluded := map[task.State]string{}
+	for _, state := range []task.State{task.Running, task.WaitingApproval, task.DeliveryUncertain, task.Failed, task.Closed, task.Created} {
+		current := startTask(t, store)
+		enqueueReplies(t, store, current.ID, 1)
+		excluded[state] = current.ID
+	}
+	enqueueReplies(t, store, completed.ID, 1)
+	enqueueReplies(t, store, waiting.ID, 1)
+	drained := startTask(t, store)
+	finished := enqueueReplies(t, store, drained.ID, 2)
+	exec("UPDATE replies SET state = 'ACKNOWLEDGED' WHERE seq IN (?, ?)", earliest.Seq, finished[0].Seq)
+	exec("UPDATE replies SET state = 'REJECTED', reject_reason = 'task_closed' WHERE seq = ?", finished[1].Seq)
+	for id, state := range map[string]task.State{completed.ID: task.Completed, waiting.ID: task.WaitingInput, drained.ID: task.Completed} {
+		exec("UPDATE tasks SET state = ? WHERE id = ?", string(state), id)
+	}
+	for state, id := range excluded {
+		exec("UPDATE tasks SET state = ? WHERE id = ?", string(state), id)
+	}
+	if got, err := store.TasksWithQueuedReplies(ctx); err != nil || !slices.Equal(got, []string{waiting.ID, completed.ID}) {
+		t.Errorf("TasksWithQueuedReplies = %q, %v; want %q（按最早 QUEUED 回复的序号）", got, err, []string{waiting.ID, completed.ID})
+	}
+
+	exec("PRAGMA ignore_check_constraints = ON")
+	exec("UPDATE tasks SET state = 'waiting_input' WHERE id = ?", waiting.ID)
+	exec("PRAGMA ignore_check_constraints = OFF")
+	if got, err := store.TasksWithQueuedReplies(ctx); err == nil || !strings.Contains(err.Error(), "waiting_input") || errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("未知的任务状态: TasksWithQueuedReplies = %q, %v; want 未知状态错误", got, err)
+	}
 }

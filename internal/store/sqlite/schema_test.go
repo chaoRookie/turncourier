@@ -1,4 +1,4 @@
-// Package sqlite 的表结构测试绕过 API 直接读写迁移 0002 建立的表，验证 CHECK、唯一约束、部分唯一索引与触发器。
+// Package sqlite 的表结构测试绕过 API 直接读写迁移 0002 与 0003 建立的表，验证 CHECK、唯一约束、外键、部分唯一索引与触发器。
 package sqlite
 
 import (
@@ -169,6 +169,42 @@ func TestSchemaConstraints(t *testing.T) {
 	}
 	for _, tt := range tests {
 		requireResult(t, tt.name, tt.want, tt.row.insert(t, store.db, tt.table))
+	}
+}
+
+// TestMailPauseConstraints 按顺序直接插入 0003 的 mail_pauses 行，验证原因只能是 hourly 或 daily、resumed_at 为空或不早于
+// paused_at、每个任务至多一行、task_id 不能为空（STRICT 表的主键隐含 NOT NULL）且须引用已有任务；
+// 每个非法行旁都有只差一处的合法行作对照。
+func TestMailPauseConstraints(t *testing.T) {
+	store := openStore(t, dataDir(t))
+	for _, id := range []string{"0000000001", "0000000002", "0000000003"} {
+		insertTask(t, store.db, id)
+	}
+	const checkFailed = "CHECK constraint failed"
+	pause := columns{"task_id": "0000000001", "reason": "hourly", "paused_at": 10}
+	tests := []struct {
+		name string
+		row  columns
+		want string // 为空表示插入应当成功，否则为错误文本应含的内容
+	}{
+		{"reason 为 weekly", pause.with("reason", "weekly"), checkFailed},
+		{"reason 为 HOURLY", pause.with("reason", "HOURLY"), checkFailed},
+		{"resumed_at 早于 paused_at", pause.with("resumed_at", 9), checkFailed},
+		{"task_id 为 NULL", pause.with("task_id", nil), "NOT NULL constraint failed: mail_pauses.task_id"},
+		{"task_id 不存在", pause.with("task_id", "0000000009"), "FOREIGN KEY constraint failed"},
+		{"缺少 paused_at", pause.without("paused_at"), "NOT NULL constraint failed: mail_pauses.paused_at"},
+		{"resumed_at 等于 paused_at", pause.with("resumed_at", 10), ""},
+		{"同一任务第二行", pause.with("reason", "daily"), "UNIQUE constraint failed: mail_pauses.task_id"},
+		{"另一任务正在暂停（resumed_at 为空）", pause.with("task_id", "0000000002").with("reason", "daily"), ""},
+		{"resumed_at 晚于 paused_at", pause.with("task_id", "0000000003").with("resumed_at", 11), ""},
+	}
+	for _, tt := range tests {
+		requireResult(t, tt.name, tt.want, tt.row.insert(t, store.db, "mail_pauses"))
+	}
+	requireExec(t, store.db, "把 resumed_at 改为早于 paused_at", checkFailed,
+		"UPDATE mail_pauses SET resumed_at = 9 WHERE task_id = '0000000001'")
+	if got := countRows(t, store.db, "mail_pauses"); got != 3 {
+		t.Errorf("mail_pauses 行数 = %d; want 3", got)
 	}
 }
 

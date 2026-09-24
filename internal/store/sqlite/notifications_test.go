@@ -1,6 +1,7 @@
 // Package sqlite 的待发通知测试用临时目录中的真实 SQLite 数据库验证通知的创建与加密、字段校验、领取顺序、
 // 无法读出内容时不领取、投递结果、放弃、任务关闭前后的处理、即将过期的放弃、崩溃后的恢复、实际投递 Message-ID 的记录、
-// 失败回滚，以及两个存储实例的串行领取。
+// 失败回滚、两个存储实例的串行领取，以及 4b 所需的查询：按 Message-ID 与实际投递 ID 查找、「最新通知」、凭副本核对为已送达、
+// 线程引用、发信计数、放弃与缺少实际投递 ID 的列表。
 package sqlite
 
 import (
@@ -295,8 +296,8 @@ func TestCreateNotification(t *testing.T) {
 	}
 }
 
-// TestCreateNotificationValidation 验证字段校验在事务开始前拒绝非法输入：错误文本含 "invalid notification"，
-// 上下文已取消时仍返回校验错误，且不写入任何行；各字段边界上的合法值可以创建。
+// TestCreateNotificationValidation 验证字段校验在事务开始前拒绝非法输入：错误文本含 "invalid notification" 并包装
+// ErrInvalidArgument，上下文已取消时仍返回校验错误，且不写入任何行；各字段边界上的合法值可以创建。
 func TestCreateNotificationValidation(t *testing.T) {
 	store, _, running := newNotificationStore(t)
 	tests := []struct {
@@ -334,15 +335,16 @@ func TestCreateNotificationValidation(t *testing.T) {
 		in := notificationFor(running.ID, "invalid")
 		tt.modify(&in)
 		got, err := store.CreateNotification(t.Context(), in)
-		if err == nil || !strings.Contains(err.Error(), "invalid notification") {
-			t.Errorf("%s: CreateNotification = %+v, %v; want 含 \"invalid notification\" 的错误", tt.name, got, err)
+		if err == nil || !strings.Contains(err.Error(), "invalid notification") || !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: CreateNotification = %+v, %v; want 包装 ErrInvalidArgument、含 \"invalid notification\" 的错误", tt.name, got, err)
 		}
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	in := notificationFor(running.ID, "canceled")
 	in.TTL = 0
-	if got, err := store.CreateNotification(ctx, in); err == nil || !strings.Contains(err.Error(), "invalid notification") || errors.Is(err, context.Canceled) {
+	if got, err := store.CreateNotification(ctx, in); err == nil || !strings.Contains(err.Error(), "invalid notification") ||
+		!errors.Is(err, ErrInvalidArgument) || errors.Is(err, context.Canceled) {
 		t.Errorf("上下文已取消: CreateNotification = %+v, %v; want 含 \"invalid notification\" 的错误而不是 context.Canceled", got, err)
 	}
 	if n, p := countRows(t, store.db, "notifications"), countRows(t, store.db, "notification_payloads"); n != 0 || p != 0 {
@@ -382,15 +384,15 @@ func setTaskOwner(t *testing.T, s *Store, taskID, owner string) {
 	}
 }
 
-// TestCreateNotificationChecksOwner 验证 owner 不在 token.Claims 要求的 1–255 字节内时不创建通知：
-// 否则会建出一条永远签不出令牌、因而永远发不出去的通知。长度按字节计，255 个字节合法、256 个字节不合法。
+// TestCreateNotificationChecksOwner 验证 owner 不在 token.Claims 要求的 1–255 字节内时不创建通知，错误包装 ErrInvalidArgument
+// （重试也不会成功）：否则会建出一条永远签不出令牌、因而永远发不出去的通知。长度按字节计，255 个字节合法、256 个字节不合法。
 func TestCreateNotificationChecksOwner(t *testing.T) {
 	store, _, running := newNotificationStore(t)
 	for _, owner := range []string{"", strings.Repeat("o", 256), strings.Repeat("代", 86)} {
 		setTaskOwner(t, store, running.ID, owner)
 		got, err := store.CreateNotification(t.Context(), notificationFor(running.ID, "owner"))
-		if err == nil || !strings.Contains(err.Error(), "invalid notification") {
-			t.Errorf("owner %d 字节: CreateNotification = %+v, %v; want 含 \"invalid notification\" 的错误", len(owner), got, err)
+		if err == nil || !strings.Contains(err.Error(), "invalid notification") || !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("owner %d 字节: CreateNotification = %+v, %v; want 包装 ErrInvalidArgument、含 \"invalid notification\" 的错误", len(owner), got, err)
 		}
 	}
 	if n, p := countRows(t, store.db, "notifications"), countRows(t, store.db, "notification_payloads"); n != 0 || p != 0 {
@@ -750,8 +752,9 @@ func TestNotificationOutcomes(t *testing.T) {
 	}
 
 	for _, delay := range []time.Duration{-time.Second, -time.Millisecond, 24*time.Hour + time.Millisecond, 25 * time.Hour} {
-		if got, err := store.RequeueNotification(ctx, retried.ID, delay); err == nil || !strings.Contains(err.Error(), "invalid notification") {
-			t.Errorf("延迟 %v: RequeueNotification = %+v, %v; want 含 \"invalid notification\" 的错误", delay, got, err)
+		if got, err := store.RequeueNotification(ctx, retried.ID, delay); err == nil || !strings.Contains(err.Error(), "invalid notification") ||
+			!errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("延迟 %v: RequeueNotification = %+v, %v; want 包装 ErrInvalidArgument、含 \"invalid notification\" 的错误", delay, got, err)
 		}
 	}
 	requireNotification(t, store, retried.ID, queue.OutboxSending, "", 1)
@@ -773,20 +776,22 @@ func TestNotificationOutcomes(t *testing.T) {
 	requireWALEmpty(t, store, "ResolveUncertainNotification(false) 放弃")
 }
 
-// TestNotificationValidationBeforeTransaction 验证放回队列的延迟、放弃原因与实际投递 Message-ID 的校验先于开始事务：
-// 上下文已取消时仍返回 "invalid notification" 校验错误，而不是 context.Canceled。
+// TestNotificationValidationBeforeTransaction 验证放回队列的延迟、放弃原因与实际投递 Message-ID（记录与凭副本核对两处）的校验
+// 先于开始事务：上下文已取消时仍返回包装 ErrInvalidArgument 的 "invalid notification" 校验错误，而不是 context.Canceled。
 func TestNotificationValidationBeforeTransaction(t *testing.T) {
 	store, _, _ := newNotificationStore(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	calls := map[string]func() (Notification, error){
-		"RequeueNotification":      func() (Notification, error) { return store.RequeueNotification(ctx, 1, -time.Second) },
-		"AbandonNotification":      func() (Notification, error) { return store.AbandonNotification(ctx, 1, "expired") },
-		"RecordDeliveredMessageID": func() (Notification, error) { return store.RecordDeliveredMessageID(ctx, 1, "<a") },
+		"RequeueNotification":         func() (Notification, error) { return store.RequeueNotification(ctx, 1, -time.Second) },
+		"AbandonNotification":         func() (Notification, error) { return store.AbandonNotification(ctx, 1, "expired") },
+		"RecordDeliveredMessageID":    func() (Notification, error) { return store.RecordDeliveredMessageID(ctx, 1, "<a") },
+		"ResolveUncertainAsDelivered": func() (Notification, error) { return store.ResolveUncertainAsDelivered(ctx, 1, "<a") },
 	}
 	for name, call := range calls {
-		if got, err := call(); err == nil || !strings.Contains(err.Error(), "invalid notification") || errors.Is(err, context.Canceled) {
-			t.Errorf("%s = %+v, %v; want 含 \"invalid notification\" 的错误而不是 context.Canceled", name, got, err)
+		if got, err := call(); err == nil || !strings.Contains(err.Error(), "invalid notification") || !errors.Is(err, ErrInvalidArgument) ||
+			errors.Is(err, context.Canceled) {
+			t.Errorf("%s = %+v, %v; want 包装 ErrInvalidArgument、含 \"invalid notification\" 的错误而不是 context.Canceled", name, got, err)
 		}
 	}
 }
@@ -810,8 +815,9 @@ func TestAbandonNotification(t *testing.T) {
 				created := mustCreateNotification(t, store, notificationFor(running.ID, "abandon"))
 				prepare[state](t, store, created.ID)
 				for _, bad := range []string{"task_closed", "expired", "bogus", "", "REJECTED"} {
-					if got, err := store.AbandonNotification(t.Context(), created.ID, bad); err == nil || !strings.Contains(err.Error(), "invalid notification") {
-						t.Errorf("原因 %q: AbandonNotification = %+v, %v; want 含 \"invalid notification\" 的错误", bad, got, err)
+					if got, err := store.AbandonNotification(t.Context(), created.ID, bad); err == nil || !strings.Contains(err.Error(), "invalid notification") ||
+						!errors.Is(err, ErrInvalidArgument) {
+						t.Errorf("原因 %q: AbandonNotification = %+v, %v; want 包装 ErrInvalidArgument、含 \"invalid notification\" 的错误", bad, got, err)
 					}
 				}
 				requireNotification(t, store, created.ID, state, "", 1)
@@ -1121,8 +1127,8 @@ func TestRecoverSendingNotifications(t *testing.T) {
 }
 
 // TestRecordDeliveredMessageID 验证实际投递 Message-ID 的记录：SENT 通知记录成功，同值再次记录不改动，另一个值或已属于另一条通知的值
-// 返回 ErrDeliveredMessageIDConflict；非 SENT 通知返回 queue.ErrInvalidOutboxTransition；长度不在 3–998 个字符或含 NUL 时
-// 在开始事务前报错，按字符计长。
+// 返回 ErrDeliveredMessageIDConflict；非 SENT 通知返回 queue.ErrInvalidOutboxTransition；长度不在 3–998 个字符、含 NUL 或
+// 非法 UTF-8 时在开始事务前返回包装 ErrInvalidArgument 的错误，按字符计长。
 func TestRecordDeliveredMessageID(t *testing.T) {
 	store, clock, running := newNotificationStore(t)
 	ctx := t.Context()
@@ -1173,9 +1179,10 @@ func TestRecordDeliveredMessageID(t *testing.T) {
 
 	// 非法 UTF-8 的两种情形：0xff 不是续字节，SQLite 的 length() 与 Go 的字符数相同，CHECK 约束放行，值会落盘；
 	// 0x80 是续字节，length() 不计入，事务开始之后才被 CHECK 拒绝。两者都应在开始事务之前拒绝。
-	for _, bad := range []string{"", "<a", "<é", "<a\x00b>", "<\xff\xfe>", "<\x80>", "<" + strings.Repeat("a", 997) + ">"} {
-		if got, err := store.RecordDeliveredMessageID(ctx, second.ID, bad); err == nil || !strings.Contains(err.Error(), "invalid notification") {
-			t.Errorf("值 %q: RecordDeliveredMessageID = %+v, %v; want 含 \"invalid notification\" 的错误", bad, got, err)
+	for _, bad := range invalidMessageIDs {
+		if got, err := store.RecordDeliveredMessageID(ctx, second.ID, bad); err == nil || !strings.Contains(err.Error(), "invalid notification") ||
+			!errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("值 %q: RecordDeliveredMessageID = %+v, %v; want 包装 ErrInvalidArgument、含 \"invalid notification\" 的错误", bad, got, err)
 		}
 	}
 	canceled, cancel := context.WithCancel(ctx)
@@ -1307,6 +1314,13 @@ func TestNotificationOperationsRollBackOnFailure(t *testing.T) {
 			must(t, "MarkNotificationSent")(s.MarkNotificationSent(t.Context(), id))
 			return func() error { _, err := s.RecordDeliveredMessageID(t.Context(), id, syntheticDeliveredID); return err }
 		}},
+		{"ResolveUncertainAsDelivered", func(t *testing.T, s *Store, taskID string) func() error {
+			id := uncertain(t, s, taskID)
+			return func() error {
+				_, err := s.ResolveUncertainAsDelivered(t.Context(), id, syntheticDeliveredID)
+				return err
+			}
+		}},
 		{"RecoverSendingNotifications", func(t *testing.T, s *Store, taskID string) func() error {
 			claimed(t, s, taskID)
 			return func() error { _, err := s.RecoverSendingNotifications(t.Context()); return err }
@@ -1371,7 +1385,8 @@ func TestClaimAbandonRollsBackOnFailure(t *testing.T) {
 	}
 }
 
-// TestNotificationOperationsCanceledContext 验证上下文已取消时各通知方法返回 context.Canceled，不改动任何数据。
+// TestNotificationOperationsCanceledContext 验证输入合法而上下文已取消时各通知方法返回 context.Canceled（不是
+// ErrInvalidArgument：取消不是校验失败），不改动任何数据。
 func TestNotificationOperationsCanceledContext(t *testing.T) {
 	store, _, running := newNotificationStore(t)
 	created := mustCreateNotification(t, store, notificationFor(running.ID, "canceled"))
@@ -1388,15 +1403,530 @@ func TestNotificationOperationsCanceledContext(t *testing.T) {
 			_, err := store.RecordDeliveredMessageID(ctx, created.ID, syntheticDeliveredID)
 			return err
 		},
+		"ResolveUncertainAsDelivered": func() error {
+			_, err := store.ResolveUncertainAsDelivered(ctx, created.ID, syntheticDeliveredID)
+			return err
+		},
 		"RecoverSendingNotifications": func() error { _, err := store.RecoverSendingNotifications(ctx); return err },
 		"NotificationByNID":           func() error { _, err := store.NotificationByNID(ctx, created.NID); return err },
+		"NotificationByMessageID":     func() error { _, err := store.NotificationByMessageID(ctx, created.MessageID); return err },
+		"NotificationByDeliveredID":   func() error { _, err := store.NotificationByDeliveredID(ctx, syntheticDeliveredID); return err },
+		"LatestAttemptedNotification": func() error { _, err := store.LatestAttemptedNotification(ctx, running.ID, time.Time{}); return err },
+		"LatestSentNotification":      func() error { _, err := store.LatestSentNotification(ctx, running.ID); return err },
+		"ThreadReferences":            func() error { _, err := store.ThreadReferences(ctx, running.ID, created.ID, 20); return err },
+		"CountNotificationsSince":     func() error { _, err := store.CountNotificationsSince(ctx, time.Time{}); return err },
+		"AbandonedSince":              func() error { _, err := store.AbandonedSince(ctx, time.Time{}); return err },
+		"SentWithoutDeliveredID":      func() error { _, err := store.SentWithoutDeliveredID(ctx, created.CreatedAt); return err },
+		"HasNotifications":            func() error { _, err := store.HasNotifications(ctx); return err },
 	}
 	for name, call := range calls {
-		if err := call(); !errors.Is(err, context.Canceled) {
+		if err := call(); !errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s: err = %v; want context.Canceled", name, err)
 		}
 	}
 	if got := allNotifications(t, store); !slices.Equal(got, []Notification{created}) {
 		t.Errorf("通知 = %+v; want 保持 %+v", got, created)
+	}
+}
+
+// settleNotification 创建任务 taskID 的一条通知并立即领取，再在当前时钟下标记为 state（SENT 或 UNCERTAIN），返回标记后的快照；
+// 调用方须保证没有更早到期的 PENDING 通知，也没有 SENDING 通知，否则领取到的不是它。
+func settleNotification(t *testing.T, s *Store, taskID, label string, state queue.OutboxState) Notification {
+	t.Helper()
+	created := mustCreateNotification(t, s, notificationFor(taskID, label))
+	if claimed, _ := mustClaimNotification(t, s); claimed.ID != created.ID {
+		t.Fatalf("领取 = 通知 %d; want 刚创建的 %d", claimed.ID, created.ID)
+	}
+	if state == queue.OutboxSent {
+		return must(t, "MarkNotificationSent")(s.MarkNotificationSent(t.Context(), created.ID))
+	}
+	return must(t, "MarkNotificationUncertain")(s.MarkNotificationUncertain(t.Context(), created.ID))
+}
+
+// insertNotificationAs 绕过 API 直接插入任务 taskID 的第 n 条通知行（notificationRow），并按 set 改写其中的列，返回其 id；
+// 用于精确构造状态与各时间列。
+func insertNotificationAs(t *testing.T, s *Store, taskID string, n int, set columns) int64 {
+	t.Helper()
+	row := notificationRow(taskID, n)
+	for name, value := range set {
+		row = row.with(name, value)
+	}
+	if err := row.insert(t, s.db, "notifications"); err != nil {
+		t.Fatalf("插入第 %d 条通知失败: %v", n, err)
+	}
+	var id int64
+	if err := s.db.QueryRowContext(t.Context(), "SELECT id FROM notifications WHERE message_id = ?", fmt.Sprintf("<tc.%d@example.invalid>", n)).Scan(&id); err != nil {
+		t.Fatalf("读取第 %d 条通知的 id 失败: %v", n, err)
+	}
+	return id
+}
+
+// TestNotificationByMessageIDAndDeliveredID 验证按我方 Message-ID 与按实际投递 ID 读取通知：命中时返回与按 id 读取相同的快照，
+// 未命中返回 ErrNotFound（不是 ErrInvalidArgument）；实际投递 ID 记下之前按它查不到，两个查找都不会命中对方的列。
+func TestNotificationByMessageIDAndDeliveredID(t *testing.T) {
+	store, _, running := newNotificationStore(t)
+	ctx := t.Context()
+	sent := settleNotification(t, store, running.ID, "sent", queue.OutboxSent)
+	pending := mustCreateNotification(t, store, notificationFor(running.ID, "pending"))
+	// requireFound 断言查找返回通知 id 的当前快照。
+	requireFound := func(name string, id int64, got Notification, err error) {
+		t.Helper()
+		if want := mustGetNotification(t, store, id); err != nil || got != want {
+			t.Errorf("%s = %+v, %v; want %+v", name, got, err, want)
+		}
+	}
+	// requireNotFound 断言查找返回 ErrNotFound 与零值。
+	requireNotFound := func(name string, got Notification, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalidArgument) || got != (Notification{}) {
+			t.Errorf("%s = %+v, %v; want ErrNotFound", name, got, err)
+		}
+	}
+	got, err := store.NotificationByMessageID(ctx, pending.MessageID)
+	requireFound("按 PENDING 通知的 Message-ID", pending.ID, got, err)
+	got, err = store.NotificationByMessageID(ctx, sent.MessageID)
+	requireFound("按 SENT 通知的 Message-ID", sent.ID, got, err)
+	got, err = store.NotificationByDeliveredID(ctx, syntheticDeliveredID)
+	requireNotFound("记下实际投递 ID 之前按它查找", got, err)
+
+	must(t, "RecordDeliveredMessageID")(store.RecordDeliveredMessageID(ctx, sent.ID, syntheticDeliveredID))
+	got, err = store.NotificationByDeliveredID(ctx, syntheticDeliveredID)
+	requireFound("按实际投递 ID", sent.ID, got, err)
+	got, err = store.NotificationByDeliveredID(ctx, sent.MessageID)
+	requireNotFound("以我方 Message-ID 按实际投递 ID 查找", got, err)
+	got, err = store.NotificationByMessageID(ctx, syntheticDeliveredID)
+	requireNotFound("以实际投递 ID 按我方 Message-ID 查找", got, err)
+	got, err = store.NotificationByMessageID(ctx, "<missing@example.invalid>")
+	requireNotFound("未知的 Message-ID", got, err)
+}
+
+// TestLatestNotifications 按发出的先后构造同一任务的通知，逐步验证 LatestAttemptedNotification 与 LatestSentNotification：
+// 按发出时刻而不是 id 取最晚的一条（较早创建、因重新排队而较晚发出的通知胜出），发出时刻相同时取 id 较大者；UNCERTAIN 按进入
+// UNCERTAIN 的时刻参与前者（updated_at 恰为 uncertainAfter 时计入，早于它即不计入，零值时全部计入），从不参与后者；更晚变化的
+// PENDING、SENDING 与 ABANDONED 都跳过，其他任务的通知不计入；较新的通知发出之后再凭副本把较早的 UNCERTAIN 通知核对为已送达，
+// 两者的结果仍是较新的那条。
+func TestLatestNotifications(t *testing.T) {
+	store, clock, running := newNotificationStore(t)
+	ctx := t.Context()
+	// requireLatest 断言 step 这一步两个查询分别返回通知 attempted 与 sent 的当前快照；id 为 0 表示应返回 ErrNotFound。
+	requireLatest := func(step string, uncertainAfter time.Time, attempted, sent int64) {
+		t.Helper()
+		for _, check := range []struct {
+			name string
+			want int64
+			get  func() (Notification, error)
+		}{
+			{"LatestAttemptedNotification", attempted, func() (Notification, error) {
+				return store.LatestAttemptedNotification(ctx, running.ID, uncertainAfter)
+			}},
+			{"LatestSentNotification", sent, func() (Notification, error) { return store.LatestSentNotification(ctx, running.ID) }},
+		} {
+			got, err := check.get()
+			if check.want == 0 {
+				if !errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalidArgument) || got != (Notification{}) {
+					t.Errorf("%s: %s = %+v, %v; want ErrNotFound", step, check.name, got, err)
+				}
+				continue
+			}
+			if want := mustGetNotification(t, store, check.want); err != nil || got != want {
+				t.Errorf("%s: %s = 通知 %d %+v, %v; want 通知 %d", step, check.name, got.ID, got, err, check.want)
+			}
+		}
+	}
+	requireLatest("没有通知", time.Time{}, 0, 0)
+
+	// 较早创建的 A 被放回队列，较晚创建的 B 先发出，A 一分钟后才发出：A 的发出时刻最晚。
+	a := mustCreateNotification(t, store, notificationFor(running.ID, "a"))
+	b := mustCreateNotification(t, store, notificationFor(running.ID, "b"))
+	mustClaimNotification(t, store)
+	must(t, "RequeueNotification")(store.RequeueNotification(ctx, a.ID, time.Minute))
+	if claimed, _ := mustClaimNotification(t, store); claimed.ID != b.ID {
+		t.Fatalf("领取 = 通知 %d; want B %d", claimed.ID, b.ID)
+	}
+	*clock = clock.Add(time.Second)
+	must(t, "MarkNotificationSent")(store.MarkNotificationSent(ctx, b.ID))
+	requireLatest("只有 B 已发出", time.Time{}, b.ID, b.ID)
+	*clock = clock.Add(time.Minute)
+	if claimed, _ := mustClaimNotification(t, store); claimed.ID != a.ID {
+		t.Fatalf("领取 = 通知 %d; want A %d", claimed.ID, a.ID)
+	}
+	must(t, "MarkNotificationSent")(store.MarkNotificationSent(ctx, a.ID))
+	requireLatest("较早创建的 A 较晚发出", time.Time{}, a.ID, a.ID)
+
+	// C 与 D 在同一毫秒发出：取 id 较大的 D。
+	*clock = clock.Add(time.Second)
+	settleNotification(t, store, running.ID, "c", queue.OutboxSent)
+	d := settleNotification(t, store, running.ID, "d", queue.OutboxSent)
+	requireLatest("C 与 D 同时发出", time.Time{}, d.ID, d.ID)
+
+	// E 进入 UNCERTAIN：尚无缺失证据时是「最新通知」，但从不是最新的 SENT 通知。
+	*clock = clock.Add(time.Second)
+	e := settleNotification(t, store, running.ID, "e", queue.OutboxUncertain)
+	enteredAt := e.UpdatedAt
+	requireLatest("E 不确定、还没有成功补扫（零值）", time.Time{}, e.ID, d.ID)
+	requireLatest("uncertainAfter 早于 E 进入 UNCERTAIN 1 毫秒", enteredAt.Add(-time.Millisecond), e.ID, d.ID)
+	requireLatest("uncertainAfter 恰为 E 进入 UNCERTAIN 的时刻", enteredAt, e.ID, d.ID)
+	requireLatest("uncertainAfter 晚 1 毫秒（E 已有缺失证据）", enteredAt.Add(time.Millisecond), d.ID, d.ID)
+
+	// 更晚变化的 SENDING、PENDING 与 ABANDONED 都跳过；其他任务更晚发出或不确定的通知不计入。
+	*clock = clock.Add(time.Second)
+	f := mustCreateNotification(t, store, notificationFor(running.ID, "f"))
+	if claimed, _ := mustClaimNotification(t, store); claimed.ID != f.ID {
+		t.Fatalf("领取 = 通知 %d; want F %d", claimed.ID, f.ID)
+	}
+	mustCreateNotification(t, store, notificationFor(running.ID, "g"))
+	h := mustCreateNotification(t, store, notificationFor(running.ID, "h"))
+	must(t, "AbandonNotification")(store.AbandonNotification(ctx, h.ID, "manual"))
+	other := startTask(t, store)
+	later := clock.Add(time.Hour).UnixMilli()
+	insertNotificationAs(t, store, other.ID, 90, columns{"state": "SENT", "sent_at": later, "updated_at": later})
+	insertNotificationAs(t, store, other.ID, 91, columns{"state": "UNCERTAIN", "updated_at": later})
+	requireLatest("更晚的 SENDING、PENDING、ABANDONED 与其他任务的通知", time.Time{}, e.ID, d.ID)
+
+	// F 发出后成为最新；此后才把较早的 E 凭副本核对为已送达：E 的 sent_at 沿用进入 UNCERTAIN 的时刻，结果仍是 F。
+	*clock = clock.Add(time.Second)
+	f = must(t, "MarkNotificationSent")(store.MarkNotificationSent(ctx, f.ID))
+	requireLatest("F 发出", time.Time{}, f.ID, f.ID)
+	*clock = clock.Add(time.Minute)
+	resolved := must(t, "ResolveUncertainAsDelivered")(store.ResolveUncertainAsDelivered(ctx, e.ID, syntheticDeliveredID))
+	if resolved.State != queue.OutboxSent || !resolved.SentAt.Equal(enteredAt) {
+		t.Fatalf("ResolveUncertainAsDelivered = %+v; want SENT、sent_at 为 %v", resolved, enteredAt)
+	}
+	requireLatest("较新的 F 发出之后再核对较早的 E", time.Time{}, f.ID, f.ID)
+	requireLatest("核对之后缺失证据不再影响 E", clock.Add(time.Hour), f.ID, f.ID)
+}
+
+// TestLatestAttemptedNotificationOnlyUncertain 验证任务只有 UNCERTAIN 通知时：尚无缺失证据（零值或 uncertainAfter 恰在进入
+// UNCERTAIN 的时刻）返回它，缺失证据成立后返回 ErrNotFound；LatestSentNotification 始终返回 ErrNotFound；其他任务的 SENT 通知
+// 不填补这一空缺。
+func TestLatestAttemptedNotificationOnlyUncertain(t *testing.T) {
+	store, _, running := newNotificationStore(t)
+	ctx := t.Context()
+	u := settleNotification(t, store, running.ID, "u", queue.OutboxUncertain)
+	other := startTask(t, store)
+	insertNotificationAs(t, store, other.ID, 90, columns{"state": "SENT", "sent_at": u.UpdatedAt.UnixMilli(), "updated_at": u.UpdatedAt.UnixMilli()})
+	for _, after := range []time.Time{{}, u.UpdatedAt} {
+		if got, err := store.LatestAttemptedNotification(ctx, running.ID, after); err != nil || got != u {
+			t.Errorf("uncertainAfter %v: LatestAttemptedNotification = %+v, %v; want %+v", after, got, err, u)
+		}
+	}
+	if got, err := store.LatestAttemptedNotification(ctx, running.ID, u.UpdatedAt.Add(time.Millisecond)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("缺失证据成立后 LatestAttemptedNotification = %+v, %v; want ErrNotFound", got, err)
+	}
+	if got, err := store.LatestSentNotification(ctx, running.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("LatestSentNotification = %+v, %v; want ErrNotFound", got, err)
+	}
+}
+
+// TestResolveUncertainAsDelivered 验证凭副本核对：UNCERTAIN 通知在一个事务中改为 SENT 并记下实际投递 ID，sent_at 等于进入
+// UNCERTAIN 的时刻（核对前的 updated_at）而不是核对时刻，updated_at 为核对时刻；正文行被删除并执行检查点；此后按实际投递 ID
+// 能查到它，发信计数按进入 UNCERTAIN 的时刻计。通知不是 UNCERTAIN（PENDING、SENDING、SENT、ABANDONED）时返回
+// queue.ErrInvalidOutboxTransition，实际投递 ID 已属于别的通知时返回 ErrDeliveredMessageIDConflict，通知不存在时返回
+// ErrNotFound，这些情况都不改动任何通知与正文行；记录实际投递 ID 的一步失败时，状态的改动随事务回滚。
+func TestResolveUncertainAsDelivered(t *testing.T) {
+	store, clock, running := newNotificationStore(t)
+	ctx := t.Context()
+	const taken, fresh = "<taken@example.invalid>", "<fresh@example.invalid>"
+	// refuse 调用 ResolveUncertainAsDelivered(id, deliveredID)，断言返回零值且全部通知与正文行都没有改动，返回错误供调用方判定。
+	refuse := func(name string, id int64, deliveredID string) error {
+		t.Helper()
+		notifications, payloads := allNotifications(t, store), payloadRows(t, store)
+		got, err := store.ResolveUncertainAsDelivered(ctx, id, deliveredID)
+		if got != (Notification{}) {
+			t.Errorf("%s: ResolveUncertainAsDelivered = %+v; want 零值", name, got)
+		}
+		if after := allNotifications(t, store); !slices.Equal(after, notifications) {
+			t.Errorf("%s: 通知被改动: %+v; want %+v", name, after, notifications)
+		}
+		if after := payloadRows(t, store); !slices.Equal(after, payloads) {
+			t.Errorf("%s: 正文行被改动: %q; want %q", name, after, payloads)
+		}
+		return err
+	}
+	// requireRefused 在 refuse 之外断言错误包装 want，返回错误供调用方进一步断言。
+	requireRefused := func(name string, id int64, deliveredID string, want error) error {
+		t.Helper()
+		err := refuse(name, id, deliveredID)
+		if !errors.Is(err, want) {
+			t.Errorf("%s: err = %v; want %v", name, err, want)
+		}
+		return err
+	}
+	// requireCounts 断言发信计数：从进入 UNCERTAIN 的时刻起为 1，晚 1 毫秒起为 0。
+	requireCounts := func(step string, enteredAt time.Time) {
+		t.Helper()
+		for since, want := range map[time.Time]int{enteredAt: 1, enteredAt.Add(time.Millisecond): 0} {
+			if got, err := store.CountNotificationsSince(ctx, since); err != nil || got != want {
+				t.Errorf("%s: CountNotificationsSince(%v) = %d, %v; want %d", step, since, got, err, want)
+			}
+		}
+	}
+
+	sent := settleNotification(t, store, running.ID, "sent", queue.OutboxSent)
+	must(t, "RecordDeliveredMessageID")(store.RecordDeliveredMessageID(ctx, sent.ID, taken))
+	*clock = clock.Add(time.Second)
+	uncertain := settleNotification(t, store, running.ID, "uncertain", queue.OutboxUncertain)
+	enteredAt := uncertain.UpdatedAt
+	abandoned := mustCreateNotification(t, store, notificationFor(running.ID, "abandoned"))
+	must(t, "AbandonNotification")(store.AbandonNotification(ctx, abandoned.ID, "manual"))
+	sending := mustCreateNotification(t, store, notificationFor(running.ID, "sending"))
+	mustClaimNotification(t, store)
+	pending := mustCreateNotification(t, store, notificationFor(running.ID, "pending"))
+	for _, tt := range []struct {
+		name string
+		id   int64
+	}{{"PENDING", pending.ID}, {"SENDING", sending.ID}, {"SENT", sent.ID}, {"ABANDONED", abandoned.ID}} {
+		requireRefused(tt.name, tt.id, fresh, queue.ErrInvalidOutboxTransition)
+	}
+	if err := requireRefused("实际投递 ID 已属于别的通知", uncertain.ID, taken, ErrDeliveredMessageIDConflict); err != nil &&
+		strings.Contains(err.Error(), taken) {
+		t.Errorf("冲突的错误文本回显了 Message-ID: %v", err)
+	}
+	requireRefused("通知不存在", 999, fresh, ErrNotFound)
+	requireCounts("核对之前", enteredAt)
+
+	if _, err := store.db.ExecContext(ctx, "CREATE TRIGGER fault BEFORE UPDATE OF delivered_message_id ON notifications BEGIN SELECT RAISE(ABORT, 'boom'); END"); err != nil {
+		t.Fatalf("创建触发器失败: %v", err)
+	}
+	if err := refuse("记录实际投递 ID 的一步失败", uncertain.ID, fresh); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("记录实际投递 ID 的一步失败: err = %v; want 含 boom 的错误", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "DROP TRIGGER fault"); err != nil {
+		t.Fatalf("删除触发器失败: %v", err)
+	}
+
+	*clock = clock.Add(time.Minute)
+	got := must(t, "ResolveUncertainAsDelivered")(store.ResolveUncertainAsDelivered(ctx, uncertain.ID, syntheticDeliveredID))
+	want := uncertain
+	want.State, want.DeliveredMessageID, want.SentAt, want.UpdatedAt = queue.OutboxSent, syntheticDeliveredID, enteredAt, clock.UTC()
+	if got != want {
+		t.Errorf("ResolveUncertainAsDelivered = %+v; want %+v", got, want)
+	}
+	requireNotification(t, store, uncertain.ID, queue.OutboxSent, "", 0)
+	requireWALEmpty(t, store, "ResolveUncertainAsDelivered")
+	if byDelivered, err := store.NotificationByDeliveredID(ctx, syntheticDeliveredID); err != nil || byDelivered != want {
+		t.Errorf("NotificationByDeliveredID = %+v, %v; want %+v", byDelivered, err, want)
+	}
+	requireCounts("核对之后", enteredAt)
+	requireRefused("已核对为送达的通知", uncertain.ID, fresh, queue.ErrInvalidOutboxTransition)
+}
+
+// TestThreadReferences 用直接插入的通知验证线程引用：只取该任务中 id 小于 beforeID、已记下实际投递 ID 的 SENT 通知，按 sent_at
+// 升序（相同时按 id）返回最后 limit 个；没有实际投递 ID 的 SENT 通知、UNCERTAIN 通知与其他任务的通知都不在其中；
+// 有 21 个可引用的通知时 limit 20 返回最近的 20 个。
+func TestThreadReferences(t *testing.T) {
+	store, _, running := newNotificationStore(t)
+	ctx := t.Context()
+	other := startTask(t, store)
+	// sent 直接插入任务 taskID 的第 n 条 SENT 通知，发出时刻为 sentAt；delivered 为空时不记实际投递 ID。返回其 id。
+	sent := func(t *testing.T, s *Store, taskID string, n int, sentAt int64, delivered string) int64 {
+		t.Helper()
+		set := columns{"state": "SENT", "sent_at": sentAt}
+		if delivered != "" {
+			set["delivered_message_id"] = delivered
+		}
+		return insertNotificationAs(t, s, taskID, n, set)
+	}
+	const d1, d2, d5, d6, d7, d8 = "<d1@example.invalid>", "<d2@example.invalid>", "<d5@example.invalid>", "<d6@example.invalid>",
+		"<d7@example.invalid>", "<d8@example.invalid>"
+	id1 := sent(t, store, running.ID, 1, 300, d1)
+	sent(t, store, running.ID, 2, 100, d2)
+	sent(t, store, running.ID, 3, 200, "")
+	insertNotificationAs(t, store, running.ID, 4, columns{"state": "UNCERTAIN", "updated_at": 500})
+	id5 := sent(t, store, running.ID, 5, 200, d5)
+	sent(t, store, running.ID, 6, 400, d6)
+	sent(t, store, other.ID, 7, 250, d7)
+	id8 := sent(t, store, running.ID, 8, 400, d8)
+	tests := []struct {
+		name     string
+		taskID   string
+		beforeID int64
+		limit    int
+		want     []string
+	}{
+		{"全部：按 sent_at 升序，相同时按 id", running.ID, id8 + 1, 20, []string{d2, d5, d1, d6, d8}},
+		{"不含 beforeID 本身", running.ID, id8, 20, []string{d2, d5, d1, d6}},
+		{"只取 id 更小的", running.ID, id5, 20, []string{d2, d1}},
+		{"limit 2 取最后两个", running.ID, id8 + 1, 2, []string{d6, d8}},
+		{"limit 1", running.ID, id8 + 1, 1, []string{d8}},
+		{"最早的通知之前没有引用", running.ID, id1, 20, nil},
+		{"其他任务", other.ID, id8 + 1, 20, []string{d7}},
+		{"没有通知的任务", "0000000000", id8 + 1, 20, nil},
+	}
+	for _, tt := range tests {
+		if got, err := store.ThreadReferences(ctx, tt.taskID, tt.beforeID, tt.limit); err != nil || !slices.Equal(got, tt.want) {
+			t.Errorf("%s: ThreadReferences = %q, %v; want %q", tt.name, got, err, tt.want)
+		}
+	}
+
+	t.Run("至多 20 个", func(t *testing.T) {
+		store, _, running := newNotificationStore(t)
+		var want []string
+		for n := 1; n <= 21; n++ {
+			delivered := fmt.Sprintf("<m%d@example.invalid>", n)
+			sent(t, store, running.ID, n, int64(n)*10, delivered)
+			if n > 1 {
+				want = append(want, delivered)
+			}
+		}
+		if got, err := store.ThreadReferences(t.Context(), running.ID, 100, 20); err != nil || !slices.Equal(got, want) {
+			t.Errorf("ThreadReferences = %q, %v; want 最近的 20 个 %q", got, err, want)
+		}
+	})
+}
+
+// TestCountNotificationsSince 用直接插入的通知验证发信计数：只计 SENT 与 UNCERTAIN，按 COALESCE(sent_at, updated_at) 不早于 since
+// 计（按毫秒，恰在 since 的计入）；SENT 按 sent_at 而不是 updated_at 计（记下实际投递 ID 会改 updated_at）；PENDING、SENDING 与
+// ABANDONED 不论何时变化都不计。
+func TestCountNotificationsSince(t *testing.T) {
+	store, _, running := newNotificationStore(t)
+	const at = int64(1_000_000)
+	for n, set := range map[int]columns{
+		1: {"state": "SENT", "sent_at": at, "updated_at": at + 5000},
+		2: {"state": "SENT", "sent_at": at - 1, "updated_at": at + 10},
+		3: {"state": "UNCERTAIN", "updated_at": at},
+		4: {"updated_at": at + 100},
+		5: {"state": "SENDING", "updated_at": at + 100},
+		6: {"state": "ABANDONED", "abandon_reason": "expired", "updated_at": at + 100},
+	} {
+		insertNotificationAs(t, store, running.ID, n, set)
+	}
+	for _, tt := range []struct {
+		name  string
+		since time.Time
+		want  int
+	}{
+		{"零值", time.Time{}, 3},
+		{"早 1 毫秒", time.UnixMilli(at - 1), 3},
+		{"恰在边界", time.UnixMilli(at), 2},
+		{"晚 1 毫秒", time.UnixMilli(at + 1), 0},
+	} {
+		if got, err := store.CountNotificationsSince(t.Context(), tt.since); err != nil || got != tt.want {
+			t.Errorf("%s: CountNotificationsSince = %d, %v; want %d", tt.name, got, err, tt.want)
+		}
+	}
+}
+
+// TestAbandonedSince 用直接插入的通知验证：只返回原因为 expired 或 task_closed、updated_at 不早于 since 的 ABANDONED 通知
+// （按毫秒，恰在 since 的返回），按 id 升序而不是按时间，快照与按 id 读取的相同；rejected、manual 与其他状态不返回；一次至多 100 条。
+func TestAbandonedSince(t *testing.T) {
+	store, _, running := newNotificationStore(t)
+	ctx := t.Context()
+	const at = int64(1_000_000)
+	// abandoned 直接插入第 n 条原因为 reason、放弃于 updatedAt 的通知，返回其 id。
+	abandoned := func(t *testing.T, s *Store, taskID string, n int, reason string, updatedAt int64) int64 {
+		t.Helper()
+		return insertNotificationAs(t, s, taskID, n, columns{"state": "ABANDONED", "abandon_reason": reason, "updated_at": updatedAt})
+	}
+	closed := abandoned(t, store, running.ID, 1, "task_closed", at+1)
+	expired := abandoned(t, store, running.ID, 2, "expired", at)
+	abandoned(t, store, running.ID, 3, "rejected", at+1)
+	abandoned(t, store, running.ID, 4, "manual", at+1)
+	older := abandoned(t, store, running.ID, 5, "expired", at-1)
+	insertNotificationAs(t, store, running.ID, 6, columns{"updated_at": at + 1})
+	insertNotificationAs(t, store, running.ID, 7, columns{"state": "SENT", "sent_at": at + 1, "updated_at": at + 1})
+	// snapshots 按 id 读取通知的当前快照。
+	snapshots := func(ids ...int64) []Notification {
+		var list []Notification
+		for _, id := range ids {
+			list = append(list, mustGetNotification(t, store, id))
+		}
+		return list
+	}
+	for _, tt := range []struct {
+		name  string
+		since time.Time
+		want  []Notification
+	}{
+		{"零值", time.Time{}, snapshots(closed, expired, older)},
+		{"恰在边界：按 id 而不是按时间排序", time.UnixMilli(at), snapshots(closed, expired)},
+		{"晚 1 毫秒", time.UnixMilli(at + 1), snapshots(closed)},
+		{"晚于全部", time.UnixMilli(at + 2), nil},
+	} {
+		if got, err := store.AbandonedSince(ctx, tt.since); err != nil || !slices.Equal(got, tt.want) {
+			t.Errorf("%s: AbandonedSince = %+v, %v; want %+v", tt.name, got, err, tt.want)
+		}
+	}
+
+	t.Run("至多 100 条", func(t *testing.T) {
+		store, _, running := newNotificationStore(t)
+		var ids []int64
+		for n := 1; n <= 101; n++ {
+			ids = append(ids, abandoned(t, store, running.ID, n, "expired", at))
+		}
+		got, err := store.AbandonedSince(t.Context(), time.UnixMilli(at))
+		if err != nil || len(got) != 100 || got[0].ID != ids[0] || got[99].ID != ids[99] {
+			t.Errorf("AbandonedSince = %d 条（首 %+v）, %v; want id 最小的 100 条", len(got), got[:min(1, len(got))], err)
+		}
+	})
+}
+
+// TestSentWithoutDeliveredID 用直接插入的通知验证：只返回 sent_at 早于 sentBefore（恰在 sentBefore 的不返回）、仍没有实际投递 ID
+// 的 SENT 通知，按 id 升序，快照与按 id 读取的相同；已有实际投递 ID 的、UNCERTAIN 与 PENDING 通知不返回；一次至多 100 条。
+func TestSentWithoutDeliveredID(t *testing.T) {
+	store, _, running := newNotificationStore(t)
+	ctx := t.Context()
+	const at = int64(1_000_000)
+	// sentAt 直接插入第 n 条发出于 when 的 SENT 通知（delivered 为空时不记实际投递 ID），返回其 id。
+	sentAt := func(t *testing.T, s *Store, taskID string, n int, when int64, delivered string) int64 {
+		t.Helper()
+		set := columns{"state": "SENT", "sent_at": when, "updated_at": when}
+		if delivered != "" {
+			set["delivered_message_id"] = delivered
+		}
+		return insertNotificationAs(t, s, taskID, n, set)
+	}
+	late := sentAt(t, store, running.ID, 1, at-1, "")
+	early := sentAt(t, store, running.ID, 2, at-100, "")
+	boundary := sentAt(t, store, running.ID, 3, at, "")
+	sentAt(t, store, running.ID, 4, at-10, syntheticDeliveredID)
+	insertNotificationAs(t, store, running.ID, 5, columns{"state": "UNCERTAIN", "updated_at": at - 10})
+	insertNotificationAs(t, store, running.ID, 6, columns{"updated_at": at - 10})
+	for _, tt := range []struct {
+		name   string
+		before time.Time
+		want   []int64
+	}{
+		{"恰在边界的不返回，按 id 升序", time.UnixMilli(at), []int64{late, early}},
+		{"晚 1 毫秒", time.UnixMilli(at + 1), []int64{late, early, boundary}},
+		{"只剩更早的", time.UnixMilli(at - 1), []int64{early}},
+		{"早于全部", time.UnixMilli(at - 100), nil},
+	} {
+		var want []Notification
+		for _, id := range tt.want {
+			want = append(want, mustGetNotification(t, store, id))
+		}
+		if got, err := store.SentWithoutDeliveredID(ctx, tt.before); err != nil || !slices.Equal(got, want) {
+			t.Errorf("%s: SentWithoutDeliveredID = %+v, %v; want %+v", tt.name, got, err, want)
+		}
+	}
+
+	t.Run("至多 100 条", func(t *testing.T) {
+		store, _, running := newNotificationStore(t)
+		var ids []int64
+		for n := 1; n <= 101; n++ {
+			ids = append(ids, sentAt(t, store, running.ID, n, at, ""))
+		}
+		got, err := store.SentWithoutDeliveredID(t.Context(), time.UnixMilli(at+1))
+		if err != nil || len(got) != 100 || got[0].ID != ids[0] || got[99].ID != ids[99] {
+			t.Errorf("SentWithoutDeliveredID = %d 条, %v; want id 最小的 100 条", len(got), err)
+		}
+	})
+}
+
+// TestHasNotifications 验证库中从未有过通知时为 false；创建一条之后为 true，它被放弃之后仍为 true（「有过」而不是「现有待发」）。
+func TestHasNotifications(t *testing.T) {
+	store, _, running := newNotificationStore(t)
+	ctx := t.Context()
+	if has, err := store.HasNotifications(ctx); err != nil || has {
+		t.Fatalf("空库 HasNotifications = %t, %v; want false", has, err)
+	}
+	created := mustCreateNotification(t, store, notificationFor(running.ID, "first"))
+	if has, err := store.HasNotifications(ctx); err != nil || !has {
+		t.Errorf("创建后 HasNotifications = %t, %v; want true", has, err)
+	}
+	must(t, "AbandonNotification")(store.AbandonNotification(ctx, created.ID, "manual"))
+	if has, err := store.HasNotifications(ctx); err != nil || !has {
+		t.Errorf("放弃后 HasNotifications = %t, %v; want true", has, err)
 	}
 }

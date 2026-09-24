@@ -1,6 +1,8 @@
 // Package sqlite 的收取游标与被拒来信测试用临时目录中的真实 SQLite 数据库验证：游标在同一 UIDVALIDITY 下只进不退、
 // UIDVALIDITY 变化时重置、各文件夹互不影响；被拒来信按 (账户, 文件夹, UIDVALIDITY, UID) 去重、字段校验先于事务、
-// 错误文本不回显地址与 Message-ID、按时间升序分页查询；Go 端的全部原因码都满足数据库的形状约束。
+// 错误文本不回显地址与 Message-ID、按时间升序分页查询；Go 端的全部原因码都满足数据库的形状约束；
+// 按 UID 与按 Message-ID（只认 UIDVALIDITY 不同的记录）查找被拒记录、按时间分批清理，以及导出的 Message-ID 与发件人校验
+// 与存储实际接受的取值一致。
 package sqlite
 
 import (
@@ -13,6 +15,10 @@ import (
 	"testing"
 	"time"
 )
+
+// invalidMessageIDs 是存储拒绝的 Message-ID：空、2 个字符（含多字节字符）、含 NUL、非法 UTF-8（非续字节与续字节、
+// 超长编码）与 999 个字符。
+var invalidMessageIDs = []string{"", "<a", "<é", "<a\x00b>", "<\xff\xfe>", "<\x80>", "\xc0\x80\xc0\x80", "<" + strings.Repeat("a", 997) + ">"}
 
 // mustAdvanceCursor 把 botAccount 在 folder 中的游标写为 c，失败时终止测试。
 func mustAdvanceCursor(t *testing.T, s *Store, folder string, c Cursor) {
@@ -116,7 +122,8 @@ func TestCursorFoldersIndependent(t *testing.T) {
 }
 
 // TestCursorValidation 验证账户为空、过短、过长或含空白，文件夹为空、256 个字符或含 NUL，账户或文件夹含非法 UTF-8，
-// UIDVALIDITY 为 0 时，AdvanceCursor 在开始事务前报错（上下文已取消仍返回校验错误）且不写入；FetchCursor 对同样的账户与文件夹报错。
+// UIDVALIDITY 为 0 时，AdvanceCursor 在开始事务前返回包装 ErrInvalidArgument 的错误（上下文已取消仍返回校验错误）且不写入；
+// FetchCursor 对同样的账户与文件夹报同样的错。
 // 非法 UTF-8 的账户 "\xc0\x80\xc0\x80" 按 Go 计为 4 个字符、按 SQLite 的 length() 计为 2 个，须由 Go 端拒绝而不是留给 CHECK 约束。
 // 文件夹含空格、恰为 255 个字符（含非 ASCII 字符，按字符计）时可以写入与读取。
 func TestCursorValidation(t *testing.T) {
@@ -144,14 +151,15 @@ func TestCursorValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		err := store.AdvanceCursor(ctx, tt.account, tt.folder, tt.cursor)
-		if err == nil || !strings.Contains(err.Error(), "invalid fetch cursor") || errors.Is(err, context.Canceled) {
-			t.Errorf("%s: AdvanceCursor 返回 %v; want 含 \"invalid fetch cursor\" 的错误而不是 context.Canceled", tt.name, err)
+		if err == nil || !strings.Contains(err.Error(), "invalid fetch cursor") || !errors.Is(err, ErrInvalidArgument) || errors.Is(err, context.Canceled) {
+			t.Errorf("%s: AdvanceCursor 返回 %v; want 包装 ErrInvalidArgument、含 \"invalid fetch cursor\" 的错误而不是 context.Canceled", tt.name, err)
 		}
 		if tt.cursor.UIDValidity == 0 {
 			continue
 		}
-		if got, err := store.FetchCursor(ctx, tt.account, tt.folder); err == nil || !strings.Contains(err.Error(), "invalid fetch cursor") {
-			t.Errorf("%s: FetchCursor = %+v, %v; want 含 \"invalid fetch cursor\" 的错误", tt.name, got, err)
+		if got, err := store.FetchCursor(ctx, tt.account, tt.folder); err == nil || !strings.Contains(err.Error(), "invalid fetch cursor") ||
+			!errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: FetchCursor = %+v, %v; want 包装 ErrInvalidArgument、含 \"invalid fetch cursor\" 的错误", tt.name, got, err)
 		}
 	}
 	if got := countRows(t, store.db, "fetch_cursors"); got != 0 {
@@ -272,9 +280,9 @@ func TestRecordRejectionUnknownTask(t *testing.T) {
 	}
 }
 
-// TestRecordRejectionValidation 验证原因码不在列表中、各字段长度、空白、NUL、非法 UTF-8 或取值范围不符时，RecordRejection
-// 在开始事务前报错（上下文已取消仍返回校验错误）且不写入，错误文本不含地址、Message-ID 与任务 ID；任务 ID 须为空或任务 ID 的形式；
-// 边界值可以写入。
+// TestRecordRejectionValidation 验证原因码不在列表中（包括形状合法的未知原因码）、各字段长度、空白、NUL、非法 UTF-8 或取值范围
+// 不符时，RecordRejection 在开始事务前返回包装 ErrInvalidArgument 的错误（上下文已取消仍返回校验错误）且不写入，错误文本不含地址、
+// Message-ID 与任务 ID；任务 ID 须为空或任务 ID 的形式；边界值可以写入。
 func TestRecordRejectionValidation(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -313,8 +321,10 @@ func TestRecordRejectionValidation(t *testing.T) {
 		r := rejectionFor(1)
 		tt.modify(&r)
 		id, duplicate, err := store.RecordRejection(ctx, r)
-		if err == nil || !strings.Contains(err.Error(), "invalid rejection") || errors.Is(err, context.Canceled) || id != 0 || duplicate {
-			t.Errorf("%s: RecordRejection = %d, %t, %v; want 含 \"invalid rejection\" 的错误而不是 context.Canceled", tt.name, id, duplicate, err)
+		if err == nil || !strings.Contains(err.Error(), "invalid rejection") || !errors.Is(err, ErrInvalidArgument) || errors.Is(err, context.Canceled) ||
+			id != 0 || duplicate {
+			t.Errorf("%s: RecordRejection = %d, %t, %v; want 包装 ErrInvalidArgument、含 \"invalid rejection\" 的错误而不是 context.Canceled",
+				tt.name, id, duplicate, err)
 			continue
 		}
 		for _, value := range []string{r.Account, r.MessageID, r.Sender, r.TaskID} {
@@ -344,7 +354,7 @@ func TestRecordRejectionValidation(t *testing.T) {
 }
 
 // TestRejectionsOrderAndLimit 验证 Rejections 按 (received_at, id) 升序返回（写入顺序与时间顺序不同，同一毫秒按 ID），
-// 只返回 received_at 晚于 since 的记录（恰在 since 的不返回），limit 生效且须为 1–1000。
+// 只返回 received_at 晚于 since 的记录（恰在 since 的不返回），limit 生效且须为 1–1000，越界时返回包装 ErrInvalidArgument 的错误。
 func TestRejectionsOrderAndLimit(t *testing.T) {
 	store, clock := openTaskStore(t, nil)
 	start := *clock
@@ -380,19 +390,35 @@ func TestRejectionsOrderAndLimit(t *testing.T) {
 		}
 	}
 	for _, limit := range []int{0, -1, 1001} {
-		if got, err := store.Rejections(t.Context(), time.Time{}, limit); err == nil || got != nil {
-			t.Errorf("limit %d: Rejections = %+v, %v; want 错误", limit, got, err)
+		if got, err := store.Rejections(t.Context(), time.Time{}, limit); err == nil || got != nil || !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("limit %d: Rejections = %+v, %v; want 包装 ErrInvalidArgument 的错误", limit, got, err)
 		}
 	}
 }
 
-// TestRejectReasonsMatchDatabase 验证 Go 端的原因码列表恰为契约列出的 13 个常量，且逐个经 RecordRejection 写入成功，
-// 即每个都满足 inbound_rejections.reason 的形状约束（1–40 个 [a-z_] 字符）；4b 增补原因码时本测试随之要求更新。
+// TestRejectReasonsMatchDatabase 验证 Go 端的原因码列表恰为 4a 的 13 个与 4b 增补的 7 个常量，4b 增补的常量取值与契约逐字相同，
+// 且逐个经 RecordRejection 写入并按原样读回，即每个都满足 inbound_rejections.reason 的形状约束（1–40 个 [a-z_] 字符）；
+// 以后增补原因码时本测试随之要求更新。未知原因码被拒绝见 TestRecordRejectionValidation。
 func TestRejectReasonsMatchDatabase(t *testing.T) {
+	added := map[RejectReason]string{
+		RejectSubjectTagMissing:  "subject_tag_missing",
+		RejectSubjectTagMultiple: "subject_tag_multiple",
+		RejectSubjectTagDamaged:  "subject_tag_damaged",
+		RejectTokenSuperseded:    "token_superseded",
+		RejectRateLimited:        "rate_limited",
+		RejectMailPaused:         "mail_paused",
+		RejectEmptyBody:          "empty_body",
+	}
+	for reason, literal := range added {
+		if string(reason) != literal {
+			t.Errorf("原因码常量 = %q; want %q", reason, literal)
+		}
+	}
 	want := []RejectReason{
 		RejectAutoReply, RejectBounce, RejectSenderNotAllowed, RejectTooLarge, RejectMalformed, RejectParseUncertain,
 		RejectThreadMismatch, RejectSubjectTag, RejectTokenMissing, RejectTokenInvalid, RejectTokenExpired, RejectTaskUnknown,
-		RejectMessageConflict,
+		RejectMessageConflict, RejectSubjectTagMissing, RejectSubjectTagMultiple, RejectSubjectTagDamaged, RejectTokenSuperseded,
+		RejectRateLimited, RejectMailPaused, RejectEmptyBody,
 	}
 	known := slices.Sorted(maps.Keys(knownRejectReasons))
 	if sortedWant := slices.Sorted(slices.Values(want)); !slices.Equal(known, sortedWant) {
@@ -417,7 +443,8 @@ func TestRejectReasonsMatchDatabase(t *testing.T) {
 	}
 }
 
-// TestMailboxCanceledContext 验证输入合法而上下文已取消时，游标与被拒来信的四个方法都返回 context.Canceled，且不写入任何行。
+// TestMailboxCanceledContext 验证输入合法而上下文已取消时，游标与被拒来信的各方法都返回 context.Canceled（不是
+// ErrInvalidArgument），且不写入任何行。
 func TestMailboxCanceledContext(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -427,15 +454,215 @@ func TestMailboxCanceledContext(t *testing.T) {
 		"AdvanceCursor":   func() error { return store.AdvanceCursor(ctx, botAccount, "INBOX", Cursor{UIDValidity: 7, LastUID: 1}) },
 		"RecordRejection": func() error { _, _, err := store.RecordRejection(ctx, rejectionFor(1)); return err },
 		"Rejections":      func() error { _, err := store.Rejections(ctx, time.Time{}, 10); return err },
+		"RejectionExists": func() error { _, err := store.RejectionExists(ctx, botAccount, "INBOX", 7, 1); return err },
+		"RejectedBeforeReset": func() error {
+			_, err := store.RejectedBeforeReset(ctx, botAccount, "INBOX", 7, "<r1@example.invalid>")
+			return err
+		},
+		"PruneRejections": func() error { _, err := store.PruneRejections(ctx, time.UnixMilli(1)); return err },
 	}
 	for name, call := range calls {
-		if err := call(); !errors.Is(err, context.Canceled) {
+		if err := call(); !errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s: err = %v; want context.Canceled", name, err)
 		}
 	}
 	for _, table := range []string{"fetch_cursors", "inbound_rejections"} {
 		if got := countRows(t, store.db, table); got != 0 {
 			t.Errorf("%s 有 %d 行; want 0", table, got)
+		}
+	}
+}
+
+// TestRejectionExists 验证按 (账户, 文件夹, UIDVALIDITY, UID) 判断被拒记录是否存在：四个键全部相同才为真，任一不同为假。
+func TestRejectionExists(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	mustRecordRejection(t, store, rejectionFor(1))
+	for _, tt := range []struct {
+		name            string
+		account, folder string
+		uidValidity     uint32
+		uid             uint32
+		want            bool
+	}{
+		{"同一封", botAccount, "INBOX", 7, 1, true},
+		{"另一 UID", botAccount, "INBOX", 7, 2, false},
+		{"另一文件夹", botAccount, "Junk", 7, 1, false},
+		{"另一 UIDVALIDITY", botAccount, "INBOX", 8, 1, false},
+		{"另一账户", "other@example.invalid", "INBOX", 7, 1, false},
+	} {
+		if got, err := store.RejectionExists(t.Context(), tt.account, tt.folder, tt.uidValidity, tt.uid); err != nil || got != tt.want {
+			t.Errorf("%s: RejectionExists = %t, %v; want %t", tt.name, got, err, tt.want)
+		}
+	}
+}
+
+// TestRejectedBeforeReset 验证按 Message-ID 认出 UIDVALIDITY 重置前被拒的来信：同一账户与文件夹中 Message-ID 相同、UIDVALIDITY
+// 不同的被拒记录才算；UIDVALIDITY 相同的不算（伪造者不能借一条被拒记录挡掉同一 UIDVALIDITY 下 Message-ID 相同的合法回复），
+// 另一文件夹、另一账户与另一 Message-ID 也不算。同一 Message-ID 在新 UIDVALIDITY 下再被拒绝后，查询任一 UIDVALIDITY 都为真。
+// 查询使用 0003 的 inbound_rejections_by_message 索引。
+func TestRejectedBeforeReset(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	ctx := t.Context()
+	const rejected = "<r1@example.invalid>"
+	mustRecordRejection(t, store, rejectionFor(1))
+	bare := rejectionFor(2)
+	bare.MessageID = ""
+	mustRecordRejection(t, store, bare)
+	// check 断言 RejectedBeforeReset(account, folder, uidValidity, messageID) 的结果为 want。
+	check := func(name, account, folder string, uidValidity uint32, messageID string, want bool) {
+		t.Helper()
+		if got, err := store.RejectedBeforeReset(ctx, account, folder, uidValidity, messageID); err != nil || got != want {
+			t.Errorf("%s: RejectedBeforeReset = %t, %v; want %t", name, got, err, want)
+		}
+	}
+	check("UIDVALIDITY 不同", botAccount, "INBOX", 8, rejected, true)
+	check("UIDVALIDITY 相同", botAccount, "INBOX", 7, rejected, false)
+	check("另一文件夹", botAccount, "Junk", 8, rejected, false)
+	check("另一账户", "other@example.invalid", "INBOX", 8, rejected, false)
+	check("另一 Message-ID", botAccount, "INBOX", 8, "<r9@example.invalid>", false)
+
+	reset := rejectionFor(5)
+	reset.UIDValidity, reset.MessageID = 8, rejected
+	mustRecordRejection(t, store, reset)
+	check("重置后再被拒，查询旧 UIDVALIDITY", botAccount, "INBOX", 7, rejected, true)
+	check("重置后再被拒，查询新 UIDVALIDITY", botAccount, "INBOX", 8, rejected, true)
+	check("第三个 UIDVALIDITY", botAccount, "INBOX", 9, rejected, true)
+
+	plan := dumpRows(t, store.db, "EXPLAIN QUERY PLAN "+rejectedBeforeResetQuery, botAccount, "INBOX", rejected, 9)
+	if !slices.ContainsFunc(plan, func(row string) bool { return strings.Contains(row, "USING INDEX inbound_rejections_by_message") }) {
+		t.Errorf("RejectedBeforeReset 的查询计划 = %q; want 使用 inbound_rejections_by_message", plan)
+	}
+}
+
+// TestPruneRejections 验证清理：只删除 received_at 早于 before 的被拒记录（按毫秒，恰在 before 的保留），返回删除条数，
+// 没有可删的记录时返回 0；一次至多删除 10000 条且先删最早的，多出的留给下一次。
+func TestPruneRejections(t *testing.T) {
+	store, clock := openTaskStore(t, nil)
+	start := *clock
+	for i, offset := range []time.Duration{-time.Millisecond, 0, time.Millisecond} {
+		*clock = start.Add(offset)
+		mustRecordRejection(t, store, rejectionFor(uint32(i+1)))
+	}
+	// prune 调用 PruneRejections(before)，断言删除 want 条，且剩余记录的 UID 依次为 remaining。
+	prune := func(t *testing.T, s *Store, step string, before time.Time, want int, remaining ...string) {
+		t.Helper()
+		if got, err := s.PruneRejections(t.Context(), before); err != nil || got != want {
+			t.Errorf("%s: PruneRejections = %d, %v; want %d", step, got, err, want)
+		}
+		if got := dumpRows(t, s.db, "SELECT uid FROM inbound_rejections ORDER BY uid"); !slices.Equal(got, remaining) {
+			t.Errorf("%s 之后剩余 UID = %q; want %q", step, got, remaining)
+		}
+	}
+	prune(t, store, "早于 before 的一条", start, 1, "2", "3")
+	prune(t, store, "再次清理", start, 0, "2", "3")
+	prune(t, store, "晚 2 毫秒", start.Add(2*time.Millisecond), 2)
+	prune(t, store, "空表", start.Add(time.Hour), 0)
+
+	t.Run("一次至多 10000 条", func(t *testing.T) {
+		store, _ := openTaskStore(t, nil)
+		if _, err := store.db.ExecContext(t.Context(),
+			"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10001) "+
+				"INSERT INTO inbound_rejections (account, folder, uid_validity, uid, reason, received_at) SELECT ?, 'INBOX', 7, i, 'malformed', 1000 + i FROM n",
+			botAccount); err != nil {
+			t.Fatalf("插入 10001 条被拒记录失败: %v", err)
+		}
+		before := time.UnixMilli(1_000_000)
+		prune(t, store, "第一次", before, 10000, "10001")
+		prune(t, store, "第二次", before, 1)
+		prune(t, store, "第三次", before, 0)
+	})
+}
+
+// TestValidMessageIDAndSender 验证导出的校验函数与存储实际接受的取值一致。Message-ID：3 个字符（含多字节字符）与 998 个字符
+// （含多字节字符）合法，2 与 999 个字符、NUL 与非法 UTF-8 不合法；ValidMessageID 为真当且仅当 RecordRejection 与 RecordReply
+// 接受它，且 RecordDeliveredMessageID、ResolveUncertainAsDelivered、NotificationByMessageID、NotificationByDeliveredID、
+// InboundByMessageID 与 RejectedBeforeReset 不以 ErrInvalidArgument 拒绝它。发件人：3 与 254 个字符（含多字节字符）合法，
+// 2 与 255 个字符、空白（含全角空格）、NUL 与非法 UTF-8 不合法；ValidSender 为真当且仅当 RecordRejection 接受它。
+// 空字符串对两者都不合法：被拒记录把空值当作缺失，不经这两条规则。
+func TestValidMessageIDAndSender(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	ctx := t.Context()
+	running := startTask(t, store)
+	pending, err := store.CreateNotification(ctx, notificationFor(running.ID, "validity"))
+	if err != nil {
+		t.Fatalf("CreateNotification 返回错误: %v", err)
+	}
+	if ValidMessageID("") || ValidSender("") {
+		t.Errorf("ValidMessageID(\"\") = %t, ValidSender(\"\") = %t; want 都为 false", ValidMessageID(""), ValidSender(""))
+	}
+	messageIDs := []struct {
+		id    string
+		valid bool
+	}{
+		{"<a>", true},
+		{"<é>", true},
+		{strings.Repeat("a", 998), true},
+		{"<" + strings.Repeat("é", 996) + ">", true},
+		{"<" + strings.Repeat("é", 997) + ">", false},
+	}
+	for _, id := range invalidMessageIDs[1:] {
+		messageIDs = append(messageIDs, struct {
+			id    string
+			valid bool
+		}{id, false})
+	}
+	uid := uint32(0)
+	for _, tt := range messageIDs {
+		if got := ValidMessageID(tt.id); got != tt.valid {
+			t.Errorf("ValidMessageID(%q) = %t; want %t", tt.id, got, tt.valid)
+		}
+		uid++
+		rejection := rejectionFor(uid)
+		rejection.MessageID = tt.id
+		_, _, rejectionErr := store.RecordRejection(ctx, rejection)
+		reply := withBody(inbound(running.ID), "synthetic reply "+strconv.Itoa(int(uid)))
+		reply.UID, reply.MessageID = uid, tt.id
+		_, replyErr := store.RecordReply(ctx, reply)
+		for name, err := range map[string]error{"RecordRejection": rejectionErr, "RecordReply": replyErr} {
+			if (err == nil) != tt.valid || (err != nil && !errors.Is(err, ErrInvalidArgument)) {
+				t.Errorf("%s 对 %q 返回 %v; want 接受 = %t，拒绝时包装 ErrInvalidArgument", name, tt.id, err, tt.valid)
+			}
+		}
+		_, deliveredErr := store.RecordDeliveredMessageID(ctx, pending.ID, tt.id)
+		_, resolveErr := store.ResolveUncertainAsDelivered(ctx, pending.ID, tt.id)
+		_, byMessageErr := store.NotificationByMessageID(ctx, tt.id)
+		_, byDeliveredErr := store.NotificationByDeliveredID(ctx, tt.id)
+		_, inboundErr := store.InboundByMessageID(ctx, botAccount, tt.id)
+		_, resetErr := store.RejectedBeforeReset(ctx, botAccount, "INBOX", 9, tt.id)
+		for name, err := range map[string]error{
+			"RecordDeliveredMessageID": deliveredErr, "ResolveUncertainAsDelivered": resolveErr, "NotificationByMessageID": byMessageErr,
+			"NotificationByDeliveredID": byDeliveredErr, "InboundByMessageID": inboundErr, "RejectedBeforeReset": resetErr,
+		} {
+			if errors.Is(err, ErrInvalidArgument) == tt.valid {
+				t.Errorf("%s 对 %q 返回 %v; want 以 ErrInvalidArgument 拒绝 = %t", name, tt.id, err, !tt.valid)
+			}
+		}
+	}
+
+	for _, tt := range []struct {
+		sender string
+		valid  bool
+	}{
+		{"a@b", true},
+		{strings.Repeat("u", 242) + "@example.com", true},
+		{strings.Repeat("é", 242) + "@example.com", true},
+		{"u@", false},
+		{strings.Repeat("u", 243) + "@example.com", false},
+		{"user @example.invalid", false},
+		{"user\t@example.invalid", false},
+		{"user　@example.invalid", false},
+		{"user\x00@example.invalid", false},
+		{"\xc0\x80\xc0\x80", false},
+		{"user\xff@example.invalid", false},
+	} {
+		if got := ValidSender(tt.sender); got != tt.valid {
+			t.Errorf("ValidSender(%q) = %t; want %t", tt.sender, got, tt.valid)
+		}
+		uid++
+		rejection := rejectionFor(uid)
+		rejection.Sender = tt.sender
+		if _, _, err := store.RecordRejection(ctx, rejection); (err == nil) != tt.valid || (err != nil && !errors.Is(err, ErrInvalidArgument)) {
+			t.Errorf("RecordRejection 对发件人 %q 返回 %v; want 接受 = %t，拒绝时包装 ErrInvalidArgument", tt.sender, err, tt.valid)
 		}
 	}
 }

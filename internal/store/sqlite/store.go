@@ -57,10 +57,10 @@ const (
 var uriEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 
 // Open 在 dataDir 中打开或创建 turncourier.db，执行未应用的迁移，再尽力执行一次 TRUNCATE 检查点。
-// dataDir 必须是绝对路径；目录权限须为 0700、数据库文件须为 0600（Unix），否则拒绝打开。
+// dataDir 必须是绝对路径（否则返回包装 ErrInvalidArgument 的错误）；目录权限须为 0700、数据库文件须为 0600（Unix），否则拒绝打开。
 func Open(ctx context.Context, dataDir string, opts Options) (*Store, error) {
 	if !filepath.IsAbs(dataDir) {
-		return nil, errors.New("data directory must be an absolute path")
+		return nil, invalidArgument("data directory must be an absolute path")
 	}
 	path := filepath.Join(dataDir, databaseFileName)
 	if err := prepareFiles(dataDir, path); err != nil {
@@ -167,6 +167,24 @@ func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("cannot read schema version: %w", err)
 	}
 	return version, nil
+}
+
+// count 执行一条 SELECT count(*) 查询（query 只来自本包的常量）并返回结果；what 只用于错误文本。
+func (s *Store) count(ctx context.Context, what, query string, args ...any) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("cannot count %s: %w", what, err)
+	}
+	return n, nil
+}
+
+// exists 执行一条 SELECT EXISTS (…) 查询（query 只来自本包的常量）并返回结果；what 只用于错误文本。
+func (s *Store) exists(ctx context.Context, what, query string, args ...any) (bool, error) {
+	var found bool
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&found); err != nil {
+		return false, fmt.Errorf("cannot read %s: %w", what, err)
+	}
+	return found, nil
 }
 
 // withoutPath 去掉文件系统错误中的路径，保证面向用户的错误不暴露本机绝对路径。

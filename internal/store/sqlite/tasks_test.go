@@ -1,11 +1,14 @@
-// Package sqlite 的任务持久化测试用临时目录中的真实 SQLite 数据库验证创建、启动、事件、版本冲突、失败回滚与事件记录。
+// Package sqlite 的任务持久化测试用临时目录中的真实 SQLite 数据库验证创建、启动、事件、版本冲突、失败回滚与事件记录，
+// 邮件触发的持久暂停，以及 4b 新增接口的输入校验都包装 ErrInvalidArgument。
 package sqlite
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,12 +114,12 @@ func TestCreateTask(t *testing.T) {
 }
 
 // TestCreateTaskRejectsUnknownAgent 验证未知或大小写不符的 Agent 类型在写库前被 Go 端校验拒绝，
-// 错误文本须含 "unknown agent"，以区别于 agent 列 CHECK 约束的报错；且不写入任何任务。
+// 错误文本须含 "unknown agent" 并包装 ErrInvalidArgument，以区别于 agent 列 CHECK 约束的报错；且不写入任何任务。
 func TestCreateTaskRejectsUnknownAgent(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	for _, agent := range []Agent{"", "gemini", "Codex", "claude "} {
-		if got, err := store.CreateTask(t.Context(), agent); err == nil || !strings.Contains(err.Error(), "unknown agent") {
-			t.Errorf("CreateTask(%q) = %+v, %v; want 含 \"unknown agent\" 的错误", agent, got, err)
+		if got, err := store.CreateTask(t.Context(), agent); err == nil || !strings.Contains(err.Error(), "unknown agent") || !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("CreateTask(%q) = %+v, %v; want 包装 ErrInvalidArgument、含 \"unknown agent\" 的错误", agent, got, err)
 		}
 	}
 	if got := countRows(t, store.db, "tasks"); got != 0 {
@@ -226,14 +229,15 @@ func TestStartTask(t *testing.T) {
 	}
 }
 
-// TestStartTaskSessionID 验证会话 ID 须为 1–200 个字母、数字或 . _ : -，否则返回 ErrInvalidSessionID 且不改动数据库；
-// 恰好 200 个字符且包含每类允许字符的会话 ID 可以写入。
+// TestStartTaskSessionID 验证会话 ID 须为 1–200 个字母、数字或 . _ : -，否则返回 ErrInvalidSessionID（它同时满足
+// errors.Is(err, ErrInvalidArgument)，文本仍为原样）且不改动数据库；恰好 200 个字符且包含每类允许字符的会话 ID 可以写入。
 func TestStartTaskSessionID(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	created := createTask(t, store)
 	for _, sessionID := range []string{"", strings.Repeat("a", 201), "thread 1", "thread-1\n", "thread/1", "会话-1"} {
-		if _, err := store.StartTask(t.Context(), created.ID, created.Version, sessionID); !errors.Is(err, ErrInvalidSessionID) {
-			t.Errorf("StartTask(%q) 错误 = %v; want ErrInvalidSessionID", sessionID, err)
+		if _, err := store.StartTask(t.Context(), created.ID, created.Version, sessionID); !errors.Is(err, ErrInvalidSessionID) ||
+			!errors.Is(err, ErrInvalidArgument) || err.Error() != "invalid agent session id" {
+			t.Errorf("StartTask(%q) 错误 = %v; want 同时包装 ErrInvalidArgument 的 ErrInvalidSessionID", sessionID, err)
 		}
 	}
 	requireUnchanged(t, store, created, 0)
@@ -317,8 +321,8 @@ func TestApplyTaskEvent(t *testing.T) {
 }
 
 // TestApplyTaskEventRejectsReservedEvents 验证 start、reply_dispatched、delivery_unknown、delivery_confirmed 与未知事件
-// 返回 task.ErrInvalidTransition 且不改动数据库。每个保留事件都在状态机本会接受它的状态下调用，
-// 证明拒绝来自 ApplyTaskEvent 本身，而不是状态机。
+// 返回同时包装 task.ErrInvalidTransition 与 ErrInvalidArgument 的错误且不改动数据库。每个保留事件都在状态机本会接受它的状态下调用，
+// 证明拒绝来自 ApplyTaskEvent 本身的输入校验，而不是状态机；状态机拒绝的转移不是输入校验错误。
 func TestApplyTaskEventRejectsReservedEvents(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	created := createTask(t, store)
@@ -344,10 +348,14 @@ func TestApplyTaskEventRejectsReservedEvents(t *testing.T) {
 	}
 	for _, tt := range tests {
 		_, err := store.ApplyTaskEvent(t.Context(), tt.current.ID, tt.current.Version, tt.event)
-		if !errors.Is(err, task.ErrInvalidTransition) {
-			t.Errorf("ApplyTaskEvent(%s) 错误 = %v; want task.ErrInvalidTransition", tt.event, err)
+		if !errors.Is(err, task.ErrInvalidTransition) || !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("ApplyTaskEvent(%s) 错误 = %v; want 同时包装 task.ErrInvalidTransition 与 ErrInvalidArgument", tt.event, err)
 		}
 		requireUnchanged(t, store, tt.current, events)
+	}
+	if _, err := store.ApplyTaskEvent(t.Context(), created.ID, created.Version, task.TurnCompleted); !errors.Is(err, task.ErrInvalidTransition) ||
+		errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("CREATED 上的 turn_completed: 错误 = %v; want 只包装 task.ErrInvalidTransition", err)
 	}
 }
 
@@ -493,6 +501,163 @@ func TestTaskEventsRejectsUnknownState(t *testing.T) {
 		}
 		if events, err := store.TaskEvents(t.Context(), created.ID); err == nil || !strings.Contains(err.Error(), "BOGUS") {
 			t.Errorf("%v: TaskEvents = %+v, %v; want 未知状态错误", states, events, err)
+		}
+	}
+}
+
+// TestMailPause 验证 D8 的持久暂停：从未暂停时 MailPaused 为 false 与零值，ResumeMail 不是错误也不写入；PauseMail 写入原因与
+// paused_at，正在暂停时再次 PauseMail 不改动（原因与 paused_at 保持第一次的值）；ResumeMail 记下 resumed_at，此后 MailPaused 返回
+// false 与解除时刻，再次 ResumeMail 不改动；解除之后再次 PauseMail 写入新的原因与 paused_at 并清空 resumed_at；时钟回拨到 paused_at
+// 之前时 ResumeMail 以 paused_at 作为解除时刻，满足表约束；每个任务至多一行，任务之间互不影响；任务不存在时 PauseMail 返回
+// ErrNotFound（不是 ErrInvalidArgument）且不写入。
+func TestMailPause(t *testing.T) {
+	store, clock := openTaskStore(t, nil)
+	ctx := t.Context()
+	current := startTask(t, store)
+	other := startTask(t, store)
+	// ms 把时刻格式化为 mail_pauses 中保存的 UTC 毫秒文本。
+	ms := func(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) }
+	// requirePaused 断言 MailPaused(current) 返回 paused 与 resumedAt，且 mail_pauses 中该任务的行（原因|paused_at|resumed_at）为 row。
+	requirePaused := func(step string, paused bool, resumedAt time.Time, row ...string) {
+		t.Helper()
+		gotPaused, gotResumed, err := store.MailPaused(ctx, current.ID)
+		if err != nil || gotPaused != paused || !gotResumed.Equal(resumedAt) {
+			t.Errorf("%s: MailPaused = %t, %v, %v; want %t, %v", step, gotPaused, gotResumed, err, paused, resumedAt)
+		}
+		if got := dumpRows(t, store.db, "SELECT reason, paused_at, resumed_at FROM mail_pauses WHERE task_id = ?", current.ID); !slices.Equal(got, row) {
+			t.Errorf("%s: mail_pauses 行 = %q; want %q", step, got, row)
+		}
+	}
+	// mustRun 执行暂停或解除，失败时终止测试。
+	mustRun := func(name string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s 返回错误: %v", name, err)
+		}
+	}
+
+	requirePaused("从未暂停", false, time.Time{})
+	mustRun("从未暂停时 ResumeMail", store.ResumeMail(ctx, current.ID))
+	requirePaused("从未暂停时解除", false, time.Time{})
+
+	pausedAt := clock.UTC()
+	mustRun("PauseMail(hourly)", store.PauseMail(ctx, current.ID, PauseHourly))
+	requirePaused("暂停", true, time.Time{}, "hourly|"+ms(pausedAt)+"|<nil>")
+	*clock = clock.Add(time.Minute)
+	mustRun("再次 PauseMail(daily)", store.PauseMail(ctx, current.ID, PauseDaily))
+	requirePaused("正在暂停时再次暂停", true, time.Time{}, "hourly|"+ms(pausedAt)+"|<nil>")
+
+	*clock = clock.Add(time.Minute)
+	resumedAt := clock.UTC()
+	mustRun("ResumeMail", store.ResumeMail(ctx, current.ID))
+	requirePaused("解除", false, resumedAt, "hourly|"+ms(pausedAt)+"|"+ms(resumedAt))
+	*clock = clock.Add(time.Minute)
+	mustRun("再次 ResumeMail", store.ResumeMail(ctx, current.ID))
+	requirePaused("没有暂停时再次解除", false, resumedAt, "hourly|"+ms(pausedAt)+"|"+ms(resumedAt))
+
+	*clock = clock.Add(time.Minute)
+	repausedAt := clock.UTC()
+	mustRun("解除后 PauseMail(daily)", store.PauseMail(ctx, current.ID, PauseDaily))
+	requirePaused("解除之后再次暂停", true, time.Time{}, "daily|"+ms(repausedAt)+"|<nil>")
+
+	*clock = repausedAt.Add(-time.Hour)
+	mustRun("时钟回拨后 ResumeMail", store.ResumeMail(ctx, current.ID))
+	requirePaused("时钟回拨后解除", false, repausedAt, "daily|"+ms(repausedAt)+"|"+ms(repausedAt))
+
+	if paused, at, err := store.MailPaused(ctx, other.ID); err != nil || paused || !at.IsZero() {
+		t.Errorf("另一任务 MailPaused = %t, %v, %v; want false、零值", paused, at, err)
+	}
+	if err := store.PauseMail(ctx, "0000000000", PauseHourly); !errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("任务不存在: PauseMail = %v; want ErrNotFound", err)
+	}
+	if got := countRows(t, store.db, "mail_pauses"); got != 1 {
+		t.Errorf("mail_pauses 行数 = %d; want 1", got)
+	}
+}
+
+// TestNewInterfacesRejectInvalidArguments 验证 4b 新增接口的每项输入校验：不合法的任务 ID（空、9 个字符、含 u、含大写字母、
+// 形似地址）、Message-ID（invalidMessageIDs 中的每一个）、账户与文件夹（按 checkMailbox 的规则）、为 0 的 UIDVALIDITY 与 UID、
+// 越界的 limit 与未知的暂停原因都返回包装 ErrInvalidArgument 的错误；上下文已取消时同样如此，证明校验先于访问数据库；
+// 错误文本不回显取值，校验失败不写入任何行。
+func TestNewInterfacesRejectInvalidArguments(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	running := startTask(t, store)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	const validMessageID = "<a@example.invalid>"
+	// call 是一次应当被校验拒绝的调用；value 是其中不合法的取值，用来断言错误文本不回显它。
+	type call struct {
+		name  string
+		value string
+		run   func() error
+	}
+	var calls []call
+	for _, id := range []string{"", "000000000", "000000000u", "ABCDEFGHJK", "attacker@example.invalid"} {
+		calls = append(calls,
+			call{"LatestAttemptedNotification", id, func() error { _, err := store.LatestAttemptedNotification(ctx, id, time.Time{}); return err }},
+			call{"LatestSentNotification", id, func() error { _, err := store.LatestSentNotification(ctx, id); return err }},
+			call{"ThreadReferences", id, func() error { _, err := store.ThreadReferences(ctx, id, 100, 20); return err }},
+			call{"CountAcceptedRepliesSince", id, func() error { _, err := store.CountAcceptedRepliesSince(ctx, id, time.Time{}); return err }},
+			call{"PauseMail", id, func() error { return store.PauseMail(ctx, id, PauseHourly) }},
+			call{"MailPaused", id, func() error { _, _, err := store.MailPaused(ctx, id); return err }},
+			call{"ResumeMail", id, func() error { return store.ResumeMail(ctx, id) }},
+		)
+	}
+	for _, id := range invalidMessageIDs {
+		calls = append(calls,
+			call{"NotificationByMessageID", id, func() error { _, err := store.NotificationByMessageID(ctx, id); return err }},
+			call{"NotificationByDeliveredID", id, func() error { _, err := store.NotificationByDeliveredID(ctx, id); return err }},
+			call{"ResolveUncertainAsDelivered", id, func() error { _, err := store.ResolveUncertainAsDelivered(ctx, 1, id); return err }},
+			call{"InboundByMessageID", id, func() error { _, err := store.InboundByMessageID(ctx, botAccount, id); return err }},
+			call{"RejectedBeforeReset", id, func() error { _, err := store.RejectedBeforeReset(ctx, botAccount, "INBOX", 7, id); return err }},
+		)
+	}
+	for _, account := range []string{"", "a@", strings.Repeat("a", 243) + "@example.com", "bot @example.invalid", "bot\x00@example.invalid", "bot\xff@example.invalid"} {
+		calls = append(calls,
+			call{"InboundByMessageID", account, func() error { _, err := store.InboundByMessageID(ctx, account, validMessageID); return err }},
+			call{"RejectionExists", account, func() error { _, err := store.RejectionExists(ctx, account, "INBOX", 7, 1); return err }},
+			call{"RejectedBeforeReset", account, func() error {
+				_, err := store.RejectedBeforeReset(ctx, account, "INBOX", 7, validMessageID)
+				return err
+			}},
+		)
+	}
+	for _, folder := range []string{"", strings.Repeat("f", 256), "IN\x00BOX", "IN\xffBOX"} {
+		calls = append(calls,
+			call{"RejectionExists", folder, func() error { _, err := store.RejectionExists(ctx, botAccount, folder, 7, 1); return err }},
+			call{"RejectedBeforeReset", folder, func() error {
+				_, err := store.RejectedBeforeReset(ctx, botAccount, folder, 7, validMessageID)
+				return err
+			}},
+		)
+	}
+	calls = append(calls,
+		call{"RejectionExists（UIDVALIDITY 为 0）", "", func() error { _, err := store.RejectionExists(ctx, botAccount, "INBOX", 0, 1); return err }},
+		call{"RejectionExists（UID 为 0）", "", func() error { _, err := store.RejectionExists(ctx, botAccount, "INBOX", 7, 0); return err }},
+		call{"RejectedBeforeReset（UIDVALIDITY 为 0）", "", func() error {
+			_, err := store.RejectedBeforeReset(ctx, botAccount, "INBOX", 0, validMessageID)
+			return err
+		}},
+		call{"ThreadReferences（limit 0）", "", func() error { _, err := store.ThreadReferences(ctx, running.ID, 100, 0); return err }},
+		call{"ThreadReferences（limit -1）", "", func() error { _, err := store.ThreadReferences(ctx, running.ID, 100, -1); return err }},
+		call{"ThreadReferences（limit 21）", "", func() error { _, err := store.ThreadReferences(ctx, running.ID, 100, 21); return err }},
+		call{"PauseMail（原因为 weekly）", "weekly", func() error { return store.PauseMail(ctx, running.ID, "weekly") }},
+		call{"PauseMail（原因为空）", "", func() error { return store.PauseMail(ctx, running.ID, "") }},
+		call{"PauseMail（原因为 HOURLY）", "HOURLY", func() error { return store.PauseMail(ctx, running.ID, "HOURLY") }},
+	)
+	for _, c := range calls {
+		err := c.run()
+		if !errors.Is(err, ErrInvalidArgument) || errors.Is(err, context.Canceled) {
+			t.Errorf("%s(%q): err = %v; want 包装 ErrInvalidArgument 的校验错误", c.name, c.value, err)
+			continue
+		}
+		if len(c.value) >= 3 && strings.Contains(err.Error(), c.value) {
+			t.Errorf("%s: 错误文本 %q 回显了取值 %q", c.name, err, c.value)
+		}
+	}
+	for _, table := range []string{"mail_pauses", "notifications"} {
+		if got := countRows(t, store.db, table); got != 0 {
+			t.Errorf("%s 行数 = %d; want 0", table, got)
 		}
 	}
 }

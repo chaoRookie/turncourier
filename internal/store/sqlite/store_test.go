@@ -141,7 +141,7 @@ func TestOpenBeginsImmediateTransactions(t *testing.T) {
 }
 
 // TestOpenConcurrentlyOnNewDirectory 模拟多个进程首次同时打开同一个尚不存在的数据目录：每轮 4 个存储实例同时 Open，
-// 全部成功且读到的 user_version 都是 2；循环 30 轮。空文件从回滚日志模式转为 WAL 时的锁升级冲突不经 busy_timeout 等待，
+// 全部成功且读到的 user_version 都是 3；循环 30 轮。空文件从回滚日志模式转为 WAL 时的锁升级冲突不经 busy_timeout 等待，
 // 直接返回 SQLITE_BUSY，须由 Open 重试吸收；迁移在事务内重新读取 user_version，不会被第二个实例重复执行而报表已存在。
 func TestOpenConcurrentlyOnNewDirectory(t *testing.T) {
 	const rounds, openers = 30, 4
@@ -159,8 +159,8 @@ func TestOpenConcurrentlyOnNewDirectory(t *testing.T) {
 					return
 				}
 				opened <- store
-				if version, err := store.SchemaVersion(t.Context()); err != nil || version != 2 {
-					t.Errorf("第 %d 轮: SchemaVersion = %d, %v; want 2, nil", round, version, err)
+				if version, err := store.SchemaVersion(t.Context()); err != nil || version != 3 {
+					t.Errorf("第 %d 轮: SchemaVersion = %d, %v; want 3, nil", round, version, err)
 				}
 			})
 		}
@@ -313,15 +313,15 @@ func TestOpenPathWithSpecialCharacters(t *testing.T) {
 	}
 }
 
-// TestOpenRejectsRelativePath 验证相对路径被拒绝，且不会在当前目录创建任何内容。
+// TestOpenRejectsRelativePath 验证相对路径被拒绝，错误包装 ErrInvalidArgument，且不会在当前目录创建任何内容。
 func TestOpenRejectsRelativePath(t *testing.T) {
 	store, err := Open(t.Context(), filepath.Join("relative", "data"), Options{})
 	if err == nil {
 		store.Close()
 		t.Fatal("Open 应当拒绝相对路径")
 	}
-	if !strings.Contains(err.Error(), "absolute path") {
-		t.Errorf("错误 = %v; want 绝对路径检查失败", err)
+	if !strings.Contains(err.Error(), "absolute path") || !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("错误 = %v; want 包装 ErrInvalidArgument 的绝对路径检查失败", err)
 	}
 	if _, statErr := os.Stat("relative"); !os.IsNotExist(statErr) {
 		t.Errorf("相对路径被创建: %v", statErr)

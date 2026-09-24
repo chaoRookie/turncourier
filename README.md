@@ -222,18 +222,19 @@ turncourier/
 │   │   ├── migrate.go               # Embedded migrations and user_version
 │   │   ├── migrations/0001_init.sql # Initial schema
 │   │   ├── migrations/0002_mail.sql # Folder column, keys, notifications, bodies
+│   │   ├── migrations/0003_mail_pause.sql # Mail pauses, rejections by Message-ID
 │   │   ├── perm_unix.go             # Unix: data directory and file modes
 │   │   ├── perm_other.go            # Other platforms: no mode check
 │   │   ├── id.go                    # Task ID generation
 │   │   ├── instance.go              # Instance ID and key metadata
 │   │   ├── wal.go                   # TRUNCATE checkpoint after a body is gone
-│   │   ├── tasks.go                 # Tasks and task events, versioned
+│   │   ├── tasks.go                 # Versioned tasks and events, mail pauses
 │   │   ├── replies.go               # Reply dedup, queue, dispatch, recovery
 │   │   ├── notifications.go         # Notifications: create, claim, record, recover
-│   │   ├── mailbox.go               # Fetch cursors and rejected inbound mail
+│   │   ├── mailbox.go               # Fetch cursors, rejected mail, field rules
 │   │   ├── store_test.go            # Pragmas, path escaping, file modes
 │   │   ├── migrate_test.go          # Migration version, rollback, too new
-│   │   ├── schema_test.go           # 0002 constraints, indexes and triggers
+│   │   ├── schema_test.go           # 0002 and 0003 constraints, indexes, triggers
 │   │   ├── id_test.go               # Task ID encoding tests
 │   │   ├── instance_test.go         # Instance ID and key registration tests
 │   │   ├── wal_test.go              # Checkpoint without waiting for readers

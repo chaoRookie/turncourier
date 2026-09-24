@@ -47,6 +47,17 @@ type RecordResult struct {
 	Duplicate bool
 }
 
+// InboundRecord 是按 (账户, Message-ID) 找到的已记录入站邮件：所属任务、键控摘要、取回它的文件夹、UIDVALIDITY、UID 与对应回复的序号。
+// 验证流水线据此在有效期、令牌新旧、暂停与任务状态之前去重（4b Task 9 第 11 步）。
+type InboundRecord struct {
+	TaskID      string
+	BodyDigest  [32]byte
+	Folder      string
+	UIDValidity uint32
+	UID         uint32
+	ReplySeq    int64
+}
+
 // ErrMessageConflict 表示同一邮件标识对应了不同内容或不同 Message-ID，必须拒绝并告警。
 var ErrMessageConflict = errors.New("inbound message conflict")
 
@@ -85,7 +96,7 @@ type knownInbound struct {
 // 都一致才算重复，返回原回复且不写入；任一不一致返回 ErrMessageConflict。按 Message-ID 的查找不含文件夹，
 // 同一封信在 INBOX 与 Junk 各有一份时判为重复。重复邮件不按任务的当前状态重新判定。摘要只做字节比较，存储层不知道令牌密钥，
 // 不校验摘要与正文是否对应。
-// 开始事务前校验 Body（不合法时返回校验错误）；PayloadKey 为空，或事务内发现正文密钥的 kid 未登记为 active 时，返回
+// 开始事务前校验各字段与 Body（不合法时返回包装 ErrInvalidArgument 的错误）；PayloadKey 为空，或事务内发现正文密钥的 kid 未登记为 active 时，返回
 // ErrPayloadKeyUnavailable，对重复邮件与将被拒绝的邮件同样如此（Keychain 读取失败时不处理回复）。入队为 QUEUED 时，
 // 插入 replies 取得 seq 后用 (KindReply, TaskID, seq) 加密 Body 并插入 reply_payloads；记为 REJECTED 或命中重复时不写正文。
 func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult, error) {
@@ -167,28 +178,63 @@ func (s *Store) RecordReply(ctx context.Context, in InboundReply) (RecordResult,
 	return RecordResult{Reply: reply}, nil
 }
 
-// validate 在事务开始前检查与表约束对应的长度、空白与取值范围；存储层不导入 config，地址规范化由调用方负责。
-// Account 与 Folder 经 checkMailbox 校验，与游标、被拒来信用同一条规则：同一个账户或文件夹名在这三处的判定必须一致，
-// 否则一个文件夹名可以记录回复却推不动它的游标。长度按 Unicode 字符计，与表约束中 SQLite 的 length() 一致；
-// MessageID 同样须为合法 UTF-8 且不含 NUL，理由见 checkMailbox。
+// validate 在事务开始前检查与表约束对应的长度、空白与取值范围，不合法时返回包装 ErrInvalidArgument 的错误；存储层不导入 config，
+// 地址规范化由调用方负责。Account 与 Folder 经 checkMailbox 校验，与游标、被拒来信用同一条规则：同一个账户或文件夹名在这三处的判定
+// 必须一致，否则一个文件夹名可以记录回复却推不动它的游标。MessageID 按 ValidMessageID 校验（长度按 Unicode 字符计，与表约束中
+// SQLite 的 length() 一致，须为合法 UTF-8 且不含 NUL，理由见 checkMailbox）。
 // IMAP 文件夹名可以含空格（例如 Sent Messages），因此 Folder 不按空白拒绝；取值由调用方决定，存储层不限定。
-// Body 按字节计长度，须为 1 字节到 payload.MaxPlaintext 的合法 UTF-8；错误文本不含正文。
+// Body 按字节计长度，须为 1 字节到 payload.MaxPlaintext 的合法 UTF-8；错误文本不含正文、地址与 Message-ID。
 func (in InboundReply) validate() error {
 	if err := checkMailbox(in.Account, in.Folder); err != nil {
 		return fmt.Errorf("invalid inbound reply: %w", err)
 	}
-	messageIDLen := utf8.RuneCountInString(in.MessageID)
 	switch {
 	case in.UIDValidity == 0 || in.UID == 0:
-		return errors.New("invalid inbound reply: uid validity and uid must be positive")
-	case messageIDLen < 3 || messageIDLen > 998:
-		return errors.New("invalid inbound reply: message id must be 3-998 characters")
-	case !utf8.ValidString(in.MessageID) || strings.ContainsRune(in.MessageID, 0):
-		return errors.New("invalid inbound reply: message id must be valid UTF-8 without NUL")
+		return invalidArgument("invalid inbound reply: uid validity and uid must be positive")
+	case !ValidMessageID(in.MessageID):
+		return invalidArgument("invalid inbound reply: message id must be 3-998 characters of valid UTF-8 without NUL")
 	case len(in.Body) == 0 || len(in.Body) > payload.MaxPlaintext || !utf8.Valid(in.Body):
-		return errors.New("invalid inbound reply: body must be 1 byte to 1 MiB of valid UTF-8")
+		return invalidArgument("invalid inbound reply: body must be 1 byte to 1 MiB of valid UTF-8")
 	}
 	return nil
+}
+
+// InboundByMessageID 按 (账户, Message-ID) 读取入站记录；查找不含文件夹，与 RecordReply 按 Message-ID 的去重一致（同一封信在 INBOX
+// 与 Junk 各有一份时只有一条记录）。不存在时返回 ErrNotFound。账户按 checkAccount、Message-ID 按 ValidMessageID 校验，不合法时在查询前
+// 返回包装 ErrInvalidArgument 的错误；错误文本不回显账户与 Message-ID。
+func (s *Store) InboundByMessageID(ctx context.Context, account, messageID string) (InboundRecord, error) {
+	if err := checkAccount(account); err != nil {
+		return InboundRecord{}, fmt.Errorf("invalid inbound query: %w", err)
+	}
+	if err := checkMessageID(messageID); err != nil {
+		return InboundRecord{}, fmt.Errorf("invalid inbound query: %w", err)
+	}
+	var record InboundRecord
+	var digest []byte
+	err := s.db.QueryRowContext(ctx,
+		"SELECT i.task_id, i.body_sha256, i.folder, i.uid_validity, i.uid, r.seq FROM inbound_messages i JOIN replies r ON r.inbound_id = i.id "+
+			"WHERE i.account = ? AND i.message_id = ?", account, messageID).
+		Scan(&record.TaskID, &digest, &record.Folder, &record.UIDValidity, &record.UID, &record.ReplySeq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return InboundRecord{}, fmt.Errorf("inbound message: %w", ErrNotFound)
+	}
+	if err != nil {
+		return InboundRecord{}, fmt.Errorf("cannot read inbound messages: %w", err)
+	}
+	// 表约束保证摘要恰为 32 字节。
+	copy(record.BodyDigest[:], digest)
+	return record, nil
+}
+
+// CountAcceptedRepliesSince 返回任务的回复中 created_at 不早于 since（按毫秒，恰在 since 的计入）、状态不是 REJECTED 的条数，即 D8 回环刹车
+// 所计的「已接受入队」的回复；1 小时与 24 小时两个上限都用它，调用方取窗口起点与最近一次解除暂停的时刻（MailPaused）中较晚的一个作为
+// since。任务 ID 不合法时在查询前返回包装 ErrInvalidArgument 的错误。
+func (s *Store) CountAcceptedRepliesSince(ctx context.Context, taskID string, since time.Time) (int, error) {
+	if err := checkTaskID(taskID); err != nil {
+		return 0, fmt.Errorf("invalid reply query: %w", err)
+	}
+	return s.count(ctx, "replies", "SELECT count(*) FROM replies WHERE task_id = ? AND state <> ? AND created_at >= ?",
+		taskID, string(queue.Rejected), since.UnixMilli())
 }
 
 // findInbound 按 where 条件（某个唯一键）查找已有入站记录及其回复序号；where 只来自本文件的常量，未找到时返回 nil。
@@ -211,7 +257,9 @@ func findInbound(ctx context.Context, tx *sql.Tx, where string, args ...any) (*k
 // 任务不存在时返回 ErrNotFound；任务不处于 CanDispatchReply 为 true 的状态、已有 DISPATCHING 或 UNCERTAIN 回复，
 // 或没有 QUEUED 回复时返回 ErrNoDispatchableReply。IMMEDIATE 事务使多个进程的并发派发串行执行，至多一个成功。
 // 解密在同一事务中、改动任何数据之前进行：正文行缺失返回 ErrPayloadMissing，没有密钥或 kid 不符返回 ErrPayloadKeyUnavailable，
-// 密文无法解密返回包装 payload.ErrDecrypt 的错误；三种情况都不领取，回复停在队首，需要人工处理。
+// 密文无法解密返回包装 payload.ErrDecrypt 的错误；三种情况都不领取，回复停在队首，需要人工处理。与 ClaimNextNotification 一样，
+// 读出正文失败时（包括这三种情况）返回该回复未改动的 QUEUED 快照与任务的当前快照（正文为 nil），而不是零值：派发循环据此发出
+// 带回复序号的事件。
 func (s *Store) ClaimNextReply(ctx context.Context, taskID string) (Reply, Task, []byte, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -251,7 +299,8 @@ func (s *Store) ClaimNextReply(ctx context.Context, taskID string) (Reply, Task,
 	body, err := s.openPayload(ctx, tx, payload.KindReply, "reply",
 		"SELECT key_id, sealed FROM reply_payloads WHERE seq = ?", queued.TaskID, queued.Seq)
 	if err != nil {
-		return Reply{}, Task{}, nil, err
+		// 事务随后回滚，没有改动任何数据；返回的快照就是读取时的样子。
+		return queued, current, nil, err
 	}
 	next, err := nextReply(queued, queue.Queued, queue.Claim)
 	if err != nil {

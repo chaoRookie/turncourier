@@ -222,18 +222,19 @@ turncourier/
 │   │   ├── migrate.go               # 嵌入式迁移与 user_version
 │   │   ├── migrations/0001_init.sql # 初始表结构
 │   │   ├── migrations/0002_mail.sql # 文件夹列、密钥、通知与正文密文
+│   │   ├── migrations/0003_mail_pause.sql # 邮件暂停与被拒记录的 Message-ID 索引
 │   │   ├── perm_unix.go             # Unix：数据目录与数据库文件权限检查
 │   │   ├── perm_other.go            # 其他平台：不检查权限位
 │   │   ├── id.go                    # 任务 ID 生成
 │   │   ├── instance.go              # 实例 ID 与密钥元数据
 │   │   ├── wal.go                   # 清理正文后的 TRUNCATE 检查点
-│   │   ├── tasks.go                 # 任务与任务事件，按版本号更新
+│   │   ├── tasks.go                 # 任务与任务事件（按版本号更新）、邮件暂停
 │   │   ├── replies.go               # 回复去重入队、派发、确认与恢复
 │   │   ├── notifications.go         # 待发通知的创建、领取、记录与恢复
-│   │   ├── mailbox.go               # 收取游标与被拒来信元数据
+│   │   ├── mailbox.go               # 收取游标、被拒来信元数据与来信字段的校验规则
 │   │   ├── store_test.go            # 连接参数、路径转义与文件权限测试
 │   │   ├── migrate_test.go          # 迁移版本、回滚与版本过新测试
-│   │   ├── schema_test.go           # 0002 的约束、索引与触发器测试
+│   │   ├── schema_test.go           # 0002 与 0003 的约束、索引与触发器测试
 │   │   ├── id_test.go               # 任务 ID 编码测试
 │   │   ├── instance_test.go         # 实例 ID 与密钥登记测试
 │   │   ├── wal_test.go              # 检查点不等待读者的测试

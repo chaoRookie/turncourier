@@ -81,13 +81,13 @@ func instanceID(ctx context.Context, q rowQuerier) (string, error) {
 // RegisterKey 把 (purpose, kid) 登记为 active，并保存 keychain.KeyCheck 算出的校验值；kid 须为 1–255。
 // 该用途已有任何密钥时返回 ErrKeyExists。调用方必须先把密钥写入 Keychain 并读回核对，再登记。
 // 元数据只说明该密钥曾被登记；使用前须读出 Keychain 中的密钥并与 KeyCheckOf 比对，不符即拒绝使用。
-// 用途未知或 kid 为 0 时在开始事务前报错。
+// 用途未知或 kid 为 0 时在开始事务前返回包装 ErrInvalidArgument 的错误。
 func (s *Store) RegisterKey(ctx context.Context, purpose KeyPurpose, kid uint8, check [8]byte) error {
 	if purpose != KeyPurposeToken && purpose != KeyPurposePayload {
-		return fmt.Errorf("invalid key registration: unknown purpose %q", purpose)
+		return invalidArgument("invalid key registration: unknown purpose %q", purpose)
 	}
 	if kid == 0 {
-		return errors.New("invalid key registration: key id must be 1-255")
+		return invalidArgument("invalid key registration: key id must be 1-255")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

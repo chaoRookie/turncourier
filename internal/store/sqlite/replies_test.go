@@ -1,5 +1,6 @@
 // Package sqlite 的入站回复测试用临时目录中的真实 SQLite 数据库验证去重、冲突、拒绝原因、字段校验、原子性，
-// fail 与 close 对排队回复的拒绝、其他事件不改动排队回复，以及正文的加密入队、校验、正文密钥检查与磁盘残留。
+// fail 与 close 对排队回复的拒绝、其他事件不改动排队回复，正文的加密入队、校验、正文密钥检查与磁盘残留，
+// 以及按 Message-ID 读取入站记录与回环刹车所用的回复计数。
 package sqlite
 
 import (
@@ -206,7 +207,7 @@ func TestRecordReplyByTaskState(t *testing.T) {
 	}
 }
 
-// TestRecordReplyValidation 验证字段校验在事务开始前拒绝非法输入：错误文本含 "invalid inbound reply"，
+// TestRecordReplyValidation 验证字段校验在事务开始前拒绝非法输入：错误文本含 "invalid inbound reply" 并包装 ErrInvalidArgument，
 // 以区别于数据库 CHECK 约束与任务查询的报错，且不写入任何记录。长度按字符而不是字节计，边界上的合法值可以写入。
 // 上下文已取消时仍返回校验错误，证明校验先于开始事务。
 func TestRecordReplyValidation(t *testing.T) {
@@ -246,15 +247,16 @@ func TestRecordReplyValidation(t *testing.T) {
 		in := inbound(running.ID)
 		tt.modify(&in)
 		got, err := store.RecordReply(t.Context(), in)
-		if err == nil || !strings.Contains(err.Error(), "invalid inbound reply") {
-			t.Errorf("%s: RecordReply = %+v, %v; want 含 \"invalid inbound reply\" 的错误", tt.name, got, err)
+		if err == nil || !strings.Contains(err.Error(), "invalid inbound reply") || !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: RecordReply = %+v, %v; want 包装 ErrInvalidArgument、含 \"invalid inbound reply\" 的错误", tt.name, got, err)
 		}
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	in := inbound(running.ID)
 	in.UID = 0
-	if got, err := store.RecordReply(ctx, in); err == nil || !strings.Contains(err.Error(), "invalid inbound reply") || errors.Is(err, context.Canceled) {
+	if got, err := store.RecordReply(ctx, in); err == nil || !strings.Contains(err.Error(), "invalid inbound reply") ||
+		!errors.Is(err, ErrInvalidArgument) || errors.Is(err, context.Canceled) {
 		t.Errorf("上下文已取消: RecordReply = %+v, %v; want 含 \"invalid inbound reply\" 的错误而不是 context.Canceled", got, err)
 	}
 	requireRows(t, store, 0, 0)
@@ -654,8 +656,8 @@ func TestRecordReplyWritesNoPayloadForRejectedOrDuplicate(t *testing.T) {
 }
 
 // TestRecordReplyBodyValidation 验证正文在开始事务前校验：为空、超过 payload.MaxPlaintext 或不是合法 UTF-8 时返回含
-// "invalid inbound reply" 的错误（上下文已取消时同样如此），错误文本不含正文，不写入任何行；1 字节、多字节 UTF-8 与恰为上限的正文可以入队，
-// 上限正文的密文恰为表约束允许的最大长度。
+// "invalid inbound reply"、包装 ErrInvalidArgument 的错误（上下文已取消时同样如此），错误文本不含正文，不写入任何行；
+// 1 字节、多字节 UTF-8 与恰为上限的正文可以入队，上限正文的密文恰为表约束允许的最大长度。
 func TestRecordReplyBodyValidation(t *testing.T) {
 	store, _ := openTaskStore(t, nil)
 	running := startTask(t, store)
@@ -674,7 +676,7 @@ func TestRecordReplyBodyValidation(t *testing.T) {
 		in := inbound(running.ID)
 		in.Body = tt.body
 		got, err := store.RecordReply(ctx, in)
-		if err == nil || !strings.Contains(err.Error(), "invalid inbound reply") || errors.Is(err, context.Canceled) {
+		if err == nil || !strings.Contains(err.Error(), "invalid inbound reply") || !errors.Is(err, ErrInvalidArgument) || errors.Is(err, context.Canceled) {
 			t.Errorf("%s: RecordReply = %+v, %v; want 含 \"invalid inbound reply\" 的错误而不是 context.Canceled", tt.name, got, err)
 		}
 		if err != nil && strings.Contains(err.Error(), replyCanary) {
@@ -789,5 +791,98 @@ func TestReplyPayloadResidue(t *testing.T) {
 			}
 			assertAbsentOnDisk(t, storeDir(t, store), sealed, []byte(replyCanary))
 		})
+	}
+}
+
+// TestInboundByMessageID 验证按 (账户, Message-ID) 读取入站记录：返回任务 ID、键控摘要、文件夹、UIDVALIDITY、UID 与回复序号；
+// 从 Junk 取回的记录返回 Junk，发往已关闭任务、记为 REJECTED 的回复同样有入站记录；另一账户或未知的 Message-ID 返回
+// ErrNotFound（不是 ErrInvalidArgument）。查找不含文件夹，与 RecordReply 按 Message-ID 的去重一致。
+func TestInboundByMessageID(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	ctx := t.Context()
+	running := startTask(t, store)
+	queued := recordReply(t, store, inbound(running.ID)).Reply
+	junk := withBody(inbound(running.ID), "synthetic reply B")
+	junk.Folder, junk.UIDValidity, junk.UID, junk.MessageID = "Junk", 9, 5, "<b@example.invalid>"
+	fromJunk := recordReply(t, store, junk).Reply
+	closed := applyEvents(t, store, startTask(t, store), task.Close)
+	late := inbound(closed.ID)
+	late.UID, late.MessageID = 6, "<c@example.invalid>"
+	rejected := recordReply(t, store, late).Reply
+	if rejected.State != queue.Rejected {
+		t.Fatalf("发往已关闭任务的回复 = %+v; want REJECTED", rejected)
+	}
+	for _, tt := range []struct {
+		messageID string
+		want      InboundRecord
+	}{
+		{"<a@example.invalid>", InboundRecord{TaskID: running.ID, BodyDigest: digestA, Folder: "INBOX", UIDValidity: 7, UID: 1, ReplySeq: queued.Seq}},
+		{"<b@example.invalid>", InboundRecord{TaskID: running.ID, BodyDigest: digestB, Folder: "Junk", UIDValidity: 9, UID: 5, ReplySeq: fromJunk.Seq}},
+		{"<c@example.invalid>", InboundRecord{TaskID: closed.ID, BodyDigest: digestA, Folder: "INBOX", UIDValidity: 7, UID: 6, ReplySeq: rejected.Seq}},
+	} {
+		if got, err := store.InboundByMessageID(ctx, botAccount, tt.messageID); err != nil || got != tt.want {
+			t.Errorf("InboundByMessageID(%s) = %+v, %v; want %+v", tt.messageID, got, err, tt.want)
+		}
+	}
+	for _, tt := range []struct{ name, account, messageID string }{
+		{"另一账户", "other-bot@example.invalid", "<a@example.invalid>"},
+		{"未知的 Message-ID", botAccount, "<z@example.invalid>"},
+	} {
+		if got, err := store.InboundByMessageID(ctx, tt.account, tt.messageID); !errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalidArgument) ||
+			got != (InboundRecord{}) {
+			t.Errorf("%s: InboundByMessageID = %+v, %v; want ErrNotFound", tt.name, got, err)
+		}
+	}
+}
+
+// TestCountAcceptedRepliesSince 验证回环刹车的计数：只计该任务 created_at 不早于 since（按毫秒，恰在 since 的计入）、状态不是
+// REJECTED 的回复——QUEUED、DISPATCHING、ACKNOWLEDGED 都计入——其他任务的回复不计，没有回复的任务为 0。
+func TestCountAcceptedRepliesSince(t *testing.T) {
+	store, clock := openTaskStore(t, nil)
+	ctx := t.Context()
+	running := startTask(t, store)
+	other := startTask(t, store)
+	start := *clock
+	// at 在 start 加 offset 的时刻为任务 taskID 记录一条新回复，返回其快照。
+	at := func(offset time.Duration, taskID string) Reply {
+		t.Helper()
+		*clock = start.Add(offset)
+		return enqueueReplies(t, store, taskID, 1)[0]
+	}
+	at(-time.Millisecond, running.ID)
+	acknowledged := at(0, running.ID)
+	rejected := at(0, running.ID)
+	dispatching := at(time.Millisecond, running.ID)
+	at(time.Millisecond, running.ID)
+	at(0, other.ID)
+	for _, stmt := range []struct {
+		query string
+		seq   int64
+	}{
+		{"UPDATE replies SET state = 'ACKNOWLEDGED' WHERE seq = ?", acknowledged.Seq},
+		{"UPDATE replies SET state = 'REJECTED', reject_reason = 'task_closed' WHERE seq = ?", rejected.Seq},
+		{"UPDATE replies SET state = 'DISPATCHING', resume_state = 'COMPLETED' WHERE seq = ?", dispatching.Seq},
+	} {
+		if _, err := store.db.ExecContext(ctx, stmt.query, stmt.seq); err != nil {
+			t.Fatalf("执行 %q 失败: %v", stmt.query, err)
+		}
+	}
+	for _, tt := range []struct {
+		name   string
+		taskID string
+		since  time.Time
+		want   int
+	}{
+		{"零值", running.ID, time.Time{}, 4},
+		{"早 1 毫秒", running.ID, start.Add(-time.Millisecond), 4},
+		{"恰在边界（REJECTED 不计）", running.ID, start, 3},
+		{"晚 1 毫秒", running.ID, start.Add(time.Millisecond), 2},
+		{"晚于全部", running.ID, start.Add(2 * time.Millisecond), 0},
+		{"其他任务", other.ID, start, 1},
+		{"没有回复的任务", "0000000000", time.Time{}, 0},
+	} {
+		if got, err := store.CountAcceptedRepliesSince(ctx, tt.taskID, tt.since); err != nil || got != tt.want {
+			t.Errorf("%s: CountAcceptedRepliesSince = %d, %v; want %d", tt.name, got, err, tt.want)
+		}
 	}
 }

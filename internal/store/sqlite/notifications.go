@@ -1,5 +1,6 @@
 // Package sqlite 持久化待发通知：创建时只以密文保存内容，按到期顺序串行领取，记录投递结果；投递结果不确定时只标记为
-// UNCERTAIN 等待本地核对，从不自动重发。
+// UNCERTAIN，等待本地核对或凭「已发送」中的副本核对为已送达（D7），从不自动重发。另提供 4b 收发循环所需的查找、「最新通知」、
+// 线程引用与发信计数。
 package sqlite
 
 import (
@@ -9,9 +10,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/chaoRookie/turncourier/internal/queue"
 	"github.com/chaoRookie/turncourier/internal/security/payload"
@@ -74,6 +73,10 @@ const (
 	// maxOwnerLen 是 owner 的字节数上限，与 token.Claims 要求的 1–255 字节一致：令牌 MAC 以 uint16 记下 owner 的字节数，
 	// 超出这个范围的 owner 签不出令牌。存储不导入 token 包，这里重复它的取值。
 	maxOwnerLen = 255
+	// maxThreadReferences 是 ThreadReferences 的 limit 上限：一封通知的 References 至多列出 20 个此前的实际投递 ID。
+	maxThreadReferences = 20
+	// maxNotificationList 是 AbandonedSince 与 SentWithoutDeliveredID 一次最多返回的条数。
+	maxNotificationList = 100
 )
 
 const (
@@ -100,31 +103,45 @@ var (
 	domainPattern = regexp.MustCompile(`^[a-z0-9.-]{1,253}$`)
 )
 
+// getNotification 与 listNotifications 的查找条件，接在 notificationSelect 之后；参数由调用方按占位符顺序给出。
 const (
-	// notificationByID 与 notificationByNID 是 getNotification 的查找条件。
 	notificationByID  = "n.id = ?"
 	notificationByNID = "n.nid = ?"
+	// notificationByMessageID 与 notificationByDeliveredID 按我方 Message-ID 与实际投递 ID 查找，两列都有 UNIQUE 约束。
+	notificationByMessageID   = "n.message_id = ?"
+	notificationByDeliveredID = "n.delivered_message_id = ?"
+	// latestAttempted 取任务的 SENT 通知与 updated_at 不早于给定时刻的 UNCERTAIN 通知中，发出时刻最晚、相同时 id 较大的一条：
+	// SENT 的 sent_at 非空（表约束），UNCERTAIN 的 sent_at 为空，coalesce 因此分别取 sent_at 与进入 UNCERTAIN 的时刻 updated_at。
+	// 参数依次为任务 ID、SENT、UNCERTAIN 与时刻；子查询没有结果时条件为 NULL，查找返回 ErrNotFound。
+	latestAttempted = "n.id = (SELECT id FROM notifications WHERE task_id = ? AND (state = ? OR (state = ? AND updated_at >= ?)) " +
+		"ORDER BY coalesce(sent_at, updated_at) DESC, id DESC LIMIT 1)"
+	// latestSent 取任务的 SENT 通知中 sent_at 最晚、相同时 id 较大的一条；参数依次为任务 ID 与 SENT。
+	latestSent = "n.id = (SELECT id FROM notifications WHERE task_id = ? AND state = ? ORDER BY sent_at DESC, id DESC LIMIT 1)"
+	// abandonedSince 取 updated_at 不早于给定时刻、原因为给定两者之一的 ABANDONED 通知；参数依次为 ABANDONED、两个原因、时刻与上限。
+	abandonedSince = "n.state = ? AND n.abandon_reason IN (?, ?) AND n.updated_at >= ? ORDER BY n.id LIMIT ?"
+	// sentWithoutDelivered 取 sent_at 早于给定时刻、仍没有实际投递 ID 的 SENT 通知；参数依次为 SENT、时刻与上限。
+	sentWithoutDelivered = "n.state = ? AND n.delivered_message_id IS NULL AND n.sent_at < ? ORDER BY n.id LIMIT ?"
 )
 
-// validate 在事务开始前检查事件、域名、有效期、内容长度与任务 ID 的形式；错误文本不含内容。
+// validate 在事务开始前检查事件、域名、有效期、内容长度与任务 ID 的形式，不合法时返回包装 ErrInvalidArgument 的错误；错误文本不含内容。
 func (n NewNotification) validate() error {
 	switch {
 	case !notificationEvents[n.Event]:
-		return fmt.Errorf("invalid notification: unknown event %q", n.Event)
+		return invalidArgument("invalid notification: unknown event %q", n.Event)
 	case !domainPattern.MatchString(n.Domain):
-		return errors.New("invalid notification: domain must be 1-253 characters of [a-z0-9.-]")
+		return invalidArgument("invalid notification: domain must be 1-253 characters of [a-z0-9.-]")
 	case n.TTL < minNotificationTTL || n.TTL > maxNotificationTTL:
-		return errors.New("invalid notification: token ttl must be 1h-720h")
+		return invalidArgument("invalid notification: token ttl must be 1h-720h")
 	case len(n.Content) == 0 || len(n.Content) > payload.MaxPlaintext:
-		return errors.New("invalid notification: content must be 1 byte to 1 MiB")
+		return invalidArgument("invalid notification: content must be 1 byte to 1 MiB")
 	case !taskIDPattern.MatchString(n.TaskID):
-		return errors.New("invalid notification: task id must be 10 lowercase Crockford base32 characters")
+		return invalidArgument("invalid notification: task id must be 10 lowercase Crockford base32 characters")
 	}
 	return nil
 }
 
 // CreateNotification 在一个事务中：确认任务存在且未关闭（FAILED 任务允许，用于发送失败通知）；确认任务的 owner 在
-// token.Claims 要求的 1–255 字节内，否则这条通知永远签不出令牌；读取令牌用途的 active kid
+// token.Claims 要求的 1–255 字节内，否则这条通知永远签不出令牌（返回包装 ErrInvalidArgument 的错误：重试也不会成功）；读取令牌用途的 active kid
 // （没有时返回包装 ErrNotFound 的错误）；确认正文密钥的 kid 已登记为 active；从随机源生成 12 字节 nid 与 15 字节
 // Message-ID 随机部分；以 PENDING、attempts 0、not_before 与 created_at 为当前时间、token_expires_at 为当前时间加 TTL
 // 插入通知行；再用 (KindNotification, TaskID, id) 加密内容并插入 notification_payloads。nid 或 Message-ID 冲突时报错，不重试。
@@ -148,7 +165,7 @@ func (s *Store) CreateNotification(ctx context.Context, n NewNotification) (Noti
 	// owner 来自任务行，不在 NewNotification 中；它超出令牌 Claims 的范围时这条通知永远签不出令牌，因此不创建。
 	// 错误文本不含 owner。
 	if length := len(current.Owner); length == 0 || length > maxOwnerLen {
-		return Notification{}, fmt.Errorf("invalid notification: owner of task %q must be 1-%d bytes", n.TaskID, maxOwnerLen)
+		return Notification{}, invalidArgument("invalid notification: owner of task %q must be 1-%d bytes", n.TaskID, maxOwnerLen)
 	}
 	tokenKID, err := activeKeyID(ctx, tx, KeyPurposeToken)
 	if err != nil {
@@ -318,10 +335,10 @@ func (s *Store) MarkNotificationUncertain(ctx context.Context, id int64) (Notifi
 
 // RequeueNotification 在确定未投递时把 SENDING 改回 PENDING，not_before 设为当前时间加 delay（0 到 24 小时）；
 // 任务已关闭时改为 ABANDONED(task_closed)，内容由触发器删除，提交后执行检查点（与 ResolveUncertainNotification 一致）。
-// delay 超出范围时在开始事务前报错。
+// delay 超出范围时在开始事务前返回包装 ErrInvalidArgument 的错误。
 func (s *Store) RequeueNotification(ctx context.Context, id int64, delay time.Duration) (Notification, error) {
 	if delay < 0 || delay > maxRequeueDelay {
-		return Notification{}, errors.New("invalid notification requeue: delay must be 0-24h")
+		return Notification{}, invalidArgument("invalid notification requeue: delay must be 0-24h")
 	}
 	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, t Task, now int64) error {
 		return putBackNotification(ctx, tx, n, queue.OutboxSending, t, now+delay.Milliseconds(), now)
@@ -329,10 +346,10 @@ func (s *Store) RequeueNotification(ctx context.Context, id int64, delay time.Du
 }
 
 // AbandonNotification 把 PENDING、SENDING 或 UNCERTAIN 通知改为 ABANDONED；reason 只能是 rejected 或 manual
-// （task_closed 与 expired 只由存储自身写入），其他取值在开始事务前报错。内容由触发器删除，提交后执行检查点。
+// （task_closed 与 expired 只由存储自身写入），其他取值在开始事务前返回包装 ErrInvalidArgument 的错误。内容由触发器删除，提交后执行检查点。
 func (s *Store) AbandonNotification(ctx context.Context, id int64, reason string) (Notification, error) {
 	if reason != abandonRejected && reason != abandonManual {
-		return Notification{}, fmt.Errorf("invalid notification abandon reason %q: must be rejected or manual", reason)
+		return Notification{}, invalidArgument("invalid notification abandon reason %q: must be rejected or manual", reason)
 	}
 	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, _ Task, now int64) error {
 		// 三种来源状态都可以放弃，由 queue.NextOutbox 拒绝终态，因此来源状态取通知的当前状态。
@@ -347,7 +364,7 @@ func (s *Store) AbandonNotification(ctx context.Context, id int64, reason string
 
 // ResolveUncertainNotification 记录本地核对结果：delivered 为 true 时 UNCERTAIN 改为 SENT；为 false 时改回 PENDING
 // （not_before 为当前时间），任务已关闭时改为 ABANDONED(task_closed)。进入 SENT 或 ABANDONED 时内容由触发器删除，
-// 提交后执行检查点。系统从不自动调用它。
+// 提交后执行检查点。由本地核对调用；D7 的副本证据改走 ResolveUncertainAsDelivered。
 func (s *Store) ResolveUncertainNotification(ctx context.Context, id int64, delivered bool) (Notification, error) {
 	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, t Task, now int64) error {
 		if delivered {
@@ -357,15 +374,14 @@ func (s *Store) ResolveUncertainNotification(ctx context.Context, id int64, deli
 	})
 }
 
-// RecordDeliveredMessageID 为 SENT 通知记录实际投递的 Message-ID（3–998 个字符，不含 NUL）；同值重复记录不改动，
-// 已有不同值或该值已属于另一条通知时返回 ErrDeliveredMessageIDConflict；通知不是 SENT 时返回 queue.ErrInvalidOutboxTransition。
-// 值的长度按 Unicode 字符计，与表约束一致，并须为合法 UTF-8（理由同 checkMailbox：SQLite 的 length() 对非法 UTF-8
-// 的计数与 Go 不同，否则 Go 端判为合规的取值会在开始事务之后才被 CHECK 约束拒绝，或者带着非法字节落盘）；
-// 不合法时在开始事务前报错。
+// RecordDeliveredMessageID 为 SENT 通知记录实际投递的 Message-ID；同值重复记录不改动，已有不同值或该值已属于另一条通知时返回
+// ErrDeliveredMessageIDConflict；通知不是 SENT 时返回 queue.ErrInvalidOutboxTransition。值按 ValidMessageID 校验（3–998 个字符的
+// 合法 UTF-8、不含 NUL，长度按 Unicode 字符计，与表约束一致；理由同 checkMailbox：SQLite 的 length() 对非法 UTF-8 的计数与 Go 不同，
+// 否则 Go 端判为合规的取值会在开始事务之后才被 CHECK 约束拒绝，或者带着非法字节落盘），不合法时在开始事务前返回包装
+// ErrInvalidArgument 的错误。
 func (s *Store) RecordDeliveredMessageID(ctx context.Context, id int64, messageID string) (Notification, error) {
-	if length := utf8.RuneCountInString(messageID); length < 3 || length > 998 ||
-		strings.ContainsRune(messageID, 0) || !utf8.ValidString(messageID) {
-		return Notification{}, errors.New("invalid notification delivered message id: must be 3-998 characters of valid UTF-8 without NUL")
+	if !ValidMessageID(messageID) {
+		return Notification{}, invalidArgument("invalid notification delivered message id: must be 3-998 characters of valid UTF-8 without NUL")
 	}
 	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, _ Task, now int64) error {
 		if n.State != queue.OutboxSent {
@@ -378,19 +394,49 @@ func (s *Store) RecordDeliveredMessageID(ctx context.Context, id int64, messageI
 		if n.DeliveredMessageID != "" {
 			return fmt.Errorf("%w: notification %d already has a different delivered message id", ErrDeliveredMessageIDConflict, n.ID)
 		}
-		var owner int64
-		err := tx.QueryRowContext(ctx, "SELECT id FROM notifications WHERE delivered_message_id = ?", messageID).Scan(&owner)
-		if err == nil {
-			return fmt.Errorf("%w: the delivered message id belongs to notification %d", ErrDeliveredMessageIDConflict, owner)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("cannot read notifications: %w", err)
-		}
-		result, err := tx.ExecContext(ctx,
-			"UPDATE notifications SET delivered_message_id = ?, updated_at = ? WHERE id = ? AND state = ? AND delivered_message_id IS NULL",
-			messageID, now, n.ID, string(queue.OutboxSent))
-		return requireOneRow(result, err, n.ID)
+		return recordDeliveredID(ctx, tx, n.ID, messageID, now)
 	})
+}
+
+// ResolveUncertainAsDelivered 按 D7 凭「已发送」中的副本把 UNCERTAIN 通知核对为已送达：在一个事务中改为 SENT 并记下实际投递的
+// Message-ID，状态与实际投递 ID 同时生效。sent_at 取通知进入 UNCERTAIN 的时刻（核对前的 updated_at）而不是核对时刻，通知的发出顺序
+// 与发信计数因此不随核对而变（LatestAttemptedNotification 与 CountNotificationsSince 都依赖这一点）；updated_at 为核对时刻。
+// deliveredID 按 ValidMessageID 校验，不合法时在开始事务前返回包装 ErrInvalidArgument 的错误。通知不是 UNCERTAIN 时返回
+// queue.ErrInvalidOutboxTransition，实际投递 ID 已属于别的通知时返回 ErrDeliveredMessageIDConflict，两种情况都不改动数据。
+// 内容由触发器删除，提交后执行检查点。解除的方向始终是「已送达」，找不到副本的 UNCERTAIN 仍等待本地核对，从不自动重发。
+func (s *Store) ResolveUncertainAsDelivered(ctx context.Context, id int64, deliveredID string) (Notification, error) {
+	if !ValidMessageID(deliveredID) {
+		return Notification{}, invalidArgument("invalid notification delivered message id: must be 3-998 characters of valid UTF-8 without NUL")
+	}
+	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, _ Task, now int64) error {
+		next, err := nextNotification(n, queue.OutboxUncertain, queue.OutboxDelivered)
+		if err != nil {
+			return err
+		}
+		next.SentAt = n.UpdatedAt
+		// 表约束只允许 SENT 通知记录实际投递 ID，因此先改状态、再在同一事务中写入它；冲突或失败时整个事务回滚。
+		if err := updateNotification(ctx, tx, n, next, now); err != nil {
+			return err
+		}
+		return recordDeliveredID(ctx, tx, n.ID, deliveredID, now)
+	})
+}
+
+// recordDeliveredID 在事务 tx 中为 SENT 通知 id 写入实际投递的 Message-ID：该值已属于另一条通知时返回 ErrDeliveredMessageIDConflict，
+// 错误文本只含那条通知的 id，不含 Message-ID；只写入仍为空的列，受影响行数不为 1 时返回错误使事务回滚。
+func recordDeliveredID(ctx context.Context, tx *sql.Tx, id int64, messageID string, now int64) error {
+	var owner int64
+	err := tx.QueryRowContext(ctx, "SELECT id FROM notifications WHERE delivered_message_id = ?", messageID).Scan(&owner)
+	if err == nil {
+		return fmt.Errorf("%w: the delivered message id belongs to notification %d", ErrDeliveredMessageIDConflict, owner)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("cannot read notifications: %w", err)
+	}
+	result, err := tx.ExecContext(ctx,
+		"UPDATE notifications SET delivered_message_id = ?, updated_at = ? WHERE id = ? AND state = ? AND delivered_message_id IS NULL",
+		messageID, now, id, string(queue.OutboxSent))
+	return requireOneRow(result, err, id)
 }
 
 // RecoverSendingNotifications 在发送进程启动时调用：把所有 SENDING 改为 UNCERTAIN，按 id 升序返回全部 UNCERTAIN 供本地核对，
@@ -429,6 +475,107 @@ func (s *Store) RecoverSendingNotifications(ctx context.Context) ([]Notification
 // NotificationByNID 按 nid 读取通知，供 4b 验证令牌时取得 Claims；不存在时返回 ErrNotFound。
 func (s *Store) NotificationByNID(ctx context.Context, nid [12]byte) (Notification, error) {
 	return getNotification(ctx, s.db, notificationByNID, nid[:])
+}
+
+// NotificationByMessageID 按我方 Message-ID 读取通知，供「已发送」副本对应回通知（4b Task 10）；不存在时返回 ErrNotFound。
+// Message-ID 按 ValidMessageID 校验，不合法时在查询前返回包装 ErrInvalidArgument 的错误，错误文本不回显取值。
+func (s *Store) NotificationByMessageID(ctx context.Context, messageID string) (Notification, error) {
+	if err := checkMessageID(messageID); err != nil {
+		return Notification{}, fmt.Errorf("invalid notification query: %w", err)
+	}
+	return getNotification(ctx, s.db, notificationByMessageID, messageID)
+}
+
+// NotificationByDeliveredID 按实际投递的 Message-ID 读取通知，供退信关联回通知（4b Task 9）；不存在（包括尚未记下）时返回
+// ErrNotFound。deliveredID 按 ValidMessageID 校验，不合法时在查询前返回包装 ErrInvalidArgument 的错误，错误文本不回显取值。
+func (s *Store) NotificationByDeliveredID(ctx context.Context, deliveredID string) (Notification, error) {
+	if err := checkMessageID(deliveredID); err != nil {
+		return Notification{}, fmt.Errorf("invalid notification query: %w", err)
+	}
+	return getNotification(ctx, s.db, notificationByDeliveredID, deliveredID)
+}
+
+// LatestAttemptedNotification 返回任务的 SENT 通知与 updated_at 不早于 uncertainAfter（按毫秒，恰在其上的计入）的 UNCERTAIN 通知中，
+// 发出时刻 COALESCE(sent_at, updated_at) 最晚的一条（相同时取 id 较大者）；没有时返回 ErrNotFound。它是 D7 中 token_superseded 所比较的
+// 「最新一条已发出通知」：UNCERTAIN 多半已经送达，尚无缺失证据时按进入 UNCERTAIN 的时刻计入。uncertainAfter 由调用方按 D7 的缺失证据
+// 给出——最近一次成功补扫「已发送」的开始时刻减 10 分钟，还没有成功补扫时为零值（零值早于任何记录的时刻，全部 UNCERTAIN 都计入）；
+// updated_at 早于它的 UNCERTAIN 通知已有缺失证据，不再计入。按发出时刻而不是 id 排序：重新排队会推迟较早通知的 not_before，
+// 它可能在较新的通知之后才发出，用户最后看到的是它；经 ResolveUncertainAsDelivered 核对为已送达的通知沿用进入 UNCERTAIN 的时刻，
+// 顺序不随核对而变。任务 ID 不合法时在查询前返回包装 ErrInvalidArgument 的错误。
+func (s *Store) LatestAttemptedNotification(ctx context.Context, taskID string, uncertainAfter time.Time) (Notification, error) {
+	if err := checkTaskID(taskID); err != nil {
+		return Notification{}, fmt.Errorf("invalid notification query: %w", err)
+	}
+	return getNotification(ctx, s.db, latestAttempted, taskID, string(queue.OutboxSent), string(queue.OutboxUncertain), uncertainAfter.UnixMilli())
+}
+
+// LatestSentNotification 返回任务的 SENT 通知中 sent_at 最晚的一条（相同时取 id 较大者）；没有时返回 ErrNotFound。
+// 验证流水线据此判断有没有比令牌所属通知更新、确已发出的通知（4b Task 9 第 13 步）。任务 ID 不合法时在查询前返回包装
+// ErrInvalidArgument 的错误。
+func (s *Store) LatestSentNotification(ctx context.Context, taskID string) (Notification, error) {
+	if err := checkTaskID(taskID); err != nil {
+		return Notification{}, fmt.Errorf("invalid notification query: %w", err)
+	}
+	return getNotification(ctx, s.db, latestSent, taskID, string(queue.OutboxSent))
+}
+
+// ThreadReferences 返回任务中 id 小于 beforeID、已记下实际投递 ID 的 SENT 通知的实际投递 ID，按 sent_at 升序（相同时按 id）取最后
+// limit 个（1–20）：一个任务的通知属于一个邮件线程，通知 beforeID 的 References 列出它们，In-Reply-To 取最后一个。没有时返回空。
+// 任务 ID 不合法或 limit 越界时在查询前返回包装 ErrInvalidArgument 的错误。
+func (s *Store) ThreadReferences(ctx context.Context, taskID string, beforeID int64, limit int) ([]string, error) {
+	if err := checkTaskID(taskID); err != nil {
+		return nil, fmt.Errorf("invalid notification query: %w", err)
+	}
+	if limit < 1 || limit > maxThreadReferences {
+		return nil, invalidArgument("invalid notification query: limit must be 1-%d", maxThreadReferences)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT delivered_message_id FROM (SELECT delivered_message_id, sent_at, id FROM notifications "+
+			"WHERE task_id = ? AND id < ? AND state = ? AND delivered_message_id IS NOT NULL ORDER BY sent_at DESC, id DESC LIMIT ?) "+
+			"ORDER BY sent_at, id",
+		taskID, beforeID, string(queue.OutboxSent), limit)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read notifications: %w", err)
+	}
+	defer rows.Close()
+	var references []string
+	for rows.Next() {
+		var reference string
+		if err := rows.Scan(&reference); err != nil {
+			return nil, fmt.Errorf("cannot read notifications: %w", err)
+		}
+		references = append(references, reference)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cannot read notifications: %w", err)
+	}
+	return references, nil
+}
+
+// CountNotificationsSince 返回状态为 SENT 或 UNCERTAIN、且发出时刻 COALESCE(sent_at, updated_at) 不早于 since（按毫秒，恰在 since 的
+// 计入）的通知数，即 D8 全局发信上限 M 所计的「滚动窗口内已发出的通知」。SENT 按 sent_at 计，记下实际投递 ID 改动 updated_at 不影响；
+// 经 D7 核对为已送达的通知按进入 UNCERTAIN 的时刻计（sent_at 沿用该时刻）。
+func (s *Store) CountNotificationsSince(ctx context.Context, since time.Time) (int, error) {
+	return s.count(ctx, "notifications", "SELECT count(*) FROM notifications WHERE state IN (?, ?) AND coalesce(sent_at, updated_at) >= ?",
+		string(queue.OutboxSent), string(queue.OutboxUncertain), since.UnixMilli())
+}
+
+// AbandonedSince 返回 updated_at 不早于 since（按毫秒，恰在 since 的返回）、原因为 expired 或 task_closed 的 ABANDONED 通知，按 id 升序，
+// 至多 100 条；发送循环据此在本地提示「令牌将过期而放弃」与「任务已关闭而放弃」（4a「风险与后续」要求 4b 在本地提示）。
+func (s *Store) AbandonedSince(ctx context.Context, since time.Time) ([]Notification, error) {
+	return s.listNotifications(ctx, abandonedSince, string(queue.OutboxAbandoned), abandonExpired, abandonTaskClosed, since.UnixMilli(), maxNotificationList)
+}
+
+// SentWithoutDeliveredID 返回 sent_at 早于 sentBefore（按毫秒，恰在 sentBefore 的不返回）、仍没有实际投递 ID 的 SENT 通知，按 id 升序，
+// 至多 100 条；供「「已发送」中找不到通知副本」告警（4b Task 10）。
+func (s *Store) SentWithoutDeliveredID(ctx context.Context, sentBefore time.Time) ([]Notification, error) {
+	return s.listNotifications(ctx, sentWithoutDelivered, string(queue.OutboxSent), sentBefore.UnixMilli(), maxNotificationList)
+}
+
+// HasNotifications 报告库中是否有过任何通知（任何状态，包括已放弃与已发出的）；收取循环据此判断首次运行时是否跳过历史邮件：
+// 还没有任何通知时不可能有合法回复。
+func (s *Store) HasNotifications(ctx context.Context) (bool, error) {
+	return s.exists(ctx, "notifications", "SELECT EXISTS (SELECT 1 FROM notifications)")
 }
 
 // changeNotification 在一个事务中读取通知及其任务，交给 change 经状态机计算并写入变化，提交后返回通知的最新快照。
@@ -606,24 +753,27 @@ func notificationsIn(ctx context.Context, tx *sql.Tx, state queue.OutboxState) (
 	return notifications, nil
 }
 
-// getNotification 通过 q 按 where（notificationByID 或 notificationByNID）读取通知快照，owner 取自所属任务，时间换算为 UTC；
-// 不存在时返回 ErrNotFound，状态名不在已知集合时返回错误而不是静默接受。
-func getNotification(ctx context.Context, q rowQuerier, where string, arg any) (Notification, error) {
+// notificationSelect 是读取通知快照的 SELECT 与 FROM 子句，owner 取自所属任务；调用方在其后接上查找条件
+// （可带 ORDER BY 与 LIMIT），条件只来自本包的常量。
+const notificationSelect = "SELECT n.id, n.task_id, t.owner, n.event, n.nid, n.message_id, n.delivered_message_id, n.token_kid, n.token_expires_at, " +
+	"n.state, n.abandon_reason, n.attempts, n.not_before, n.sent_at, n.created_at, n.updated_at " +
+	"FROM notifications n JOIN tasks t ON t.id = n.task_id WHERE "
+
+// rowScanner 是 *sql.Row 与 *sql.Rows 共有的 Scan 方法，使单行读取与列表读取共用同一套列与换算。
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanNotification 按 notificationSelect 的列读出一条通知快照，时间换算为 UTC；读取失败时返回包装原错误（含 sql.ErrNoRows）的错误，
+// 状态名不在已知集合时返回错误而不是静默接受。
+func scanNotification(row rowScanner) (Notification, error) {
 	var n Notification
 	var nid []byte
 	var delivered, reason sql.NullString
 	var sentAt sql.NullInt64
 	var expiresAt, notBefore, createdAt, updatedAt int64
-	err := q.QueryRowContext(ctx,
-		"SELECT n.id, n.task_id, t.owner, n.event, n.nid, n.message_id, n.delivered_message_id, n.token_kid, n.token_expires_at, "+
-			"n.state, n.abandon_reason, n.attempts, n.not_before, n.sent_at, n.created_at, n.updated_at "+
-			"FROM notifications n JOIN tasks t ON t.id = n.task_id WHERE "+where, arg).
-		Scan(&n.ID, &n.TaskID, &n.Owner, &n.Event, &nid, &n.MessageID, &delivered, &n.TokenKeyID, &expiresAt,
-			&n.State, &reason, &n.Attempts, &notBefore, &sentAt, &createdAt, &updatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Notification{}, fmt.Errorf("notification: %w", ErrNotFound)
-	}
-	if err != nil {
+	if err := row.Scan(&n.ID, &n.TaskID, &n.Owner, &n.Event, &nid, &n.MessageID, &delivered, &n.TokenKeyID, &expiresAt,
+		&n.State, &reason, &n.Attempts, &notBefore, &sentAt, &createdAt, &updatedAt); err != nil {
 		return Notification{}, fmt.Errorf("cannot read notification: %w", err)
 	}
 	if !n.State.Valid() {
@@ -641,4 +791,36 @@ func getNotification(ctx context.Context, q rowQuerier, where string, arg any) (
 	n.CreatedAt = time.UnixMilli(createdAt).UTC()
 	n.UpdatedAt = time.UnixMilli(updatedAt).UTC()
 	return n, nil
+}
+
+// getNotification 通过 q 读取满足查找条件 where（本包的常量，参数为 args）的一条通知快照；不存在时返回 ErrNotFound，
+// 状态名不在已知集合时返回错误而不是静默接受。
+func getNotification(ctx context.Context, q rowQuerier, where string, args ...any) (Notification, error) {
+	n, err := scanNotification(q.QueryRowContext(ctx, notificationSelect+where, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Notification{}, fmt.Errorf("notification: %w", ErrNotFound)
+	}
+	return n, err
+}
+
+// listNotifications 读取满足查找条件 where（本包的常量，含 ORDER BY 与 LIMIT，参数为 args）的通知快照列表，没有时返回空。
+// 结果集在一个查询中读完，期间不发出其他查询：存储只有一个连接，嵌套的查询会一直等待这个连接。
+func (s *Store) listNotifications(ctx context.Context, where string, args ...any) ([]Notification, error) {
+	rows, err := s.db.QueryContext(ctx, notificationSelect+where, args...)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read notifications: %w", err)
+	}
+	defer rows.Close()
+	var notifications []Notification
+	for rows.Next() {
+		n, err := scanNotification(rows)
+		if err != nil {
+			return nil, err
+		}
+		notifications = append(notifications, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cannot read notifications: %w", err)
+	}
+	return notifications, nil
 }

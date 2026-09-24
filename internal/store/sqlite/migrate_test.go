@@ -1,7 +1,9 @@
-// Package sqlite 的迁移测试用临时目录中的真实 SQLite 数据库验证版本号、幂等、多个迁移依次应用、版本过新与失败回滚。
+// Package sqlite 的迁移测试用临时目录中的真实 SQLite 数据库验证版本号、幂等、多个迁移依次应用、版本过新、失败回滚，
+// 以及 0002 与 0003 在已有数据的旧版本库上的升级。
 package sqlite
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -90,18 +92,22 @@ var schemaV2 = []string{
 	"trigger:reply_payloads_queued_only",
 }
 
-// TestMigrateEmptyDatabase 验证空库迁移后版本为 2，0001 的四张表与三个索引、0002 新增的表、索引与触发器全部存在，
-// 且没有多余对象（例如重建时残留的 inbound_messages_new、replies_new）。
+// schemaV3 是 0003 之后全部用户定义的对象：schemaV2 加上 mail_pauses 表与 inbound_rejections_by_message 索引，
+// 排序与 schemaObjects 的 ORDER BY 一致（按字节比较）。
+var schemaV3 = slices.Sorted(slices.Values(append(slices.Clone(schemaV2), "index:inbound_rejections_by_message", "table:mail_pauses")))
+
+// TestMigrateEmptyDatabase 验证空库迁移后版本为 3，0001 的四张表与三个索引、0002 新增的表、索引与触发器、0003 新增的
+// mail_pauses 表与 inbound_rejections_by_message 索引全部存在，且没有多余对象（例如重建时残留的 inbound_messages_new、replies_new）。
 func TestMigrateEmptyDatabase(t *testing.T) {
 	db := openRawDB(t)
 	if err := migrate(t.Context(), db, migrationFS); err != nil {
 		t.Fatalf("migrate 返回错误: %v", err)
 	}
-	if got := userVersion(t, db); got != 2 {
-		t.Errorf("user_version = %d; want 2", got)
+	if got := userVersion(t, db); got != 3 {
+		t.Errorf("user_version = %d; want 3", got)
 	}
-	if got := schemaObjects(t, db); !slices.Equal(got, schemaV2) {
-		t.Errorf("schema = %v; want %v", got, schemaV2)
+	if got := schemaObjects(t, db); !slices.Equal(got, schemaV3) {
+		t.Errorf("schema = %v; want %v", got, schemaV3)
 	}
 }
 
@@ -113,8 +119,8 @@ func TestMigrateTwiceIsNoop(t *testing.T) {
 			t.Fatalf("migrate 返回错误: %v", err)
 		}
 	}
-	if got := userVersion(t, db); got != 2 {
-		t.Errorf("user_version = %d; want 2", got)
+	if got := userVersion(t, db); got != 3 {
+		t.Errorf("user_version = %d; want 3", got)
 	}
 
 	dir := dataDir(t)
@@ -125,8 +131,8 @@ func TestMigrateTwiceIsNoop(t *testing.T) {
 	}
 	store = openStore(t, dir)
 	version, err := store.SchemaVersion(t.Context())
-	if err != nil || version != 2 {
-		t.Errorf("SchemaVersion = %d, %v; want 2, nil", version, err)
+	if err != nil || version != 3 {
+		t.Errorf("SchemaVersion = %d, %v; want 3, nil", version, err)
 	}
 	if got := countRows(t, store.db, "tasks"); got != 1 {
 		t.Errorf("重新打开后 tasks 行数 = %d; want 1", got)
@@ -134,7 +140,7 @@ func TestMigrateTwiceIsNoop(t *testing.T) {
 }
 
 // TestMigrateRereadsVersionInsideTransaction 验证迁移在事务内重新读取 user_version：另一连接已在 IMMEDIATE 事务中
-// 应用 0001 但尚未提交时开始迁移，等它提交后本次迁移须跳过已提交的 0001、再执行 0002，不重复执行脚本。
+// 应用 0001 但尚未提交时开始迁移，等它提交后本次迁移须跳过已提交的 0001、再执行 0002 与 0003，不重复执行脚本。
 // 只在事务外读取版本的实现会读到提交前的 0，随后以 table already exists 失败。
 func TestMigrateRereadsVersionInsideTransaction(t *testing.T) {
 	path := filepath.Join(t.TempDir(), databaseFileName)
@@ -172,11 +178,11 @@ func TestMigrateRereadsVersionInsideTransaction(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("并发迁移返回错误: %v", err)
 	}
-	if got := userVersion(t, dbs[0]); got != 2 {
-		t.Errorf("user_version = %d; want 2", got)
+	if got := userVersion(t, dbs[0]); got != 3 {
+		t.Errorf("user_version = %d; want 3", got)
 	}
-	if got := schemaObjects(t, dbs[0]); !slices.Equal(got, schemaV2) {
-		t.Errorf("schema = %v; want %v", got, schemaV2)
+	if got := schemaObjects(t, dbs[0]); !slices.Equal(got, schemaV3) {
+		t.Errorf("schema = %v; want %v", got, schemaV3)
 	}
 }
 
@@ -334,10 +340,10 @@ func TestMigrateRejectsInvalidFileNames(t *testing.T) {
 	}
 }
 
-// TestMigrateStopsAtVersion2OnFailedMigration 验证在真实的 0001、0002 之后注入失败的 0003_bad.sql 时，
-// 版本停在 2，0003 中已执行的语句随事务回滚，结构仍与版本 2 相同。
-func TestMigrateStopsAtVersion2OnFailedMigration(t *testing.T) {
-	fsys := fstest.MapFS{"0003_bad.sql": {Data: []byte("CREATE TABLE partial (id INTEGER) STRICT; CREATE TABLE broken (")}}
+// TestMigrateStopsAtVersion3OnFailedMigration 验证在真实的 0001–0003 之后注入失败的 0004_bad.sql 时，
+// 版本停在 3，0004 中已执行的语句随事务回滚，结构仍与版本 3 相同。
+func TestMigrateStopsAtVersion3OnFailedMigration(t *testing.T) {
+	fsys := fstest.MapFS{"0004_bad.sql": {Data: []byte("CREATE TABLE partial (id INTEGER) STRICT; CREATE TABLE broken (")}}
 	entries, err := fs.ReadDir(migrationFS, ".")
 	if err != nil {
 		t.Fatalf("列出迁移失败: %v", err)
@@ -353,21 +359,29 @@ func TestMigrateStopsAtVersion2OnFailedMigration(t *testing.T) {
 	if err := migrate(t.Context(), db, fsys); err == nil {
 		t.Fatal("migrate 应当返回错误")
 	}
-	if got := userVersion(t, db); got != 2 {
-		t.Errorf("user_version = %d; want 2", got)
+	if got := userVersion(t, db); got != 3 {
+		t.Errorf("user_version = %d; want 3", got)
 	}
-	if got := schemaObjects(t, db); !slices.Equal(got, schemaV2) {
-		t.Errorf("schema = %v; want %v", got, schemaV2)
+	if got := schemaObjects(t, db); !slices.Equal(got, schemaV3) {
+		t.Errorf("schema = %v; want %v", got, schemaV3)
 	}
 }
 
-// openVersion1 在新的数据目录中按 Open 的权限要求创建数据库，只应用嵌入的 0001_init.sql，
-// 模拟 Phase 3 发布的版本 1 数据库；返回数据目录与连接，连接在测试结束时关闭（提前关闭后再次关闭无害）。
-func openVersion1(t *testing.T) (string, *sql.DB) {
+// openAtVersion 在新的数据目录中按 Open 的权限要求创建数据库，只应用嵌入迁移中编号不大于 version 的前几个，
+// 模拟较早版本发布的数据库（1 为 Phase 3，2 为 Phase 4a）；返回数据目录与连接，连接在测试结束时关闭（提前关闭后再次关闭无害）。
+func openAtVersion(t *testing.T, version int) (string, *sql.DB) {
 	t.Helper()
-	script, err := fs.ReadFile(migrationFS, "0001_init.sql")
-	if err != nil {
-		t.Fatalf("读取 0001_init.sql 失败: %v", err)
+	entries, err := fs.ReadDir(migrationFS, ".")
+	if err != nil || len(entries) < version {
+		t.Fatalf("列出迁移失败或不足 %d 个: %v", version, err)
+	}
+	fsys := fstest.MapFS{}
+	for _, entry := range entries[:version] {
+		script, err := fs.ReadFile(migrationFS, entry.Name())
+		if err != nil {
+			t.Fatalf("读取迁移 %s 失败: %v", entry.Name(), err)
+		}
+		fsys[entry.Name()] = &fstest.MapFile{Data: script}
 	}
 	dir := dataDir(t)
 	path := filepath.Join(dir, databaseFileName)
@@ -379,11 +393,11 @@ func openVersion1(t *testing.T) (string, *sql.DB) {
 		t.Fatalf("打开数据库失败: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	if err := migrate(t.Context(), db, fstest.MapFS{"0001_init.sql": {Data: script}}); err != nil {
-		t.Fatalf("迁移到版本 1 失败: %v", err)
+	if err := migrate(t.Context(), db, fsys); err != nil {
+		t.Fatalf("迁移到版本 %d 失败: %v", version, err)
 	}
-	if got := userVersion(t, db); got != 1 {
-		t.Fatalf("user_version = %d; want 1", got)
+	if got := userVersion(t, db); got != version {
+		t.Fatalf("user_version = %d; want %d", got, version)
 	}
 	return dir, db
 }
@@ -489,11 +503,11 @@ func replaceOnce(t *testing.T, text, old, replacement string) string {
 }
 
 // TestMigrateUpgradesVersion1Data 在只含 0001 的版本 1 库中写入多个任务、多条入站记录与五种状态的回复，
-// 再删除最新的一条回复及其入站记录，使两张表的序列都大于最大 id；随后以真实迁移 Open，验证 0002 重建
+// 再删除最新的一条回复及其入站记录，使两张表的序列都大于最大 id；随后以真实迁移 Open（依次应用 0002 与 0003），验证 0002 重建
 // inbound_messages 与 replies 时：数据逐行逐字段保留（folder 为 INBOX），外键与在途唯一索引照常生效，
 // AUTOINCREMENT 序列不回退，两张表的建表文本除 folder 列与 UID 唯一键外与 0001 逐字相同，旧行按 INBOX 参与去重。
 func TestMigrateUpgradesVersion1Data(t *testing.T) {
-	dir, db := openVersion1(t)
+	dir, db := openAtVersion(t, 1)
 	tasks := []string{"0000000001", "0000000002", "0000000003"}
 	for _, id := range tasks {
 		insertTask(t, db, id)
@@ -557,11 +571,11 @@ func TestMigrateUpgradesVersion1Data(t *testing.T) {
 	}
 
 	store := openStore(t, dir)
-	if version, err := store.SchemaVersion(t.Context()); err != nil || version != 2 {
-		t.Fatalf("SchemaVersion = %d, %v; want 2, nil", version, err)
+	if version, err := store.SchemaVersion(t.Context()); err != nil || version != 3 {
+		t.Fatalf("SchemaVersion = %d, %v; want 3, nil", version, err)
 	}
-	if got := schemaObjects(t, store.db); !slices.Equal(got, schemaV2) {
-		t.Errorf("schema = %v; want %v", got, schemaV2)
+	if got := schemaObjects(t, store.db); !slices.Equal(got, schemaV3) {
+		t.Errorf("schema = %v; want %v", got, schemaV3)
 	}
 	for _, check := range []struct {
 		name   string
@@ -646,7 +660,7 @@ func TestMigrateUpgradesVersion1WithoutRows(t *testing.T) {
 		{"行已全部删除", 3, 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			dir, db := openVersion1(t)
+			dir, db := openAtVersion(t, 1)
 			insertTask(t, db, "0000000001")
 			for i := range tt.deleted {
 				inboundID, seq := insertV1Reply(t, db, "0000000001", i+1, digestA[:], "QUEUED", "", "")
@@ -662,8 +676,8 @@ func TestMigrateUpgradesVersion1WithoutRows(t *testing.T) {
 			}
 
 			store := openStore(t, dir)
-			if version, err := store.SchemaVersion(t.Context()); err != nil || version != 2 {
-				t.Fatalf("SchemaVersion = %d, %v; want 2, nil", version, err)
+			if version, err := store.SchemaVersion(t.Context()); err != nil || version != 3 {
+				t.Fatalf("SchemaVersion = %d, %v; want 3, nil", version, err)
 			}
 			if after := dumpRows(t, store.db, query); !slices.Equal(after, before) {
 				t.Errorf("升级后 sqlite_sequence = %q; want %q", after, before)
@@ -678,5 +692,113 @@ func TestMigrateUpgradesVersion1WithoutRows(t *testing.T) {
 				t.Errorf("升级后新行 seq = %d、入站 id = %d; want 都大于 %d", got.Reply.Seq, inboundID, tt.deleted)
 			}
 		})
+	}
+}
+
+// mailPausesSQL 与 rejectionsByMessageSQL 是契约给出的 0003 建表与建索引语句，SQLite 在 sqlite_schema.sql 中按原文保存（不含分号）。
+const (
+	mailPausesSQL = `CREATE TABLE mail_pauses (
+    task_id     TEXT PRIMARY KEY REFERENCES tasks (id),
+    reason      TEXT NOT NULL CHECK (reason IN ('hourly', 'daily')),
+    paused_at   INTEGER NOT NULL,
+    resumed_at  INTEGER CHECK (resumed_at IS NULL OR resumed_at >= paused_at)
+) STRICT`
+	rejectionsByMessageSQL = "CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folder, message_id) WHERE message_id IS NOT NULL"
+)
+
+// TestMigrateUpgradesVersion2Data 在只含 0001 与 0002 的版本 2 库中直接写入各表的数据：两个任务与一条任务事件、实例与密钥元数据、
+// PENDING（带正文）、SENT（带实际投递 ID）、UNCERTAIN 与 ABANDONED 通知、QUEUED 回复及其入站记录与正文、游标，以及带与不带
+// Message-ID 的被拒记录；随后以真实迁移 Open。0003 只新增 mail_pauses 表与 inbound_rejections_by_message 索引：版本为 3，
+// 原有各表与 sqlite_sequence 逐行逐字段不变，外键检查为空，两条新语句与契约原文逐字相同；已有的被拒记录可经 RejectedBeforeReset
+// 按 Message-ID 查到，mail_pauses 为空并可以写入。
+func TestMigrateUpgradesVersion2Data(t *testing.T) {
+	dir, db := openAtVersion(t, 2)
+	if got := schemaObjects(t, db); !slices.Equal(got, schemaV2) {
+		t.Fatalf("前提不成立: 版本 2 的结构 = %v; want %v", got, schemaV2)
+	}
+	const first, second = "0000000001", "0000000002"
+	insertTask(t, db, first)
+	insertTask(t, db, second)
+	rejection := columns{"account": botAccount, "folder": "INBOX", "uid_validity": 7, "uid": 1, "message_id": "<r1@example.invalid>",
+		"sender": "user@example.invalid", "reason": "thread_mismatch", "task_id": first, "received_at": 10}
+	for _, row := range []struct {
+		table string
+		row   columns
+	}{
+		{"task_events", columns{"task_id": first, "event": "start", "from_state": "CREATED", "to_state": "RUNNING", "created_at": 2}},
+		{"instance", columns{"singleton": 1, "instance_id": "0123456789abcdef", "created_at": 1}},
+		{"crypto_keys", columns{"purpose": "token", "kid": 1, "state": "active", "key_check": bytes.Repeat([]byte{0x5a}, 8), "created_at": 1, "updated_at": 1}},
+		{"notifications", notificationRow(first, 1)},
+		{"notification_payloads", columns{"notification_id": 1, "key_id": 1, "sealed": bytes.Repeat([]byte{0xa5}, 30)}},
+		{"notifications", notificationRow(first, 2).with("state", "SENT").with("sent_at", 5).with("delivered_message_id", "<q.2@example.invalid>")},
+		{"notifications", notificationRow(second, 3).with("state", "UNCERTAIN").with("updated_at", 6)},
+		{"notifications", notificationRow(second, 4).with("state", "ABANDONED").with("abandon_reason", "expired")},
+		{"inbound_messages", columns{"account": botAccount, "folder": "Junk", "uid_validity": 7, "uid": 3, "message_id": "<in-1@example.invalid>",
+			"body_sha256": digestA[:], "task_id": first, "received_at": 8}},
+		{"replies", columns{"inbound_id": 1, "task_id": first, "state": "QUEUED", "created_at": 8, "updated_at": 8}},
+		{"reply_payloads", columns{"seq": 1, "key_id": 1, "sealed": bytes.Repeat([]byte{0xa5}, 30)}},
+		{"fetch_cursors", columns{"account": botAccount, "folder": "INBOX", "uid_validity": 7, "last_uid": 3, "updated_at": 9}},
+		{"inbound_rejections", rejection},
+		{"inbound_rejections", rejection.with("uid", 2).without("message_id").without("sender").without("task_id")},
+		{"inbound_rejections", rejection.with("folder", "Junk").with("uid", 4).with("reason", "auto_reply")},
+	} {
+		if err := row.row.insert(t, db, row.table); err != nil {
+			t.Fatalf("在版本 2 的库中插入 %s 失败: %v", row.table, err)
+		}
+	}
+	tables := []string{"tasks", "task_events", "instance", "crypto_keys", "notifications", "notification_payloads",
+		"inbound_messages", "replies", "reply_payloads", "fetch_cursors", "inbound_rejections", "sqlite_sequence"}
+	before := make(map[string][]string, len(tables))
+	for _, table := range tables {
+		// 表名只来自上面的常量；按前两列排序使结果确定（各表的前一或两列是主键）。
+		before[table] = dumpRows(t, db, "SELECT * FROM "+table+" ORDER BY 1, 2")
+		if len(before[table]) == 0 {
+			t.Fatalf("前提不成立: 版本 2 的 %s 没有数据", table)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("关闭版本 2 的库失败: %v", err)
+	}
+
+	store := openStore(t, dir)
+	if version, err := store.SchemaVersion(t.Context()); err != nil || version != 3 {
+		t.Fatalf("SchemaVersion = %d, %v; want 3, nil", version, err)
+	}
+	if got := schemaObjects(t, store.db); !slices.Equal(got, schemaV3) {
+		t.Errorf("schema = %v; want %v", got, schemaV3)
+	}
+	for _, table := range tables {
+		if after := dumpRows(t, store.db, "SELECT * FROM "+table+" ORDER BY 1, 2"); !slices.Equal(after, before[table]) {
+			t.Errorf("升级后 %s = %q; want 不变 %q", table, after, before[table])
+		}
+	}
+	if got := dumpRows(t, store.db, "PRAGMA foreign_key_check"); len(got) != 0 {
+		t.Errorf("PRAGMA foreign_key_check = %q; want 空", got)
+	}
+	for name, want := range map[string]string{"mail_pauses": mailPausesSQL, "inbound_rejections_by_message": rejectionsByMessageSQL} {
+		var text string
+		if err := store.db.QueryRowContext(t.Context(), "SELECT sql FROM sqlite_schema WHERE name = ?", name).Scan(&text); err != nil || text != want {
+			t.Errorf("%s 的建表文本 = %q, %v; want %q", name, text, err, want)
+		}
+	}
+
+	ctx := t.Context()
+	for _, tt := range []struct {
+		folder      string
+		uidValidity uint32
+		want        bool
+	}{{"INBOX", 8, true}, {"INBOX", 7, false}, {"Junk", 8, true}, {"Junk", 7, false}} {
+		if got, err := store.RejectedBeforeReset(ctx, botAccount, tt.folder, tt.uidValidity, "<r1@example.invalid>"); err != nil || got != tt.want {
+			t.Errorf("升级前的被拒记录 %s/%d: RejectedBeforeReset = %t, %v; want %t", tt.folder, tt.uidValidity, got, err, tt.want)
+		}
+	}
+	if got := countRows(t, store.db, "mail_pauses"); got != 0 {
+		t.Errorf("升级后 mail_pauses 行数 = %d; want 0", got)
+	}
+	if err := store.PauseMail(ctx, first, PauseHourly); err != nil {
+		t.Fatalf("升级后 PauseMail 返回错误: %v", err)
+	}
+	if paused, resumedAt, err := store.MailPaused(ctx, first); err != nil || !paused || !resumedAt.IsZero() {
+		t.Errorf("升级后 MailPaused = %t, %v, %v; want true、零值、nil", paused, resumedAt, err)
 	}
 }

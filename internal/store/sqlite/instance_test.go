@@ -181,7 +181,7 @@ func TestRegisterKeyNonActive(t *testing.T) {
 	}
 }
 
-// TestRegisterKeyValidation 验证 kid 为 0 或用途未知时，RegisterKey 在开始事务前报错且不写入：
+// TestRegisterKeyValidation 验证 kid 为 0 或用途未知时，RegisterKey 在开始事务前返回包装 ErrInvalidArgument 的错误且不写入：
 // 上下文已取消时仍返回参数错误，而不是 context.Canceled。
 func TestRegisterKeyValidation(t *testing.T) {
 	store := openStore(t, dataDir(t))
@@ -198,8 +198,8 @@ func TestRegisterKeyValidation(t *testing.T) {
 		{"大写用途", KeyPurpose("TOKEN"), 1},
 	} {
 		err := store.RegisterKey(ctx, tt.purpose, tt.kid, check)
-		if err == nil || !strings.Contains(err.Error(), "invalid key registration") || errors.Is(err, context.Canceled) {
-			t.Errorf("%s: err = %v; want 含 \"invalid key registration\" 的错误而不是 context.Canceled", tt.name, err)
+		if err == nil || !strings.Contains(err.Error(), "invalid key registration") || !errors.Is(err, ErrInvalidArgument) || errors.Is(err, context.Canceled) {
+			t.Errorf("%s: err = %v; want 包装 ErrInvalidArgument、含 \"invalid key registration\" 的错误而不是 context.Canceled", tt.name, err)
 		}
 	}
 	if got := countRows(t, store.db, "crypto_keys"); got != 0 {
