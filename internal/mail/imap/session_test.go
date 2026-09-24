@@ -651,6 +651,24 @@ func TestScanIgnoredPartialBoundsMemory(t *testing.T) {
 	}
 }
 
+// TestScanBodyLiteralCutShort 模拟服务器在正文字面量中途以 close_notify 正常关闭连接。go-imap 的字面量读取器把这时的
+// io.EOF 当作字面量正常结束：ReadAll 带着不完整的正文「成功」返回，解码协程也被放行、继续读同一个读缓冲。
+// 此时若再调用 Next，它会丢弃剩余字面量而再次读取读缓冲，与解码协程争用（make test 的 -race 会报告数据竞争）。
+// Scan 必须返回 ErrClosed，不交付不完整的正文。
+func TestScanBodyLiteralCutShort(t *testing.T) {
+	fs := newFakeServer(t, proxyOptions{})
+	fs.appendMessage(FolderInbox, testMessage(1, 4096))
+	s := dial(t, fs, testTimeouts())
+	fs.addRule(&rule{command: "UID FETCH", contains: "BODY.PEEK", kind: faultCloseAfter, bytes: 512})
+	b, err := s.Scan(context.Background(), FolderInbox, Cursor{})
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+	if len(b.Messages) != 0 {
+		t.Fatalf("Scan returned %d messages after the literal was cut short", len(b.Messages))
+	}
+}
+
 // TestScanBatchBytes 覆盖正文合计上限：已取回正文加下一封的大小超过上限时本批提前结束并置 More，下一批从未交付的第一封开始；
 // 恰好等于上限时仍在本批内。
 func TestScanBatchBytes(t *testing.T) {

@@ -2839,6 +2839,8 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 
 **测试（先写并确认失败）：** 用 `internal/mail/smtp.Send` 发一封信后，「已发送」中出现改写了 ID 的副本且 `X-OQ-MSGID` 等于原 ID；`imap.Session` 能登录、`ScanHeaders` 取到副本；每种故障注入都产生对应的客户端错误分类（`ErrAuth`、`*ReplyError` 4xx/5xx、`ErrUncertain`、`ErrAuthFailed`、`ErrNoFolder`、断开后的 `ErrClosed`）；延迟写入的副本在延迟之后才出现。
 
+**开工前修复的 4a 缺陷（2026-09-24）：** 验证 Task 1 时，`make check` 在机器负载较高时于 `TestCommandDeadlines/body_literal_stalls_halfway` 报告数据竞争。根因在 `Session.body`：服务器在正文字面量中途以 close_notify 正常关闭连接时，go-imap 的字面量读取器把 `io.EOF` 当作字面量结束，`io.ReadAll` 带着不完整的正文「成功」返回，解码协程也被放行；随后的 `msg.Next()` 丢弃剩余字面量时再次读取同一个读缓冲，与解码协程争用。4a 的注释只防住了「读取失败」这一条路径。修法：读到的字节少于字面量声明的长度（且未到上限）时，与读取失败同样处理，按连接断开结束本命令、不再调用 `Next`。假服务器新增故障 `faultCloseAfter`（转发 N 字节后以 close_notify 关闭），新用例 `TestScanBodyLiteralCutShort` 在修复前于 `-race` 下稳定报告竞争，修复后通过。本任务新增的 `ScanHeaders` 读取头部字面量时须沿用同一条检查。
+
 - [ ] **Step 1：** 写失败的测试。
 - [ ] **Step 2：** 实现；更新两份依赖表。
 - [ ] **Step 3：** `make check`、`make secrets` 通过。

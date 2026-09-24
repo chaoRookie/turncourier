@@ -517,6 +517,12 @@ func (s *Session) body(ctx context.Context, uid imap.UID) (raw []byte, tooLarge,
 					// 连接断开后解码协程自行退出并结束本命令，不会因为没人取走数据而阻塞。
 					return err
 				}
+				// 读到的字节少于字面量声明的长度（且未到上限），说明连接在字面量中途断开：服务器以 close_notify 正常关闭时，
+				// go-imap 的字面量读取器把 io.EOF 当作字面量结束，ReadAll 不报错，解码协程也已被放行、继续读同一个读缓冲。
+				// 这与读取失败是同一种情况，同样不能再调用 Next，只能按连接断开结束本命令。
+				if int64(len(data)) < min(section.Literal.Size(), limit+1) {
+					return io.ErrUnexpectedEOF
+				}
 				if int64(len(data)) > limit {
 					data, large = nil, true
 				}

@@ -68,6 +68,7 @@ const (
 	faultEmpty                            // 不转发，直接回 <标签> OK，模拟服务器没有返回任何数据
 	faultRejectClose                      // 不转发，回 <标签> NO [AUTHENTICATIONFAILED] 后立即关闭两侧连接，模拟拒绝登录后断开的服务器
 	faultWholeBody                        // 不转发，回一条正文字面量为 bytes 字节的 FETCH 响应再回 <标签> OK，模拟不遵守部分取回的服务器
+	faultCloseAfter                       // 转发命令，响应转发 bytes 字节后关闭两侧连接；TLS 以 close_notify 正常结束，客户端读到 io.EOF
 )
 
 // rule 是一条故障规则：命令名相同且命令行含 contains 时生效。
@@ -418,6 +419,7 @@ type proxyConn struct {
 
 	wmu    sync.Mutex // 串行化写往客户端的数据，注入的行不会插进其他响应中间
 	budget int        // 「响应中途冻结」剩余可转发的字节；小于 0 表示未启用。受 wmu 保护
+	cut    bool       // 额度用完时关闭连接而不是冻结（faultCloseAfter）。受 wmu 保护
 
 	freezeOnce sync.Once
 	frozen     chan struct{} // 冻结后关闭；此后两个方向的数据都被读出丢弃
@@ -452,11 +454,11 @@ func (pc *proxyConn) close() {
 	})
 }
 
-// arm 启用「响应中途冻结」：此后写往客户端的数据累计达到 n 字节即冻结。
-func (pc *proxyConn) arm(n int) {
+// arm 启用「响应中途冻结」：此后写往客户端的数据累计达到 n 字节即冻结；cut 为真时改为关闭两侧连接。
+func (pc *proxyConn) arm(n int, cut bool) {
 	pc.wmu.Lock()
 	defer pc.wmu.Unlock()
-	pc.budget = n
+	pc.budget, pc.cut = n, cut
 }
 
 // send 把数据写给客户端；冻结后丢弃。启用「响应中途冻结」时只写出剩余额度，然后冻结。
@@ -469,6 +471,13 @@ func (pc *proxyConn) send(b []byte) error {
 	if pc.budget >= 0 {
 		if len(b) >= pc.budget {
 			b = b[:pc.budget]
+			if pc.cut {
+				// 写出剩余额度后关闭：客户端一侧的 TLS 连接发出 close_notify，客户端读完这些字节后读到 io.EOF。
+				_, err := pc.client.Write(b)
+				pc.freeze()
+				pc.close()
+				return err
+			}
 			pc.freeze()
 		} else {
 			pc.budget -= len(b)
@@ -520,12 +529,14 @@ func (pc *proxyConn) clientToServer() {
 					}
 				}
 			case faultFreezeAfter:
-				pc.arm(r.bytes)
+				pc.arm(r.bytes, false)
+			case faultCloseAfter:
+				pc.arm(r.bytes, true)
 			}
 			if err != nil {
 				return
 			}
-			if r.kind != faultInject && r.kind != faultFreezeAfter {
+			if r.kind != faultInject && r.kind != faultFreezeAfter && r.kind != faultCloseAfter {
 				continue
 			}
 		}
