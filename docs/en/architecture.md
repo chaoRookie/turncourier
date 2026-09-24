@@ -53,7 +53,7 @@ CLI output meant for people is in Chinese. JSON field names are in English.
 
 ### Not implemented
 
-- Sending or receiving email in the product. The SMTP and IMAP clients exist, but no command calls them, and nothing renders a notification or parses an inbound message. MIME parsing, quote and signature parsing, reply validation, the thread binding rules and the deterministic filtering of outgoing content are all Phase 4b. L1 has already answered how QQ Mail rewrites Message-IDs and how its own clients format a reply; only the IDLE measurements and the Keychain sandbox check are still outstanding.
+- Sending or receiving email in the product. The SMTP and IMAP clients exist, but no command calls them, and nothing renders a notification or parses an inbound message. MIME parsing, quote and signature parsing, reply validation, the thread binding rules and the deterministic filtering of outgoing content are all Phase 4b. L1 is done: it answered how QQ Mail rewrites Message-IDs, how its own clients format a reply, how IDLE behaves and whether an Agent's shell can read the Keychain. What remains of it (L1b) is a re-check of the token-in-subject format with real clients, plus alias and `Return-Path` samples; the 4b task contracts are drafted in the plan and wait for the maintainer's confirmation.
 - Codex and Claude Code adapters. TurnCourier does not start, resume or watch agent sessions.
 - Wiring the mail loop into commands. `internal/app`, which is to assemble the send and receive loop, does not exist; `init` is the only command that reads a configuration file or opens the database.
 - Token revocation, key rotation (only key id 1 is created), `init`'s environment diagnostics and its real round-trip test.
