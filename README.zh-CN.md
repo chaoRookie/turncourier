@@ -246,7 +246,8 @@ turncourier/
 │       └── state_test.go            # 穷举全部状态 × 事件组合
 ├── tests/                           # 跨包测试与人工执行的测试
 │   ├── docs/                        # 核对文档与代码是否一致
-│   │   └── deps_test.go             # 依赖表与 go.mod、实际导入的比对
+│   │   ├── deps_test.go             # 依赖表与 go.mod、实际导入的比对
+│   │   └── imports_test.go          # 整仓扫描包的依赖方向
 │   ├── integration/                 # 跨包测试
 │   │   ├── lifecycle_test.go        # 配置、存储与状态机的完整生命周期
 │   │   └── payload_test.go          # 通知、令牌、摘要与正文密文的生命周期

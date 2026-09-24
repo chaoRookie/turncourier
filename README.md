@@ -246,7 +246,8 @@ turncourier/
 │       └── state_test.go            # Every state × event combination
 ├── tests/                           # Cross-package and manual tests
 │   ├── docs/                        # Checks that documentation matches the code
-│   │   └── deps_test.go             # Dependency tables against go.mod and imports
+│   │   ├── deps_test.go             # Dependency tables against go.mod and imports
+│   │   └── imports_test.go          # Package dependency direction across the repo
 │   ├── integration/                 # Cross-package tests
 │   │   ├── lifecycle_test.go        # Config, storage and state machines together
 │   │   └── payload_test.go          # Notifications, tokens, digests, ciphertext
