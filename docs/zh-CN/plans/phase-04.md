@@ -3005,7 +3005,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 
 处理完成后推进「已发送」的游标。Watcher 的 `Scanned` 回调记下「已发送」最近一次成功补扫的开始时刻，供 Task 9 第 9 步判断证据；每次成功补扫之后以 `SentWithoutDeliveredID(本轮开始时刻 − 10 分钟, afterID)` 从 `afterID = 0` 起逐页取完（下一页的 `afterID` 取上一页最后一行的 id），用进程内已报告的通知 ID 集合去重，每条通知在本进程生命周期内只计入一次；每轮把新发现的缺失合成一条带计数（`Count`）的 `sent_copy_missing` 事件，不逐条发出——关闭「保存到已发送」时积压只增不减，逐条发出会在每次重启时刷屏（2026-09-24 Task 2 复查的细节项，主会话定为聚合）。不以「已报告的最大 id」作跨轮游标：id 较小的通知可能因重新排队而晚于 id 较大的通知发出，也可能较晚才被本地核对为已送达，越过 `sentBefore` 时游标已在它之后，它就永远不会被报告（2026-09-24 Task 2 修复与复查时指出）；每轮重读的代价随「保存到已发送」关闭后的积压线性增长，受 D8 每小时至多 40 封约束；连续 3 轮补扫失败（含「已发送」不在 LIST 中）时发出一次 `sent_unavailable`，恢复后清零。
 
-**测试（先写并确认失败）：** 表中每一行；不是本实例的副本、无法解析的头部、不合法的 Message-ID 与不合法的我方 ID（超长、非法 UTF-8）都被忽略且批不失败；查询因数据库错误失败时批失败、游标不前进；SENDING 的副本延后，30 秒后重试；游标推进；`Scanned` 只在成功时更新证据时刻；`sent_copy_missing` 按轮聚合、每条通知在进程内只计入一次，`sent_unavailable` 只发一次；因重新排队而较晚发出、id 较小的通知与较晚才被本地核对为已送达的通知都被计入一次，下一轮不重复（变异：以已报告的最大 id 作跨轮游标，这条用例应失败）；D7 的解除只在副本存在时发生，没有副本的 UNCERTAIN 保持不变，解除与记录在同一事务中（注入失败时两者都没有生效）。
+**测试（先写并确认失败）：** 表中每一行；不是本实例的副本、无法解析的头部、不合法的 Message-ID 与不合法的我方 ID（超长、非法 UTF-8）都被忽略且批不失败；查询因数据库错误失败时批失败、游标不前进；SENDING 的副本延后，30 秒后重试；游标推进；`Scanned` 只在成功时更新证据时刻，且只认 `Scanned(FolderSent, …)`：「已发送」补扫失败或被延后、而 INBOX 与 Junk 照常完成的一轮，以及 `Scanned(INBOX)`、`Scanned(Junk)` 的调用，都不改变证据时刻（变异：任何文件夹的 `Scanned` 都记为证据，这条用例应失败；2026-09-24 Task 6 规格审查补充）；`sent_copy_missing` 按轮聚合、每条通知在进程内只计入一次，`sent_unavailable` 只发一次；因重新排队而较晚发出、id 较小的通知与较晚才被本地核对为已送达的通知都被计入一次，下一轮不重复（变异：以已报告的最大 id 作跨轮游标，这条用例应失败）；D7 的解除只在副本存在时发生，没有副本的 UNCERTAIN 保持不变，解除与记录在同一事务中（注入失败时两者都没有生效）。
 
 - [ ] **Step 1：** 写失败的测试。
 - [ ] **Step 2：** 实现。
@@ -3067,10 +3067,10 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 **契约：**
 
 - `New(Options) (*App, error)`：`Options` 含配置、Keychain、Agent、事件回调，以及只供测试注入的时钟、随机源、根证书池、SMTP 与 IMAP 期限、退避参数。`(*App) StartTask` 与 `(*App) TaskEvent` 转交 Task 12 的 `taskEvents`。
-- `(*App) Run(ctx) error`：按顺序 ① 取得单实例锁；② 以无正文密钥打开存储读取实例 ID（没有则提示先运行 `init`），`LoadSecrets` 核对密钥，关闭后以正文密钥重新打开；③ `RecoverInFlight` 与 `RecoverSendingNotifications`，结果作为事件发出；④ 启动 Watcher（`Sent: true`，容量为 1 的唤醒通道，`Scanned` 接 Task 10，`SkipHistory` 在 `HasNotifications` 为假时返回真——每次调用时实时查询、不在启动时缓存（Watcher 在 EXAMINE 返回之后才询问，缓存会重新打开 Task 6 实施说明第 7 条关闭的竞争），查询失败时返回假、照常补扫，`Now` 取 App 的时钟）、发送循环、派发循环与每天一次的 `PruneRejections(now − 30 天)`（返回值等于单次上限 10000 时继续调用，直到不足 10000）；⑤ ctx 结束后依次停止各循环、关闭存储、释放锁。①–③ 任一失败即返回错误，不启动任何循环；某个循环以错误结束（例如 Task 11 的状态写入失败）时停止其余循环并返回该错误。
+- `(*App) Run(ctx) error`：按顺序 ① 取得单实例锁；② 以无正文密钥打开存储读取实例 ID（没有则提示先运行 `init`），`LoadSecrets` 核对密钥，关闭后以正文密钥重新打开；③ `RecoverInFlight` 与 `RecoverSendingNotifications`，结果作为事件发出；④ 启动 Watcher（`Sent: true`，容量为 1 的唤醒通道——从不关闭：关闭的通道永远就绪，Watcher 会不停补扫；Task 9、10 的延后唤醒经 30 秒定时器发出，从不在返回 `ErrDefer` 之前直接唤醒，否则同样形成不限速的补扫循环（2026-09-24 Task 6 审查补充）——`Scanned` 接 Task 10，`SkipHistory` 在 `HasNotifications` 为假时返回真——每次调用时实时查询、不在启动时缓存（Watcher 在 EXAMINE 返回之后才询问，缓存会重新打开 Task 6 实施说明第 7 条关闭的竞争），查询失败时返回假、照常补扫，`Now` 取 App 的时钟）、发送循环、派发循环与每天一次的 `PruneRejections(now − 30 天)`（返回值等于单次上限 10000 时继续调用，直到不足 10000）；⑤ ctx 结束后依次停止各循环、关闭存储、释放锁。①–③ 任一失败即返回错误，不启动任何循环；某个循环以错误结束（例如 Task 11 的状态写入失败）时停止其余循环并返回该错误。
 - `Event{Kind, TaskID, NotificationID, ReplySeq, Reason, Folder, Count, Delay}`，`Kind` 为本节各任务列出的事件名与 Watcher 的状态名（`credentials_unavailable` 报告为 `keychain_unavailable`，与「4b 与 4a 的衔接」一致；熔断引起的除外，见 Task 11）。被拒来信的事件按原因码聚合，每分钟至多一次、带计数。事件回调不得阻塞。
 
-**测试（先写并确认失败）：** 启动顺序（锁被占用、实例不存在、密钥不符、Keychain 不可用时都不启动循环，也不改动数据库）；启动时存在 DISPATCHING 回复与 SENDING 通知时转为 UNCERTAIN 并发出事件；`Run` 在 ctx 结束后按序退出、锁被释放；一个循环以错误结束时 `Run` 返回该错误；拒绝事件的聚合与清理；**装配后的金丝雀测试**：用模拟器跑一轮完整的收发，主题、令牌、正文与地址都取金丝雀值，断言全部事件与错误文本中都不出现它们（4a「风险与后续」对未导出字段打印原始字节的担忧，由这一条在实际路径上覆盖）。
+**测试（先写并确认失败）：** 启动顺序（锁被占用、实例不存在、密钥不符、Keychain 不可用时都不启动循环，也不改动数据库）；启动时存在 DISPATCHING 回复与 SENDING 通知时转为 UNCERTAIN 并发出事件；`Run` 在 ctx 结束后按序退出、锁被释放；一个循环以错误结束时 `Run` 返回该错误；一封被延后的回复只在 30 秒之后引起下一次唤醒（注入时钟），不形成不限速的补扫；拒绝事件的聚合与清理；**装配后的金丝雀测试**：用模拟器跑一轮完整的收发，主题、令牌、正文与地址都取金丝雀值，断言全部事件与错误文本中都不出现它们（4a「风险与后续」对未导出字段打印原始字节的担忧，由这一条在实际路径上覆盖）。
 
 - [ ] **Step 1：** 写失败的测试。
 - [ ] **Step 2：** 实现。
@@ -3135,7 +3135,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 
 **契约：** `TestL2Acceptance` 沿用 L1 的双重开关、CI 拒绝、总确认与逐封确认。它在**临时数据目录**中运行完整的 `internal/app`：授权码从真实实例的 Keychain 读取（只读），令牌与正文密钥是本次运行生成、用后即弃的内存密钥（登记到临时数据库），因此不写产品数据库、不新增 Keychain 条目。启动前把 INBOX、Junk 与「已发送」的游标设为当前位置。合成 Agent 每收到一封回复就完成一个回合，正文为「第 k 轮：已收到回复（N 个字符）」。
 
-流程：发出第一封通知 → 在 `/dev/tty` 请维护者记下这封通知落在收件箱还是垃圾箱（送达率），并用指定客户端回复（默认 QQ 邮箱 App 与网页版交替）→ 显示每封来信的判定（接受或原因码）→ 共 `TURNCOURIER_LIVE_ROUNDS` 轮（默认 3，至多 8：关闭任务之后的那封回复必须仍在 1 小时 10 封的刹车之内，才能验证 `task_closed` 而不是 `rate_limited`）→ 关闭任务后请维护者再回复一次，确认得到 `task_closed`。样本只记录每轮的判定、原因码、耗时、通知落点与本地事件种类，写入输出目录的 `samples.jsonl`（schema `turncourier-l2/1`）。
+流程：发出第一封通知 → 在 `/dev/tty` 请维护者记下这封通知落在收件箱还是垃圾箱（送达率），并用指定客户端回复（默认 QQ 邮箱 App 与网页版交替）→ 显示每封来信的判定（接受或原因码）→ 共 `TURNCOURIER_LIVE_ROUNDS` 轮（默认 3，至多 8：关闭任务之后的那封回复必须仍在 1 小时 10 封的刹车之内，才能验证 `task_closed` 而不是 `rate_limited`）→ 关闭任务后请维护者再回复一次，确认得到 `task_closed`。样本只记录每轮的判定、原因码、耗时、通知落点与本地事件种类，另记每封通知从发出到记下实际投递 ID 的耗时与「已发送」的 `folder_unavailable` 次数，写入输出目录的 `samples.jsonl`（schema `turncourier-l2/1`）。后两项是 `ScanHeaders` 第一次经过真实服务器：L1 只验证过整封的部分取回（`BODY.PEEK[]<0.N>`），没有对 QQ 发过 `BODY.PEEK[HEADER]<0.N>`（2026-09-24 Task 6 审查补充，见「风险与后续」）。
 
 **测试：** 事件摘要的纯函数在 `sample_test.go` 中离线测试；`make vet` 与 `make lint` 以 live 标签编译检查验收文件（它本身只由维护者人工执行，「先失败」只适用于纯函数）。
 
@@ -3201,6 +3201,8 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 - go-smtp 的 `DialTLS` 拨号期限固定为 30 秒且不响应 ctx，进程退出时最多多等 30 秒；已确认的决策只允许 `DialTLS`，不为此改用其他拨号方式。
 - IMAP 的期限、IDLE 重建间隔与退避数值、2 MiB 正文上限都是推断，以 L1 的实测结果调整，调整写入本清单。
 - 服务器若在邮件数不变时也在 UID SEARCH 或 UID FETCH 的响应中附带 `* N EXISTS`（RFC 3501 允许），按 Task 11 Step 5，每轮补扫后都会留下信号，Watcher 不再发 IDLE，而是不限速地连续补扫。4a 按已确认的契约保留现状，L1 第 4 步记录 QQ 是否如此。若是，可以只在邮件数超过 EXAMINE 时的数目时留下信号，或给两轮补扫之间设最小间隔；这会改动 Step 5「通道是唯一状态」的约定，须经维护者确认。
+- 「已发送」只取头部（4b Task 6 的 `ScanHeaders`，`BODY.PEEK[HEADER]<0.N>`）尚未经过 QQ 实测，L2 第一次验证它（Task 16）。QQ 若拒绝对头部的部分取回，「已发送」每轮补扫失败，只有 `sent_unavailable` 告警，回复因拿不到实际投递 ID 而一直延后；届时改为不带部分取回的 `BODY.PEEK[HEADER]`，须另行确认。`ScanHeaders` 对「UID SEARCH 列出、FETCH 却没有返回数据」的副本按本轮失败处理而不越过（Task 6 审查后的修正），一封持续取不到的副本因此会挡住所有需要证据的回复，但有告警、可以恢复；越过它则是静默且不可撤销的拒绝。
+- 「已发送」从不降级（D6）：对它的补扫持续超时时，每一轮都拆掉连接、重连后从 INBOX 继续，而被延后的回复每 30 秒唤醒一次 Watcher，收取循环会长期顶在每小时 12 次的登录上限（4a 的上限之内）。`sent_unavailable` 告警覆盖这一情形。
 - init 不回显读入授权码的终端路径需要伪终端，没有自动测试，由 L1 准备步骤中维护者实际运行 init 验证。
 - 键控摘要对解析器输出计算，依赖解析器的确定性。4b 或以后修改引用、签名的剥离规则时，同一封信重新取回（例如 UIDVALIDITY 变化后的全量补扫）会得到不同摘要，从「重复」变成 `ErrMessageConflict` 误报。修改解析规则时须评估这一点，必要时让补扫中的冲突只作告警，或给摘要加版本（在 4b 定）。（4b 已定：不加版本，见「4b 已定的实现细节」。）
 - 令牌验证中有两个问题留给 4b 在 L1 之后定稿：retired 密钥签发的令牌是否仍接受；有效期按本地处理时间还是 IMAP INTERNALDATE 判断。按本地处理时间，服务停机或 Keychain 不可用期间到达、过期之后才处理的合法回复会被拒绝；INTERNALDATE 由服务器写入，不是发件人提供的 Date，但它是否可信、QQ 如何设置要由 L1 确认。去重排在有效期与任务状态检查之前的初步建议见「4b 与 4a 的衔接」。（4b 已定：只接受 active 密钥；按本地处理时间判断，见「4b 已定的实现细节」。）
