@@ -1,10 +1,10 @@
 # HANDOFF
 
-**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）、Phase 4a（邮件闭环的离线实现）与 L1 真机探测已完成，4b 任务契约已起草并经维护者确认（D6–D8，2026-09-24），当前处于 4b 实现开始、L1b 待维护者执行的阶段。
+**目标**：将 TurnCourier 建成公开开源的 Codex / Claude Code 邮件接续工具；Phase 3（配置、存储与状态机）、Phase 4a（邮件闭环的离线实现）与 L1 真机探测已完成，4b 任务契约已起草并经维护者确认（D6–D8，2026-09-24），当前处于 4b 逐任务实施之中（Task 1–4 已实现并审查，Task 5、6 实现中），L1b 待维护者执行。
 **更新于**：2026-09-24 · claude-code（第二个云端会话）
 **项目目录**：本仓库根目录（含 `go.mod` 的目录）
-**基线 commit**：`7f5fcc6`（L1 收尾的 PR #14 合并后的 main，CI 与 Security 通过）；第一个云端会话的改动（L1b 探测工具、4b 任务契约）在分支 `claude/upbeat-lamport-jw9yo9`；第二个会话把它快进到分支 `claude/project-handoff-continuation-wt9hh9`，记入 D6–D8 的确认，经维护者同意开 PR 合并入 main。以 `git log --oneline -3` 与 `git status --short` 核对。
-**暂停原因**：维护者已于 2026-09-24 确认 D6–D8（均采用建议方案，含 D8 对 D4 字面的解释，记录见 phase-04.md 末尾「已确认事项」第 2 条），4b 可以按 Task 1–18 开始实现。仍等维护者的只有一件事：在本机按「L1b」一节执行真机补采（新主题格式往返复核、别名与 `Return-Path` 样本）；它不阻塞 4b 的实现，但 4b 的 PR 合并之前必须完成。探测工具已为 L1b 改好。
+**基线 commit**：main `2afc52c`（PR #15 合并：L1b 探测工具、4b 任务契约与 D6–D8 的确认；合并后 main 的 CI 与 Security 成功）。4b 的实现提交在分支 `claude/project-handoff-continuation-wt9hh9` 上逐个推送，尚未开 PR（4b 的 PR 要等 Task 18 与 L1b）。以 `git log --oneline -3` 与 `git status --short` 核对。
+**暂停原因**：没有阻塞项；4b 正按 Task 1–18 推进，每个任务的实施说明与审查记录写在 phase-04.md 对应任务之下。仍等维护者的只有一件事：在本机按「L1b」一节执行真机补采（新主题格式往返复核、别名与 `Return-Path` 样本）；它不阻塞 4b 的实现，但 4b 的 PR 合并之前必须完成。探测工具已为 L1b 改好。
 
 ## 已完成
 
@@ -33,21 +33,25 @@
 
     第三次复查确认上述 11 条全部修复，又提出 2 条次要（1 条是此前漏掉的）与 7 条细节，也全部采纳（提交 `0787971`）：较新的通知仍是没有定论的 UNCERTAIN 时，对上一条通知的回复先延后、等副本或缺失证据出现再判，不再直接以 `token_superseded` 永久拒绝；「wrote:」引用头之后的行内逐段回复同样判为不确定；其余是「已发送」副本中的非法 ID、抹除机密不随授权码缓存清空、提交阶段 550 的告警措辞、证据时刻与存储共用一个时钟、核心接口清单、保留期与令牌有效期上限的依赖、哨兵改名为 `ErrInvalidArgument`。最后一次复查确认这 9 条全部修复，只余两处措辞（`fb9c828` 已改），4b 契约没有未处理的审查意见。
   - 文档同步：design.md 状态行与「接收通知的邮箱不要开启假期自动回复」；README 中英、architecture.md、development.md、CHANGELOG 的过时状态；architecture.md 中「令牌默认七天有效」「主题与页脚的令牌须一致」两处过时说法（代码默认值自 L1 起就是 72 小时，且只读主题）。
-- [x] 2026-09-24（第二个云端会话）：维护者确认 D6–D8，均采用建议方案（含 D8 对 D4 字面的那一处解释：M 超出时推迟发信并告警，不暂停任务）。确认记入 phase-04.md 末尾「已确认事项」第 2 条与 4b 各状态行；design.md、README 中英、architecture.md 与 CHANGELOG 中「等待确认」的说法同步改为已确认。
+- [x] 2026-09-24（第二个云端会话）：维护者确认 D6–D8，均采用建议方案（含 D8 对 D4 字面的那一处解释：M 超出时推迟发信并告警，不暂停任务）。确认记入 phase-04.md 末尾「已确认事项」第 2 条与 4b 各状态行；design.md、README 中英、architecture.md 与 CHANGELOG 中「等待确认」的说法同步改为已确认。经维护者同意开 PR #15 合并入 main（squash，`2afc52c`），同一 PR 补上 README 树形图漏列的 `tests/docs/imports_test.go`。
+- [x] 4b Task 1（主题标签，`internal/security/token`）：实现、规格与质量审查、修复、独立复查与细节处理全部完成（`1878181`、`1a2b17a`、`567deff`）。审查补出的要点：守卫测试原先跳过以「.」「_」开头的目录与 `testdata`（显式导入时照样编进产品），现在一律扫描；`deps_test.go`、`imports_test.go` 同理改为只跳过根目录下的这类目录；`%w` 与 `%p` 一样会绕过脱敏，写进注释；解析出的任务 ID 不再与主题共用内存。
+- [x] 4a 遗留缺陷修复（`5215fb5`）：服务器在正文字面量中途以 close_notify 正常关闭时，go-imap 把 `io.EOF` 当作字面量结束，`Session.body` 随后调用 `Next` 与解码协程争用读缓冲（数据竞争，负载高时 `make check` 会报）。读到的字节少于声明长度即按连接断开处理；假服务器新增 `faultCloseAfter`。
+- [x] 4b Task 2（存储补充）：实现（`8006f73`）与修复（`25bc695`）已合入；修复的独立复查进行中。修复要点：并入 6 个用例拦下 7 个存活变异；本地人工核对也以进入 UNCERTAIN 的时刻为 `sent_at`；`AbandonedSince`、`SentWithoutDeliveredID` 改为游标分页。审查意见中属于后续任务用法的（Task 5、9、10、11、13）已写入对应契约（`06ca434`、`1bde490`）。
+- [x] 4b Task 3、4（解析器与合成样本、自动回复与退信判定）：实现已合入（`91377e4`、`291abe5`），规格与质量审查进行中。
 
 ## 未完成
 
 - [ ] **L1b（维护者本机执行）**：按 phase-04.md「L1b」一节的规程，新建 0700 输出目录，发 1 封新格式通知，用 QQ 邮箱 App 与网页版各回复一次（有别名的再用别名回复一次，可选 Foxmail/Apple Mail/Gmail），运行 `TestL1Replies`，把结论写进新增的「L1b 结果」一节。另有两个可选步骤：向同域不存在的地址发一封以核实 D7 的前提；再开一次假期自动回复看它的回复频率。L1b 是 4b Task 1 冻结主题解析器的门槛，4b 的 PR 合并之前必须完成。
-- [ ] **4b 实现**：D6–D8 已确认，按 Task 1–18 逐任务实施（先写失败的测试，子代理实现，规格与质量审查含变异测试，修复与独立复查），阶段末整阶段审查后开 PR；合并后维护者执行 L2 验收。
+- [ ] **4b 实现（进行中）**：Task 2 修复的独立复查、Task 3–4 的审查与修复、Task 5（渲染器）与 Task 6（IMAP 扩展）的实现正在进行；其后是 Task 7（QQ 模拟器）、8–13（`internal/app`）、14–18。做法：每个任务由子代理在 `.local/worktrees/` 下的独立 worktree 中实现（先写失败的测试），再由规格与质量两名审查子代理复核（含变异测试），修复后独立复查；主会话按顺序把提交 cherry-pick 到本分支，合入后跑一次 `make check` 再推送。阶段末整阶段审查后开 PR；合并后维护者执行 L2 验收。
 - [ ] macOS 断电持久性（`fullfsync`）留到安全与恢复阶段评估。
 - [ ] 关注 actions/setup-go 补丁版本：7.0.0 打包的 undici、brace-expansion 有已公开安全公告（旧版同样受影响，本仓库输入不触及），上游已修复未发版；Dependabot 提出后按同样流程评审。
 - [ ] Codex、Claude 适配器与后台服务属于后续阶段。真实邮箱各十轮验收之前不打 `v0.1.0-alpha`。
 
 ## 下一步
 
-1. 读 `AGENTS.md`，核对 `git status --short`、`git log --oneline -3` 与 `gh run list --repo chaoRookie/turncourier --limit 5`。L1b 探测工具、4b 任务契约与 D6–D8 的确认经 PR 合并入 main 后，L1b 直接在 main 上执行。
+1. 读 `AGENTS.md`，核对 `git status --short`、`git log --oneline -3` 与 `gh run list --repo chaoRookie/turncourier --limit 5`。L1b 直接在 main 上执行（探测工具已随 PR #15 合并）。
 2. `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`，运行下方验证命令，确认仍全部通过。
-3. 4b 从 Task 1 开始按顺序实施（D6–D8 已确认）；每完成一个任务，把实施说明与验证结果写进 phase-04.md 对应任务之下，并更新本文件。
+3. 从 phase-04.md 中各任务之下的记录判断进度：有「实施说明」与「审查后的修正」且步骤已勾选的任务已完成；其余按顺序继续。每完成一个任务，把实施说明与验证结果写进 phase-04.md 对应任务之下，并更新本文件。
 4. 若维护者已执行 L1b：把样本结论写进「L1b 结果」，按 4b「门槛」判断 Task 1 的文法能否冻结。
 
 ## 验证方式
@@ -123,4 +127,8 @@ git diff --check
 - 回复主题的前缀至少有 `Re:` 与 `回复：` 两种（成因未确定，可能是客户端差异，也可能是对方的主题设置），主题解析器不能按前缀白名单匹配，只能按 `[TC …]` 标签本身定位。
 - 令牌改到主题之后，自动回复与退信的过滤从纵深防御变成承重规则：白名单地址的假期自动回复会把带令牌的主题原样带回，四项校验全过。过滤必须排在验证顺序最前面；QQ 的假期自动回复只能按主题前缀识别（已确认的破例），另有回环刹车兜底。
 - 同域不存在的地址在 SMTP 提交时就被 QQ 以 550 拒绝（`ErrRejected`），不产生退信；退信样本要用外域的保留域名。
+- **并行子代理的 worktree**：放在被忽略的 `.local/worktrees/<名字>`（`git worktree add -b task/N .local/worktrees/tN <基点>`），子代理在里面运行 make 时加 `TOOL_BIN=<仓库>/.local/bin`，否则会重新下载并用错 Go 版本编译 staticcheck。不要用 Agent 工具的 `isolation: "worktree"`：它从旧的 main 建 worktree、放在未跟踪的 `.claude/worktrees/` 下（本机已把 `/.claude/` 写进 `.git/info/exclude`），子代理在里面 `git merge` 还可能被权限分类器拒绝。
+- **cherry-pick 与 rebase 也要带单次身份**：`git -c user.name=chaoRookie -c user.email=179816769+chaoRookie@users.noreply.github.com cherry-pick …`，否则提交者会变成容器默认的身份（`1878181`、`8006f73` 两个提交就是这样，已推送，未改写）。
+- **结束一轮对话前工作区必须干净且已推送**（云端环境的停止钩子会检查）：子代理不要在主目录里改文件，主会话的改动先提交再结束。
+- **go-imap 的字面量读取器把中途的 `io.EOF` 当作字面量结束**：凡是「部分读取字面量、再由 `Next` 丢弃其余部分」的写法，都要先确认读到的字节数达到声明长度（或上限），否则与解码协程争用读缓冲；Task 6 的 `ScanHeaders` 同样适用。
 - 在 Go 源码里写 `"\u200b"`、`"\ufffd"` 这类转义时，编辑工具可能把它们直接写成不可见字符的原文（本次有 4 行测试源码如此，提交前扫描发现并改回转义）。改动含这类转义的文件后，提交前扫一遍 Unicode 类别为 Cf、Co、Cs 的字符与 U+FFFD。
