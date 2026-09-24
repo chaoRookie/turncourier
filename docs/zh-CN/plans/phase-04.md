@@ -3032,6 +3032,30 @@ B 组：须维护者在冻结解析规则之前决定（均按契约字面实现
 - **实现中发现并修复：** `New` 之后立即 `Close` 时 go-smtp 的 `Serve` 还没登记监听器、`Server.Close` 关不到它而挂起，现由 `Close` 自己再关一次两个 TCP 监听器。
 - **验证：** `make check`（总覆盖率 94.60%，`tests/qqsim` 97.1%，`tests/fixtures/mail` 98.6%）、`go test -race -count=5 ./tests/qqsim/ ./tests/fixtures/mail/`、`make secrets`（提交前后）、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...` 通过，改动文件中没有不可见字符；拣选到集成分支后 `make check`（总覆盖率 94.65%）与 `make secrets` 再次通过。未运行：全仓的 `CGO_ENABLED=0 go test ./...`（只跑了三个相关包）；govulncheck（云端网络策略拒绝 vuln.go.dev）。
 
+**审查发现（2026-09-24，待处理）：** 规格审查已完成，结论「修复后合入」：没有主要问题，1 条次要、6 条细节；契约「测试」段每一项都有用例且断言的是契约要求的错误分类，行为与 L1 实测一致，接口能支撑 Task 9–15 的全部用法（审查者用产品的 Watcher 实测驱动了模拟器）。实现者第 3 节的 14 条解释逐条核实均成立（`AllowInsecureAuth` 不造成明文入口：每个连接先包 `tls.Server`、不公告 STARTTLS；样本字节不变的声明经独立组装核对属实）。质量审查在暂停时仍在进行，结果另记。**修复与独立复查尚未进行**（维护者 2026-09-24 暂停本轮工作）。
+
+1. **S1 文件夹名跟随产品常量（次要，合入前修）：** 模拟器按 `imap.FolderInbox`、`FolderJunk`、`FolderSent` 建文件夹，`qqsim_test.go` 的断言也拿常量比较，全仓没有以 L1 第 1 步实测的文字独立钉住它们。把 `FolderSent` 改成 `"Sent Items"`，qqsim、imap 与 docs 的测试全部照样通过，而在真实 QQ 上 Watcher 会每轮报 `folder_unavailable`、回复按 D6 一直延后。修法：断言改用字面量（最小改法，草稿如下，原代码下通过、上述变异下失败）；更彻底的是在 `qqsim.go` 定义注明「L1 第 1 步实测」的字面量常量，再断言产品常量与之相等。
+
+   ```go
+   // TestFolderNamesMeasuredInL1 以 L1 第 1 步实测的文字钉住三个文件夹名：模拟器不能随产品常量漂移。
+   func TestFolderNamesMeasuredInL1(t *testing.T) {
+       srv := start(t, Options{})
+       folders, err := mustDial(t, srv).ListFolders(context.Background())
+       slices.Sort(folders)
+       if want := []string{"INBOX", "Junk", "Sent Messages"}; err != nil || !slices.Equal(folders, want) {
+           t.Errorf("folders = %q (err %v), want the names measured in L1", folders, err)
+       }
+   }
+   ```
+
+2. **D1 `Deliver` 向「已发送」追加之前不先写入已到期的延迟副本：** 设 `SentDelay: 30s`、发出一封、时钟走 60 秒后 `Deliver(FolderSent, 外来副本)`，外来副本拿到 UID 1，我方副本到下一次 EXAMINE 才拿到 UID 2，与真实服务器的顺序相反。修法：`Deliver` 对「已发送」先在同一把锁内写入到期副本（抽出持锁版本的 `releaseLocked`）。
+3. **D2「只读」有缺口：** 以只读方式 SELECT 之后，非 PEEK 的 `FETCH 1 BODY[]` 照样成功，imapmemserver 还会设上 `\Seen`；注释「拒绝一切修改邮箱的命令」说过头了。产品把 `BODY.PEEK` 退化成 `BODY[]` 是最可能的「写邮箱」回归，目前只靠 `internal/mail/imap/source_test.go` 的 `Peek: true` 白名单兜底。修法（已实测，全部用例通过）：会话的 `Fetch` 对任何 `!bs.Peek` 的正文节返回只读错误，另加一条断言非 PEEK FETCH 得到 NO 的用例。
+4. **D3 `SentHidden` 对已连接的 Watcher 要等下一次 LIST 才生效：** Watcher 只在登录后与每小时（`relistInterval`，真实时间，包外不可调）LIST。注释与实施说明写明「设或清除 `SentHidden` 后要 `DisconnectAll`，已连接的 Watcher 才会重新 LIST」；Task 10 的「LIST 中没有「已发送」」与「恢复后清零」两个用例照此写。
+5. **D4 文档小误：** `docs/en/architecture.md` 的 `tests/fixtures/mail` 一行漏了可选占位符 TO 与 MESSAGEID，另一处仍写「imported by tests only」（现在也被非测试包 `tests/qqsim` 导入）；`tests/fixtures/mail/README.md` 少写三条代码强制的规则（`Values.Optional` 中未声明的名称报错、声明的可选占位符必须在模板中用到、取值不得含 CR）。
+6. **D5 依赖方向：** 本清单「依赖方向（4b 结束时）」的 `tests/qqsim` 一行可补为「go-imap/v2（根包的类型、imapserver、imapmemserver）……；只被测试导入」，并注一句：`internal/mail/imap` 与 `internal/mail/smtp` 的包内测试不能导入 qqsim（会循环导入），继续用各自的假服务器。
+7. **D6 没有「模拟器不进入产品二进制」的守卫（可选）：** `tests/docs/imports_test.go` 的 `layerRules` 加 `{pkg: "cmd", banned: []string{"tests"}}` 与 `{pkg: "internal", banned: []string{"tests"}}`（已实测：当前通过，临时违规时失败），可以并入 Task 9 对该文件的修改。
+8. **可选增强（不阻塞合入）：** 没有确定的连接级 SMTP 失败（不附 `ReplyError` 的 `ErrNotSent`）与持续断网的状态，Task 11 的「其余 `ErrNotSent`」分支只能靠关闭模拟器或死端口来测，可加 `Faults.Offline`；`Stats` 没有连接计数（Task 15 的「拒绝往返测试时不联网」只能断言没有 AUTH/LOGIN）；`Reply` 的 References 只含实际投递 ID（多轮线程中真实客户端会带父邮件的链，L1 没有测多轮）；不能更换 UIDVALIDITY（Task 9 用手工构造的批即可）；LIST 只有三个文件夹（L1 实测 6 个，含非 ASCII 名，modified UTF-7 的解码路径没有覆盖）。另注：Task 15 的 90 秒等待须用注入时钟或 `ReleaseSent`。
+
 ### Task 8：单实例锁、密钥读取与授权码缓存（`internal/app`）
 
 **Files:**
