@@ -68,10 +68,10 @@ git check-ignore .local/toolchains/go/bin/go
 | `modernc.org/sqlite` | v1.59.0 | BSD 风格 | `internal/store/sqlite`；纯 Go 实现，构建保持 `CGO_ENABLED=0`。`tests/live` 另以只读方式打开数据库读取实例 ID |
 | `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`；用 `MetaData.Keys()` 列出全部键路径，与白名单逐段区分大小写比对来拒绝未知键（该库会把大小写变体匹配到字段，`MetaData.Undecoded()` 看不到它们） |
 | `golang.org/x/term` | v0.46.0 | BSD-3-Clause | `internal/cli`；`init` 以不回显方式读入授权码 |
-| `github.com/emersion/go-smtp` | v0.25.0 | MIT | `internal/mail/smtp` 用它的客户端发信，测试用它的服务端作离线假服务器。选它而不用已冻结的 `net/smtp`：它自带命令超时，`CloseWithResponse` 还能取回服务端的 DATA 响应文本（L1 需要它查找 QQ 分配的 ID）。它不阻止在明文连接上发送凭据，因此只允许 `DialTLS`，并由源码测试钉住 |
-| `github.com/emersion/go-imap/v2` | v2.0.0-beta.8 | MIT | `internal/mail/imap` 只用 `imapclient`；`imapserver` 与 `imapmemserver` 只在测试中用作离线假服务器。仍是 beta，各 beta 之间有破坏性 API 变更，因此固定精确版本、封装在本包之后，升级 PR 须人工审阅 |
+| `github.com/emersion/go-smtp` | v0.25.0 | MIT | `internal/mail/smtp` 用它的客户端发信，测试与 QQ 行为模拟器 `tests/qqsim` 用它的服务端作离线假服务器。选它而不用已冻结的 `net/smtp`：它自带命令超时，`CloseWithResponse` 还能取回服务端的 DATA 响应文本（L1 需要它查找 QQ 分配的 ID）。它不阻止在明文连接上发送凭据，因此只允许 `DialTLS`，并由源码测试钉住 |
+| `github.com/emersion/go-imap/v2` | v2.0.0-beta.8 | MIT | `internal/mail/imap` 只用 `imapclient`；`imapserver` 与 `imapmemserver` 只在测试与 QQ 行为模拟器 `tests/qqsim` 中用作离线假服务器。仍是 beta，各 beta 之间有破坏性 API 变更，因此固定精确版本、封装在本包之后，升级 PR 须人工审阅 |
 | `github.com/emersion/go-message` | v0.18.2 | MIT | `internal/mail/parser` 用它读取来信的头部与 MIME 结构，经 `charset` 解码字符集（并在其中把 GBK 系列标签映射到 GB18030）；随 `imapclient`（它导入 `go-message/mail`）进入 `internal/mail/imap`；`tests/live` 直接导入它与 `charset` 解码 GB18030、GBK |
-| `github.com/emersion/go-sasl` | 伪版本 `b788ff22d5a6` | MIT | `internal/mail/smtp` 用 `NewPlainClient` 做 `AUTH PLAIN`；go-imap/v2 也会引入它 |
+| `github.com/emersion/go-sasl` | 伪版本 `b788ff22d5a6` | MIT | `internal/mail/smtp` 用 `NewPlainClient` 做 `AUTH PLAIN`；`tests/qqsim` 用 `NewPlainServer` 实现模拟器的 AUTH；go-imap/v2 也会引入它 |
 | `golang.org/x/text` | v0.42.0 | BSD-3-Clause | `internal/mail/parser` 与 `tests/live`（`sample.go`）直接导入 `encoding/simplifiedchinese`，把 GBK 系列标签映射到 GB18030 解码器，`go-message/charset` 也需要它；`tests/fixtures/mail` 用它的 GB18030 编码器组装合成回归样本。显式固定：go-message 要求的 v0.14.0 有模块级漏洞 GO-2026-5970，修复于 v0.39.0 |
 | `golang.org/x/sys` | v0.48.0 | BSD-3-Clause | `internal/cli`；在 macOS 上经 termios 关闭终端回显。同时也是 `golang.org/x/term` 与 `modernc.org/sqlite` 的依赖 |
 
@@ -190,7 +190,8 @@ go run ./tools/commentcheck .
 - 配置测试把合成的 TOML 写入 `t.TempDir()` 并设为 0600，环境变量通过注入的 `getenv` 或 `t.Setenv` 提供，断言错误文本不含临时目录路径。
 - SQLite 测试使用临时目录中的真实数据库，不用内存库或替身驱动。`t.TempDir()` 按 umask 创建（通常为 0755），会被数据目录的权限检查拒绝，因此数据目录用它下面尚不存在、由 `sqlite.Open` 以 0700 新建的子目录。时钟与随机源通过 `sqlite.Options` 注入。验证事务回滚时，在测试中直接对数据库创建触发器注入故障，例如 `CREATE TRIGGER boom BEFORE INSERT ON replies BEGIN SELECT RAISE(ABORT, 'boom'); END;`，再断言相关表的行数和状态没有变化。
 - 测试数据全部使用合成内容。需要邮箱地址时，使用 `.invalid` 这类保留域名。
-- 入站邮件的回归样本放在 `tests/fixtures/mail/`：每个 JSON 模板只保存头部与各部件解码后的文字，并声明字符集与传输编码；令牌、任务 ID 与实际投递 ID 用占位符 `{{TOKEN}}`、`{{TASK}}`、`{{DELIVERED}}`，测试把令牌用 `security/token` 在运行时签发，交给包 `mailfixture` 替换并组装成原始字节。不要保存 base64 的 `.eml`：那样无法替换占位符，而把令牌写进文件又违反密钥扫描的约定。模板格式与每个样本的来源见该目录的 `README.md`。
+- 入站邮件的回归样本放在 `tests/fixtures/mail/`：每个 JSON 模板只保存头部与各部件解码后的文字，并声明字符集与传输编码；令牌、任务 ID 与实际投递 ID 用占位符 `{{TOKEN}}`、`{{TASK}}`、`{{DELIVERED}}`，测试把令牌用 `security/token` 在运行时签发，交给包 `mailfixture` 替换并组装成原始字节。不要保存 base64 的 `.eml`：那样无法替换占位符，而把令牌写进文件又违反密钥扫描的约定。模板还可以声明带默认值的可选占位符（`qq-app-reply` 的发件人、主题前缀与原主题、正文与引用原文等），全部占位符一趟替换完、取值不再被当作模板，`text/html` 部件中的取值按 HTML 转义。模板格式与每个样本的来源见该目录的 `README.md`。
+- 需要一个「像 QQ 邮箱」的服务器时（`internal/app`、`internal/cli` 与 `tests/e2e` 的测试），用 `tests/qqsim` 的离线模拟器，不要各自再写假服务器：它在 `127.0.0.1` 的随机端口上以隐式 TLS 提供 SMTP 与 IMAP（证书由启动时生成的自签 CA 签发，经 `RootCAs` 信任），按 L1 实测改写 Message-ID、把副本写入「已发送」、三个文件夹共用一个 UIDVALIDITY；`Delivered()` 交出收件人副本，`Reply` 按 QQ 邮箱 App 的结构合成回复，`Deliver` 把邮件放进文件夹；`SetFaults` 注入 SMTP 各阶段的 4xx/5xx、结束标记之后不回响应即断开、「已发送」副本延迟或不写入、「已发送」不可用或不在 LIST 中、IMAP 登录失败，`DisconnectAll` 立即断开全部连接。「已发送」副本的延迟按注入的时钟（`Options.Now`）计时，也可以用 `ReleaseSent` 立即放行，测试不做真实时间的长等待。
 
 常用命令：
 

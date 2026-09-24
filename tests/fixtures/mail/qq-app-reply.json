@@ -1,13 +1,33 @@
 {
   "source": "l1",
-  "note": "QQ 邮箱 App 的回复：multipart/alternative，纯文本与 HTML 均为 utf-8/base64；主题整个编为 utf-8/B，前缀 Re:；In-Reply-To 与 References 都等于实际投递 ID。纯文本带「原始邮件」分隔线与引用头块，引用头块的「主题:」行带着标签与令牌，页脚的令牌行没有引用前缀；HTML 用 QQ 自有标记，不用 blockquote。",
+  "note": "QQ 邮箱 App 的回复：multipart/alternative，纯文本与 HTML 均为 utf-8/base64；主题整个编为 utf-8/B，前缀 Re:；In-Reply-To 与 References 都等于实际投递 ID。纯文本带「原始邮件」分隔线与引用头块，引用头块的「主题:」行带着标签与令牌，页脚的令牌行没有引用前缀；HTML 用 QQ 自有标记，不用 blockquote。发件人、收件人、主题前缀与原主题、Message-Id、正文与引用原文是可选占位符，默认值即上述样本；tests/qqsim 的 Reply 给出它们，按同一结构合成对任意通知的回复。",
+  "defaults": {
+    "FROM": ["user@example.invalid"],
+    "TO": ["bot@example.invalid"],
+    "PREFIX": ["Re: "],
+    "SUBJECT": ["[TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新"],
+    "MESSAGEID": ["<tencent_qqapp_reply_0001@example.invalid>"],
+    "BODY": ["继续执行集成测试，失败的话把完整日志发给我。"],
+    "QUOTED": [
+      "任务 {{TASK}} 回合完成。",
+      "部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？",
+      "",
+      "---- TurnCourier ----",
+      "任务 {{TASK}} · 回合完成",
+      "直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。",
+      "令牌副本（仅供核对）：",
+      "{{TOKEN}}",
+      "请把机器人地址加入通讯录，以免通知落进垃圾箱。",
+      "请不要在接收本通知的邮箱中开启假期自动回复。"
+    ]
+  },
   "message": {
     "headers": [
-      {"name": "From", "words": [{"text": "用户", "charset": "utf-8"}, {"raw": " <user@example.invalid>"}]},
-      {"name": "To", "words": [{"text": "TurnCourier", "charset": "utf-8"}, {"raw": " <bot@example.invalid>"}]},
-      {"name": "Subject", "words": [{"text": "Re: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新", "charset": "utf-8"}]},
+      {"name": "From", "words": [{"text": "用户", "charset": "utf-8"}, {"raw": " <{{FROM}}>"}]},
+      {"name": "To", "words": [{"text": "TurnCourier", "charset": "utf-8"}, {"raw": " <{{TO}}>"}]},
+      {"name": "Subject", "words": [{"text": "{{PREFIX}}{{SUBJECT}}", "charset": "utf-8"}]},
       {"name": "Date", "value": "Wed, 24 Sep 2026 15:06:12 +0800"},
-      {"name": "Message-Id", "value": "<tencent_qqapp_reply_0001@example.invalid>"},
+      {"name": "Message-Id", "value": "{{MESSAGEID}}"},
       {"name": "In-Reply-To", "value": "{{DELIVERED}}"},
       {"name": "References", "value": "{{DELIVERED}}"},
       {"name": "X-Mailer", "value": "QQMail 2.x"},
@@ -21,26 +41,17 @@
         "charset": "utf-8",
         "encoding": "base64",
         "lines": [
-          "继续执行集成测试，失败的话把完整日志发给我。",
+          "{{BODY}}",
           "",
           "",
           "",
           "------------------ 原始邮件 ------------------",
-          "发件人: \"TurnCourier\" <bot@example.invalid>;",
+          "发件人: \"TurnCourier\" <{{TO}}>;",
           "发送时间: 2026年9月24日(星期三) 下午3:00",
-          "收件人: \"用户\" <user@example.invalid>;",
-          "主题: [TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新",
+          "收件人: \"用户\" <{{FROM}}>;",
+          "主题: {{SUBJECT}}",
           "",
-          "任务 {{TASK}} 回合完成。",
-          "部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？",
-          "",
-          "---- TurnCourier ----",
-          "任务 {{TASK}} · 回合完成",
-          "直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。",
-          "令牌副本（仅供核对）：",
-          "{{TOKEN}}",
-          "请把机器人地址加入通讯录，以免通知落进垃圾箱。",
-          "请不要在接收本通知的邮箱中开启假期自动回复。"
+          "{{QUOTED}}"
         ]
       },
       {
@@ -48,10 +59,10 @@
         "charset": "utf-8",
         "encoding": "base64",
         "lines": [
-          "<div>继续执行集成测试，失败的话把完整日志发给我。</div><div><br></div><div><br></div><div><br></div>",
+          "<div>{{BODY}}</div><div><br></div><div><br></div><div><br></div>",
           "<div style=\"font-size: 12px;font-family: Arial Narrow;padding:2px 0 2px 0;\">------------------&nbsp;原始邮件&nbsp;------------------</div>",
-          "<div style=\"font-size: 12px;background:#efefef;padding:8px;\"><div><b>发件人:</b>&nbsp;\"TurnCourier\"&lt;bot@example.invalid&gt;;</div><div><b>发送时间:</b>&nbsp;2026年9月24日(星期三) 下午3:00</div><div><b>收件人:</b>&nbsp;\"用户\"&lt;user@example.invalid&gt;;</div><div></div><div><b>主题:</b>&nbsp;[TC {{TASK}} {{TOKEN}}] 回合完成：部署脚本已更新</div></div><div><br></div>",
-          "<div style=\"white-space: pre-wrap;\">任务 {{TASK}} 回合完成。<br>部署脚本已更新，集成测试尚未运行。是否继续执行集成测试？<br><br>---- TurnCourier ----<br>任务 {{TASK}} · 回合完成<br>直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。<br>令牌副本（仅供核对）：<br>{{TOKEN}}<br>请把机器人地址加入通讯录，以免通知落进垃圾箱。<br>请不要在接收本通知的邮箱中开启假期自动回复。</div>"
+          "<div style=\"font-size: 12px;background:#efefef;padding:8px;\"><div><b>发件人:</b>&nbsp;\"TurnCourier\"&lt;{{TO}}&gt;;</div><div><b>发送时间:</b>&nbsp;2026年9月24日(星期三) 下午3:00</div><div><b>收件人:</b>&nbsp;\"用户\"&lt;{{FROM}}&gt;;</div><div></div><div><b>主题:</b>&nbsp;{{SUBJECT}}</div></div><div><br></div>",
+          "<div style=\"white-space: pre-wrap;\">{{QUOTED}}</div>"
         ]
       }
     ]

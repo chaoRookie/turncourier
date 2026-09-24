@@ -269,12 +269,15 @@ turncourier/
 │   ├── integration/                 # Cross-package tests
 │   │   ├── lifecycle_test.go        # Config, storage and state machines together
 │   │   └── payload_test.go          # Notifications, tokens, digests, ciphertext
-│   └── live/                        # Manual L1 probes; never run by make test
-│       ├── sample.go                # No build tag: redaction and output checks
-│       ├── sample_test.go           # No build tag: offline tests of the above
-│       ├── live_test.go             # live tag: switches and confirmations
-│       ├── probe_test.go            # live tag: capabilities, send, replies, IDLE
-│       └── keychain_test.go         # live tag: real keychain round trip
+│   ├── live/                        # Manual L1 probes; never run by make test
+│   │   ├── sample.go                # No build tag: redaction and output checks
+│   │   ├── sample_test.go           # No build tag: offline tests of the above
+│   │   ├── live_test.go             # live tag: switches and confirmations
+│   │   ├── probe_test.go            # live tag: capabilities, send, replies, IDLE
+│   │   └── keychain_test.go         # live tag: real keychain round trip
+│   └── qqsim/                       # Offline QQ Mail simulator for tests
+│       ├── qqsim.go                 # TLS SMTP/IMAP, ID rewrite, Sent copy, faults
+│       └── qqsim_test.go            # Product clients against it, every fault
 ├── tools/                           # Engineering checkers run by make
 │   ├── commentcheck/                # make comments
 │   │   ├── main.go                  # Chinese doc comment checker

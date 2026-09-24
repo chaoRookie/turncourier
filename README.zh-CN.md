@@ -269,12 +269,15 @@ turncourier/
 │   ├── integration/                 # 跨包测试
 │   │   ├── lifecycle_test.go        # 配置、存储与状态机的完整生命周期
 │   │   └── payload_test.go          # 通知、令牌、摘要与正文密文的生命周期
-│   └── live/                        # 人工执行的 L1 探测；make test 不运行
-│       ├── sample.go                # 不带标签：脱敏归类与输出目录校验
-│       ├── sample_test.go           # 不带标签：上述纯函数的离线测试
-│       ├── live_test.go             # live 标签：开关与逐项确认
-│       ├── probe_test.go            # live 标签：能力、发信、回复结构、IDLE
-│       └── keychain_test.go         # live 标签：真实钥匙串往返
+│   ├── live/                        # 人工执行的 L1 探测；make test 不运行
+│   │   ├── sample.go                # 不带标签：脱敏归类与输出目录校验
+│   │   ├── sample_test.go           # 不带标签：上述纯函数的离线测试
+│   │   ├── live_test.go             # live 标签：开关与逐项确认
+│   │   ├── probe_test.go            # live 标签：能力、发信、回复结构、IDLE
+│   │   └── keychain_test.go         # live 标签：真实钥匙串往返
+│   └── qqsim/                       # 测试用的离线 QQ 邮箱模拟器
+│       ├── qqsim.go                 # TLS 的 SMTP 与 IMAP、改写 ID、已发送副本、故障注入
+│       └── qqsim_test.go            # 用产品的客户端逐项核对行为与故障
 ├── tools/                           # make 调用的工程检查工具
 │   ├── commentcheck/                # make comments
 │   │   ├── main.go                  # 中文注释检查器
