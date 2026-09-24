@@ -42,16 +42,19 @@ type capabilityRecord struct {
 }
 
 // sendRecord 是 TestL1SendNotification 写入样本的内容：第几封、状态、两处副本的对照结果与脱敏后的 DATA 响应。
+// SentCopyAfterReject 只在服务器于结束标记处拒收（smtp.ErrRejected）且「已发送」可读时设置：拒收之后「已发送」中
+// 有没有这封邮件的副本，用来核对 D7 的前提「QQ 只为接受了的邮件写入「已发送」副本」；其余情况不输出该字段。
 type sendRecord struct {
-	Index        int          `json:"index"`
-	Total        int          `json:"total"`
-	Status       string       `json:"status"`
-	Error        string       `json:"error,omitempty"`
-	SentCopy     *copyRecord  `json:"sent_copy,omitempty"`
-	CCCopy       *copyRecord  `json:"cc_copy,omitempty"`
-	DataResponse string       `json:"data_response,omitempty"`
-	DataIDs      []string     `json:"data_ids,omitempty"`
-	Cursors      []cursorInfo `json:"cursors,omitempty"`
+	Index               int          `json:"index"`
+	Total               int          `json:"total"`
+	Status              string       `json:"status"`
+	Error               string       `json:"error,omitempty"`
+	SentCopy            *copyRecord  `json:"sent_copy,omitempty"`
+	SentCopyAfterReject *copyRecord  `json:"sent_copy_after_reject,omitempty"`
+	CCCopy              *copyRecord  `json:"cc_copy,omitempty"`
+	DataResponse        string       `json:"data_response,omitempty"`
+	DataIDs             []string     `json:"data_ids,omitempty"`
+	Cursors             []cursorInfo `json:"cursors,omitempty"`
 }
 
 // cursorInfo 记录发信前某个文件夹的游标，便于复核副本是在发信之后出现的。
@@ -147,6 +150,8 @@ func TestL1Capabilities(t *testing.T) {
 // 主题为 D4 的新形态标签 [TC <任务 ID> <令牌>] 加标题，页脚照旧保留一份令牌。每封发出前逐项确认，确认文本只显示标签之后的文字；
 // 发出后在 60 秒内以只读方式查找「已发送」与（设置 TURNCOURIER_LIVE_CC_BOT=1 时）抄送副本，
 // 把各来源的 ID 与一次性令牌写入 state.json（SubjectToken 记为 true），DATA 的 250 响应脱敏后写入样本。
+// 服务器在结束标记处拒收（smtp.ErrRejected）时，同样在 60 秒内以只读方式查找「已发送」副本，对照结果记入样本的
+// sent_copy_after_reject，用来核对 D7 的前提「QQ 只为接受了的邮件写入「已发送」副本」，随后照旧记录失败并终止。
 func TestL1SendNotification(t *testing.T) {
 	count := intEnv(t, sendCountEnv, 1, 1, 5)
 	ccBot := os.Getenv(ccBotEnv) == "1"
@@ -159,6 +164,8 @@ func TestL1SendNotification(t *testing.T) {
 
 // sendOne 发出第 index 封合成通知并记录结果：先逐项确认（文本由 live.SendPrompt 渲染，不含主题标签，令牌不进入 /dev/tty），
 // 再记下发信前两个文件夹的游标，发送后查找副本。结果不确定（ErrUncertain）时同样不重发，只记录状态。
+// 服务器在结束标记处拒收（ErrRejected）时，仍从发信前记下的游标起以只读方式查找「已发送」副本（至多 60 秒），
+// 结果记入 sent_copy_after_reject：找到即说明 D7 的前提「QQ 只为接受了的邮件写入副本」不成立。拒收的邮件没有送达，不写入 state.json。
 // 令牌文本同时写入主题标签与页脚：主题标签是 D4 中唯一的验证输入，页脚只是给人看的副本。
 func sendOne(t *testing.T, state *live.State, key *token.Key, index, total int, ccBot bool) {
 	t.Helper()
@@ -220,13 +227,20 @@ func sendOne(t *testing.T, state *live.State, key *token.Key, index, total int, 
 	response, sendErr := smtp.Send(ctx, smtpConfig(), probePassword(t), smtp.Envelope{From: bot, To: recipients}, message)
 	if sendErr != nil {
 		result.Status, result.Error = "failed", sendErr.Error()
-		if errors.Is(sendErr, smtp.ErrUncertain) {
+		switch {
+		case errors.Is(sendErr, smtp.ErrUncertain):
 			// 已进入提交阶段但没有得到响应，邮件可能已投递：先把我方 ID、探测 ID、任务 ID 与令牌记入 state.json，
 			// 否则对方回复这封邮件时 TestL1Replies 认不出它，样本也就丢失。没有 DATA 响应，候选为空数组。
 			result.Status = "uncertain"
 			mail.DeliveredData = []string{}
 			state.Mails = append(state.Mails, mail)
 			saveState(t, *state)
+		case errors.Is(sendErr, smtp.ErrRejected) && sentOK:
+			// 服务器对结束标记回复了 4xx/5xx（例如收件人不存在），确定没有投递。D7 凭「已发送」副本把 UNCERTAIN 核对为已送达，
+			// 前提是 QQ 只为接受了的邮件写入副本；这里照样以只读方式查找一次，找到即说明前提不成立。
+			_, result.SentCopyAfterReject = findCopy(ctx, t, session, sentFolder, sentCursor, mail)
+		case errors.Is(sendErr, smtp.ErrRejected):
+			t.Logf("「已发送」无法读取，没有核对拒收之后是否出现副本")
 		}
 		record(t, "send", result)
 		t.Fatalf("发送失败：%v", sendErr)

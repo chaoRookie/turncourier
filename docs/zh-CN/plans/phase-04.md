@@ -2387,7 +2387,7 @@ L1 余下的真机工作合为一轮，称为 L1b。它只有一项是 4b 的门
   - `TestComposeNotificationSubjects`：长标题拆成多个 encoded-word、纯 ASCII 标题、空标题、旧形态标签；
   - `TestComposeNotificationRejectsBadTag`：9 种形状；
   - `TestSendPrompt`；
-  - `TestAnalyzeTagStates`：23 例，七种状态都有，`tag_count` 取 0、1、2 的都有；
+  - `TestAnalyzeTagStates`：22 例，七种状态都有，`tag_count` 取 0、1、2 的都有；
   - `TestAnalyzeAutoReplySubject`：7 例；
   - `TestAnalyzeReturnPath`：9 例。
 
@@ -2410,6 +2410,16 @@ L1 余下的真机工作合为一轮，称为 L1b。它只有一项是 4b 的门
   - `env -u TURNCOURIER_LIVE go test -count=1 -tags live -v ./tests/live/`：输出「跳过」并通过。
 
   没有运行任何真机探测。
+
+**审查后的修正（L1b 探测工具，2026-09-24）：** 一名独立的质量审查子代理复核了上述实现：没有「主要」问题，脱敏成立（新字段只来自固定词表、角色与布尔值，白名单前缀只能输出白名单字节），主题头的布局经实测确认，没有 panic 路径，各扫描都是线性的。确认并修复的问题如下，修复同样先写失败的用例：
+
+1. **截断的误判。** 在标签中间插入一个字母表之外的字符（零宽空格、软连字符、`-`）或把一个令牌字符换成 `o`，原规则都记为 `truncated`，而 D4 要求把截断与改写区分开。规则改为第 3 项第 6 条现在的写法：分岔处是 `]`、ASCII 字母或数字时是改写；其余字符只在期望标签没有在它之后接续（既不是插入也不是替换）时才算截断。另有一处边角由主会话决定：令牌完整、只是 `]` 被省略号取代时，「替换后接续」的部分为空，检查恒成立，按字面会记为 `other`；这正是客户端恰好在 `]` 之前截断主题的样子，因此替换检查只在其后还剩期望标签的内容时进行，记为 `truncated`（去掉这道条件的变异被用例拦下）。
+2. **测试缺口。** 审查员另拟的 15 个变异体中 14 个存活。现在都有用例拦截：严格文法中「恰好一个空格」、退信先于主题前缀、没有标签或前缀之后是其他文字的自动回复、诱饵 `[tcp]` 之后的标签（原样、截断、大小写改变）、标签形状的 `^` 锚、`Return-Path` 的角色比较与最后一个 `@`、只看第一个 `Return-Path`、逐条的白名单条目、`Schema` 字面值、三个标签、字母表之外的字母、以及只折叠 ASCII 时的字节对齐（前缀中含小写后变长的字符时，错误的实现会越界 panic）。
+3. **全角冒号。** 英文条目补上全角冒号的变体，自动回复前缀补上「自动答复」，与产品规则一致（第 4 项）。
+4. **注释与效率。** 修正几处与行为不符的注释（`Return-Path` 的说明改为：它由最终投递的服务器按信封发件人写入；QQ 要求信封发件人等于登录账户，同域投递中它可能反映真实的发信账户，而 `From` 可以伪造，这一点待 L1b 核实）；白名单的折叠形式在包初始化时算好一次，每封来信的主题只折叠、去空白一次（在 30 万个随机输入上比较新旧实现，结果完全相同）。
+5. **增补（核实 D7 的前提）：** 第 9 项。
+
+修复后用例数：`TestAnalyzeTagStates` 38、`TestAnalyzeAutoReplySubject` 19、`TestAnalyzeSubjects` 21、`TestAnalyzeReturnPath` 12、`TestComposeNotificationRejectsBadTag` 10，新增 `TestAnalyzeBounceBeforeAutoReplySubject` 与 `TestSchemaVersion`。变异测试共 57 个，全部被杀死：审查员列出的 M1–M15 与 M17，另加 M4b、M15′、M17′ 三个变体，共 19 个；新截断规则的 8 个；重构的 5 个；逐条删去白名单的 24 个条目；主会话为 `]` 边角加的 1 个。`sample.go` 每次恢复后与原文件的 SHA-256 相同。验证：`go test -count=1 -cover ./tests/live/`（不带标签部分覆盖率 92.3%）、`make check`（总覆盖率 93.38%）、`make secrets`、`go vet -tags live ./tests/live/`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...` 通过，三个文件中没有零宽、双向控制与其他不可见字符。仍然没有运行任何真机探测。
 
 ### 规程（维护者本机执行）
 
