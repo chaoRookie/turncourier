@@ -18,6 +18,8 @@ allowed_senders = ["me@example.invalid"]
 [notify]
 # 可选：turn_completed、waiting_input、waiting_approval、failed
 events = ["waiting_input", "failed", "turn_completed"]
+# 通知内容：filtered 发送过滤后的标题与正文（过滤不保证发现所有机密），status 只发事件与任务 ID
+content = "filtered"
 
 [security]
 # 回复令牌有效期，1h 到 720h

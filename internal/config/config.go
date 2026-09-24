@@ -40,10 +40,19 @@ type Recipient struct {
 	AllowedSenders []string
 }
 
-// Notify 列出会触发通知邮件的事件，顺序与去重后的配置一致。
+// Notify 列出会触发通知邮件的事件（顺序与去重后的配置一致），以及通知携带的内容。
 type Notify struct {
-	Events []string
+	Events  []string
+	Content string // ContentFiltered 或 ContentStatus
 }
+
+// notify.content 只接受这两个取值，区分大小写；环境变量不能覆盖它。
+const (
+	// ContentFiltered 是默认值：通知携带经确定性过滤的标题与正文。
+	ContentFiltered = "filtered"
+	// ContentStatus 表示纯状态通知：主题的标题只有事件名，正文只写事件与任务 ID，Agent 提供的标题与正文都不进入邮件。
+	ContentStatus = "status"
+)
 
 // Security 保存与回复令牌相关的非敏感选项。
 type Security struct {
@@ -83,7 +92,7 @@ var credentialKeys = []string{"password", "authorization_code", "auth_code", "to
 var knownKeys = []toml.Key{
 	{"mailbox"}, {"mailbox", "address"}, {"mailbox", "imap_host"}, {"mailbox", "imap_port"}, {"mailbox", "smtp_host"}, {"mailbox", "smtp_port"},
 	{"recipient"}, {"recipient", "address"}, {"recipient", "allowed_senders"},
-	{"notify"}, {"notify", "events"},
+	{"notify"}, {"notify", "events"}, {"notify", "content"},
 	{"security"}, {"security", "token_ttl"},
 }
 
@@ -112,7 +121,8 @@ type rawRecipient struct {
 
 // rawNotify 是 [notify] 表的原始字段；空列表与未设置的含义不同。
 type rawNotify struct {
-	Events *[]string `toml:"events"`
+	Events  *[]string `toml:"events"`
+	Content *string   `toml:"content"`
 }
 
 // rawSecurity 是 [security] 表的原始字段。
@@ -153,6 +163,8 @@ func Load(paths Paths, getenv func(string) string) (Config, error) {
 
 	events, eventProblems := resolveEvents(raw.Notify.Events, getenv(notifyEventsEnv))
 	problems = append(problems, eventProblems...)
+	content, err := resolveContent(raw.Notify.Content)
+	problems = append(problems, err)
 	tokenTTL, err := resolveTokenTTL(raw.Security.TokenTTL)
 	problems = append(problems, err)
 
@@ -163,7 +175,7 @@ func Load(paths Paths, getenv func(string) string) (Config, error) {
 	return Config{
 		Mailbox:   Mailbox{Address: mailboxAddress, IMAPHost: imapHost, IMAPPort: imapPort, SMTPHost: smtpHost, SMTPPort: smtpPort},
 		Recipient: Recipient{Address: recipientAddress, AllowedSenders: senders},
-		Notify:    Notify{Events: events},
+		Notify:    Notify{Events: events, Content: content},
 		Security:  Security{TokenTTL: tokenTTL},
 		Paths:     paths,
 	}, nil
@@ -374,6 +386,18 @@ func resolveEvents(fileEvents *[]string, env string) ([]string, []error) {
 		events = append(events, value)
 	}
 	return events, problems
+}
+
+// resolveContent 解析 notify.content：未设置时为 ContentFiltered；只接受 ContentFiltered 与 ContentStatus（区分大小写，不去空白），
+// 其他取值报错，错误文本不回显取值。它没有对应的环境变量：纯状态模式是隐私选项，不能被环境悄悄改回过滤模式。
+func resolveContent(raw *string) (string, error) {
+	if raw == nil {
+		return ContentFiltered, nil
+	}
+	if *raw != ContentFiltered && *raw != ContentStatus {
+		return "", errors.New(`notify.content must be "filtered" or "status"`)
+	}
+	return *raw, nil
 }
 
 // resolveTokenTTL 解析回复令牌有效期，缺省 72h，允许范围 1h 到 720h。

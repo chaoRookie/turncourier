@@ -59,9 +59,22 @@ func TestRenderLoadRoundTrip(t *testing.T) {
 		if cfg.Mailbox != wantMailbox || cfg.Recipient.Address != draft.RecipientAddress || !slices.Equal(cfg.Recipient.AllowedSenders, draft.AllowedSenders) {
 			t.Errorf("草稿 %d: Load = %+v; want %+v", i, cfg, draft)
 		}
-		if !slices.Equal(cfg.Notify.Events, defaultNotifyEvents) || cfg.Security.TokenTTL != 72*time.Hour {
-			t.Errorf("草稿 %d: 通知事件或令牌有效期不是默认值: %+v", i, cfg)
+		if !slices.Equal(cfg.Notify.Events, defaultNotifyEvents) || cfg.Notify.Content != ContentFiltered || cfg.Security.TokenTTL != 72*time.Hour {
+			t.Errorf("草稿 %d: 通知事件、通知内容或令牌有效期不是默认值: %+v", i, cfg)
 		}
+	}
+}
+
+// TestRenderWritesNotifyContent 验证 init 写入的配置显式带 content = "filtered"，位于 [notify] 表中，且 Load 读回的就是它。
+func TestRenderWritesNotifyContent(t *testing.T) {
+	data, err := Render(exampleDraft())
+	if err != nil {
+		t.Fatalf("Render 返回错误: %v", err)
+	}
+	_, notify, ok := strings.Cut(string(data), "\n[notify]\n")
+	notify, _, _ = strings.Cut(notify, "\n[")
+	if !ok || !slices.Contains(strings.Split(notify, "\n"), `content = "filtered"`) {
+		t.Errorf("[notify] 表中没有 content = \"filtered\" 一行:\n%s", notify)
 	}
 }
 

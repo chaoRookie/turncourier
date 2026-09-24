@@ -187,7 +187,7 @@ turncourier/
 │   │   ├── process_unix.go          # Unix: kill the version process group
 │   │   ├── process_other.go         # Other platforms: default cancellation
 │   │   └── process_unix_test.go     # Process group termination test
-│   ├── mail/                        # Mail contract, clients, parser; no storage, no config
+│   ├── mail/                        # Mail contract, clients, parser, renderer; no storage or config
 │   │   ├── gateway.go               # Contract: footer marker and sentence, ID header
 │   │   ├── imap/                    # Read-only IMAP over implicit TLS
 │   │   │   ├── session.go           # Login, EXAMINE, UID rescan, PEEK, IDLE
@@ -205,6 +205,14 @@ turncourier/
 │   │   │   ├── quote_test.go        # Boundary rules, signatures, residue triggers
 │   │   │   ├── classify_test.go     # L1 samples, one rule per case, bounce first
 │   │   │   └── fuzz_test.go         # Fuzzing: no panic, bounded valid output
+│   │   ├── renderer/                # Outbound notices: subject tag, filter, MIME
+│   │   │   ├── content.go           # Notification content JSON, strict decoding
+│   │   │   ├── filter.go            # Deterministic, idempotent content filter
+│   │   │   ├── renderer.go          # Subject, thread headers, footer, two parts
+│   │   │   ├── content_test.go      # Wire format, strict decoding, redaction
+│   │   │   ├── filter_test.go       # Each rule both ways, order, truncation
+│   │   │   ├── renderer_test.go     # Subject bytes, footer, canaries, limits
+│   │   │   └── fuzz_test.go         # Fuzzing: idempotent filter, round trip
 │   │   └── smtp/                    # Submit one message over implicit TLS
 │   │       ├── smtp.go              # Per-step deadlines, outcome classification
 │   │       ├── smtp_test.go         # go-smtp fake server, plaintext guard

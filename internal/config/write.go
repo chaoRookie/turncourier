@@ -17,7 +17,7 @@ type Draft struct {
 	AllowedSenders   []string
 }
 
-// Render 生成与 configs/turncourier.example.toml 同格式的 TOML 文本：注释相同，主机、端口、事件与有效期写默认值，地址按草稿填写。
+// Render 生成与 configs/turncourier.example.toml 同格式的 TOML 文本：注释相同，主机、端口、事件、通知内容与有效期写默认值，地址按草稿填写。
 // 校验与 Load 相同的地址规则：每个地址规范化后不变、白名单非空且不重复、机器人地址不在白名单中。
 // 规范化后的 addr-spec 不含引号与反斜杠，strconv.Quote 的结果即合法的 TOML 基本字符串。
 func Render(d Draft) ([]byte, error) {
@@ -37,7 +37,7 @@ func Render(d Draft) ([]byte, error) {
 	return []byte(fmt.Sprintf(configTemplate,
 		strconv.Quote(d.MailboxAddress), strconv.Quote(defaultIMAPHost), defaultIMAPPort, strconv.Quote(defaultSMTPHost), defaultSMTPPort,
 		strconv.Quote(d.RecipientAddress), quoteList(d.AllowedSenders),
-		quoteList(defaultNotifyEvents), strconv.Quote(strconv.Itoa(int(defaultTokenTTL.Hours()))+"h"))), nil
+		quoteList(defaultNotifyEvents), strconv.Quote(ContentFiltered), strconv.Quote(strconv.Itoa(int(defaultTokenTTL.Hours()))+"h"))), nil
 }
 
 // configTemplate 是 Render 的文本模板，注释与 configs/turncourier.example.toml 逐字相同。
@@ -61,6 +61,8 @@ allowed_senders = [%s]
 [notify]
 # 可选：turn_completed、waiting_input、waiting_approval、failed
 events = [%s]
+# 通知内容：filtered 发送过滤后的标题与正文（过滤不保证发现所有机密），status 只发事件与任务 ID
+content = %s
 
 [security]
 # 回复令牌有效期，1h 到 720h

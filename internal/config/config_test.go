@@ -97,6 +97,50 @@ func TestLoadExampleConfig(t *testing.T) {
 	if !slices.Equal(cfg.Notify.Events, want.Notify.Events) {
 		t.Errorf("Notify.Events = %v; want %v", cfg.Notify.Events, want.Notify.Events)
 	}
+	if cfg.Notify.Content != ContentFiltered {
+		t.Errorf("Notify.Content = %q; want %q", cfg.Notify.Content, ContentFiltered)
+	}
+}
+
+// TestLoadNotifyContent 验证 notify.content：缺省为 "filtered"；只接受 "filtered" 与 "status" 两个取值（区分大小写，不去空白），
+// 其他取值报错且错误文本不回显取值；键名的大小写变体按未知键拒绝；环境变量不能覆盖它（TestLoadReadsOnlyNotifyEventsEnv）。
+func TestLoadNotifyContent(t *testing.T) {
+	if ContentFiltered != "filtered" || ContentStatus != "status" {
+		t.Fatalf("两个取值为 %q 与 %q，契约规定为 filtered 与 status", ContentFiltered, ContentStatus)
+	}
+	cfg, _, err := loadConfig(t, minimalConfig)
+	if err != nil {
+		t.Fatalf("Load 返回错误: %v", err)
+	}
+	if cfg.Notify.Content != ContentFiltered {
+		t.Errorf("默认的 Notify.Content = %q; want %q", cfg.Notify.Content, ContentFiltered)
+	}
+	for _, value := range []string{"filtered", "status"} {
+		cfg, _, err := loadConfig(t, minimalConfig+"\n[notify]\ncontent = \""+value+"\"\n")
+		if err != nil {
+			t.Fatalf("content = %q 应当合法: %v", value, err)
+		}
+		if cfg.Notify.Content != value {
+			t.Errorf("Notify.Content = %q; want %q", cfg.Notify.Content, value)
+		}
+	}
+	for _, value := range []string{"Filtered", "STATUS", "none", "", " status", "status ", "full"} {
+		_, paths, err := loadConfig(t, minimalConfig+"\n[notify]\ncontent = \""+value+"\"\n")
+		requireErrorWithoutPath(t, err, paths)
+		if !strings.Contains(err.Error(), "notify.content") {
+			t.Errorf("content = %q: 错误未提到 notify.content: %v", value, err)
+		}
+		if value != "" && strings.Contains(err.Error(), value) {
+			t.Errorf("content = %q: 错误文本回显了取值: %v", value, err)
+		}
+	}
+	for _, key := range []string{"Content", "CONTENT", "content_mode"} {
+		_, paths, err := loadConfig(t, minimalConfig+"\n[notify]\n"+key+" = \"status\"\n")
+		requireErrorWithoutPath(t, err, paths)
+		if !strings.Contains(err.Error(), "unknown key notify."+key) {
+			t.Errorf("%s: 错误未把它报为未知键: %v", key, err)
+		}
+	}
 }
 
 // TestLoadDefaults 只写必填字段时应得到清单规定的默认主机、端口、事件与令牌有效期。
@@ -487,6 +531,8 @@ func TestLoadReadsOnlyNotifyEventsEnv(t *testing.T) {
 	}
 	attack := map[string]string{
 		"TURNCOURIER_ALLOWED_SENDERS":   "attacker@example.invalid",
+		"TURNCOURIER_NOTIFY_CONTENT":    "status",
+		"TURNCOURIER_CONTENT":           "status",
 		"TURNCOURIER_TOKEN_TTL":         "720h",
 		"TURNCOURIER_MAILBOX_ADDRESS":   "attacker@example.invalid",
 		"TURNCOURIER_RECIPIENT_ADDRESS": "attacker@example.invalid",

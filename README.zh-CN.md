@@ -187,7 +187,7 @@ turncourier/
 │   │   ├── process_unix.go          # Unix：终止版本子进程所在进程组
 │   │   ├── process_other.go         # 其他平台：默认取消方式
 │   │   └── process_unix_test.go     # 进程组终止测试
-│   ├── mail/                        # 邮件契约、客户端与解析器；不依赖存储与配置
+│   ├── mail/                        # 邮件契约、客户端、解析器与渲染器；不依赖存储与配置
 │   │   ├── gateway.go               # 邮件契约：页脚标记行、固定句子、自定义头名
 │   │   ├── imap/                    # 只读 IMAP，只用隐式 TLS
 │   │   │   ├── session.go           # 登录、EXAMINE、UID 补扫、PEEK、IDLE
@@ -205,6 +205,14 @@ turncourier/
 │   │   │   ├── quote_test.go        # 边界规则、签名与残留触发测试
 │   │   │   ├── classify_test.go     # L1 样本、逐条规则与退信优先测试
 │   │   │   └── fuzz_test.go         # 模糊测试：不 panic、输出合法且有界
+│   │   ├── renderer/                # 出站通知：主题标签、敏感信息过滤与 MIME
+│   │   │   ├── content.go           # 通知内容的 JSON 格式与严格解码
+│   │   │   ├── filter.go            # 确定性、幂等的敏感信息过滤
+│   │   │   ├── renderer.go          # 主题、线程头、页脚与两个部件
+│   │   │   ├── content_test.go      # 线上格式、严格解码与脱敏测试
+│   │   │   ├── filter_test.go       # 逐条规则的正反用例、先后与截断
+│   │   │   ├── renderer_test.go     # 主题原始字节、页脚、金丝雀与上限
+│   │   │   └── fuzz_test.go         # 模糊测试：过滤幂等、内容往返
 │   │   └── smtp/                    # 只用隐式 TLS 发送单封邮件
 │   │       ├── smtp.go              # 逐步期限与投递结果三分类
 │   │       ├── smtp_test.go         # go-smtp 假服务器与明文防护
