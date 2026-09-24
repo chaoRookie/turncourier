@@ -1,7 +1,8 @@
-// Package imap 的离线假服务器：imapserver 加 imapmemserver 在本机回环地址上提供标准 IMAP 行为，前面是只在测试中存在的代理。
-// 代理默认终结 TLS（证书借用 httptest），记录客户端发出的每条命令（标签、命令名与参数，LOGIN 只记命令名），并按规则注入故障，
+// Package imap 的离线假服务器：imapserver 加 imapmemserver 在本机回环地址上提供标准 IMAP 行为（INBOX、Junk 与「已发送」），
+// 前面是只在测试中存在的代理。代理默认终结 TLS（证书借用 httptest），记录客户端发出的每条命令（标签、命令名与参数，
+// LOGIN 只记命令名；UID FETCH 另记数据项，可据此区分取整封的 BODY.PEEK[] 与只取头部的 BODY.PEEK[HEADER]），并按规则注入故障，
 // 模拟 QQ 的无标签 BAD、半开连接、问候冻结、文件夹暂时不可用、补扫中到达的 EXISTS、少报的邮件大小、
-// 不遵守部分取回、断开（含拒绝登录后断开）、登录前的慢握手、能力差异与明文入口。
+// 不遵守部分取回、字面量中途断开、断开（含拒绝登录后断开）、登录前的慢握手、能力差异、不报告 UIDNEXT 与明文入口。
 // 测试只连接这里的本地假服务器，不连接任何真实服务器。
 package imap
 
@@ -52,6 +53,8 @@ var (
 	sizePattern = regexp.MustCompile(`RFC822\.SIZE \d+`)
 	// literalPattern 匹配行尾的字面量长度 {N}。
 	literalPattern = regexp.MustCompile(`\{(\d+)\}\r\n$`)
+	// uidNextPattern 匹配 EXAMINE 响应中报告 UIDNEXT 的无标签 OK 行。
+	uidNextPattern = regexp.MustCompile(`^\* OK \[UIDNEXT \d+\]`)
 )
 
 // faultKind 是代理可注入的故障种类。
@@ -67,7 +70,7 @@ const (
 	faultDisconnect                       // 不转发，立即关闭两侧连接
 	faultEmpty                            // 不转发，直接回 <标签> OK，模拟服务器没有返回任何数据
 	faultRejectClose                      // 不转发，回 <标签> NO [AUTHENTICATIONFAILED] 后立即关闭两侧连接，模拟拒绝登录后断开的服务器
-	faultWholeBody                        // 不转发，回一条正文字面量为 bytes 字节的 FETCH 响应再回 <标签> OK，模拟不遵守部分取回的服务器
+	faultWholeBody                        // 不转发，回一条正文字面量为 bytes 字节的 FETCH 响应再回 <标签> OK，模拟不遵守部分取回的服务器；cut 大于 0 时只发出字面量的前 cut 字节就关闭两侧连接
 	faultCloseAfter                       // 转发命令，响应转发 bytes 字节后关闭两侧连接；TLS 以 close_notify 正常结束，客户端读到 io.EOF
 )
 
@@ -76,7 +79,8 @@ type rule struct {
 	command  string    // 大写命令名，例如 UID FETCH
 	contains string    // 非空时命令行还须含此片段
 	kind     faultKind // 故障种类
-	bytes    int       // faultFreezeAfter 转发的响应字节数；faultWholeBody 的字面量字节数
+	bytes    int       // faultFreezeAfter 与 faultCloseAfter 转发的响应字节数；faultWholeBody 声明的字面量字节数
+	cut      int       // faultWholeBody 大于 0 时只发出字面量的前 cut 字节，然后关闭两侧连接（TLS 以 close_notify 正常结束）
 	exists   []uint32  // faultInject 注入的各条 EXISTS 的 N
 	limit    int       // 生效次数上限；0 表示不限
 	hook     func()    // 生效时、转发之前调用，例如同时放入一封新邮件
@@ -101,6 +105,8 @@ type proxyOptions struct {
 	sizeOverride   int64         // 非 0 时把每个 RFC822.SIZE 改为该值
 	maxTLSVersion  uint16        // 非 0 时限制代理的最高 TLS 版本
 	noJunk         bool          // 不创建 Junk 文件夹
+	noSent         bool          // 不创建「已发送」文件夹（FolderSent），LIST 中因此没有它
+	noUIDNext      bool          // 从服务器响应中删去报告 UIDNEXT 的行，模拟 EXAMINE 不报告 UIDNEXT 的服务器
 	slowHandshake  time.Duration // 第一个连接的 TLS 握手推迟这么久，模拟 LOGIN 在拨号开始很久之后才发出
 }
 
@@ -120,16 +126,19 @@ type fakeServer struct {
 	closed   bool
 }
 
-// newFakeServer 启动 imapmemserver（含 INBOX 与 Junk，除非 noJunk）与前置代理；用例结束时关闭两者，
-// 并断言代理记录的命令名都在白名单内、每个正文数据项都是 BODY.PEEK[]<0.N>。
+// newFakeServer 启动 imapmemserver（含 INBOX、Junk 与「已发送」，除非 noJunk 或 noSent）与前置代理；用例结束时关闭两者，
+// 并断言代理记录的命令名都在白名单内、每个正文数据项都是 BODY.PEEK[]<0.N> 或 BODY.PEEK[HEADER]<0.N>。
 func newFakeServer(t *testing.T, opts proxyOptions) *fakeServer {
 	t.Helper()
 	mem := imapmemserver.New()
 	user := imapmemserver.NewUser(testUser, testPassword)
 	mem.AddUser(user)
-	folders := []string{FolderInbox, FolderJunk}
-	if opts.noJunk {
-		folders = folders[:1]
+	folders := []string{FolderInbox}
+	if !opts.noJunk {
+		folders = append(folders, FolderJunk)
+	}
+	if !opts.noSent {
+		folders = append(folders, FolderSent)
 	}
 	for _, name := range folders {
 		if err := user.Create(name, nil); err != nil {
@@ -173,8 +182,8 @@ func newFakeServer(t *testing.T, opts proxyOptions) *fakeServer {
 				t.Errorf("client sent %q, which is not in the command whitelist", cmd.Name)
 			}
 			for _, item := range cmd.Items {
-				if item != "UID" && item != "RFC822.SIZE" && !strings.HasPrefix(item, "BODY.PEEK[]<0.") {
-					t.Errorf("UID FETCH requested %q; want only UID, RFC822.SIZE and BODY.PEEK[]<0.N>", item)
+				if item != "UID" && item != "RFC822.SIZE" && !strings.HasPrefix(item, "BODY.PEEK[]<0.") && !strings.HasPrefix(item, "BODY.PEEK[HEADER]<0.") {
+					t.Errorf("UID FETCH requested %q; want only UID, RFC822.SIZE, BODY.PEEK[]<0.N> and BODY.PEEK[HEADER]<0.N>", item)
 				}
 			}
 		}
@@ -461,7 +470,8 @@ func (pc *proxyConn) arm(n int, cut bool) {
 	pc.budget, pc.cut = n, cut
 }
 
-// send 把数据写给客户端；冻结后丢弃。启用「响应中途冻结」时只写出剩余额度，然后冻结。
+// send 把数据写给客户端；冻结后丢弃。启用「响应中途冻结」（arm）时只写出剩余额度，然后冻结；
+// cut 为真（faultCloseAfter）时写出剩余额度后改为关闭两侧连接，客户端读完这些字节后读到 close_notify 带来的 io.EOF。
 func (pc *proxyConn) send(b []byte) error {
 	pc.wmu.Lock()
 	defer pc.wmu.Unlock()
@@ -521,7 +531,7 @@ func (pc *proxyConn) clientToServer() {
 				_ = pc.send([]byte(tag + " NO [AUTHENTICATIONFAILED] Invalid credentials\r\n"))
 				return
 			case faultWholeBody:
-				err = pc.sendWholeBody(tag, strings.Fields(line)[3], r.bytes)
+				err = pc.sendWholeBody(tag, line, r.bytes, r.cut)
 			case faultInject:
 				for _, n := range r.exists {
 					if err = pc.send(fmt.Appendf(nil, "* %d EXISTS\r\n", n)); err != nil {
@@ -546,11 +556,20 @@ func (pc *proxyConn) clientToServer() {
 	}
 }
 
-// sendWholeBody 代替服务器回应正文 FETCH：无视请求的部分取回，回一条正文字面量为 n 字节的 FETCH 响应，再回 <标签> OK。
-// 字面量由代理分块合成，不经 imapmemserver，服务端不因此分配大块内存。
-func (pc *proxyConn) sendWholeBody(tag, uid string, n int) error {
-	if err := pc.send(fmt.Appendf(nil, "* 1 FETCH (UID %s BODY[] {%d}\r\n", uid, n)); err != nil {
+// sendWholeBody 代替服务器回应 UID FETCH 命令行 line：无视请求的部分取回，回一条字面量声明为 n 字节的 FETCH 响应，再回 <标签> OK；
+// 数据项的节与请求相同（取头部时为 BODY[HEADER]，否则为 BODY[]）。cut 大于 0 时只发出字面量的前 cut 字节，然后关闭两侧连接
+// （TLS 以 close_notify 正常结束），模拟字面量传到一半时服务器正常关闭连接。字面量由代理分块合成，不经 imapmemserver，
+// 服务端不因此分配大块内存。
+func (pc *proxyConn) sendWholeBody(tag, line string, n, cut int) error {
+	uid, section := strings.Fields(line)[3], "[]"
+	if strings.Contains(line, "BODY.PEEK[HEADER]") {
+		section = "[HEADER]"
+	}
+	if err := pc.send(fmt.Appendf(nil, "* 1 FETCH (UID %s BODY%s {%d}\r\n", uid, section, n)); err != nil {
 		return err
+	}
+	if cut > 0 {
+		n = min(n, cut)
 	}
 	chunk := bytes.Repeat([]byte("x"), 64<<10)
 	for n > 0 {
@@ -560,10 +579,14 @@ func (pc *proxyConn) sendWholeBody(tag, uid string, n int) error {
 		}
 		n -= k
 	}
+	if cut > 0 {
+		pc.close()
+		return net.ErrClosed
+	}
 	return pc.send([]byte(")\r\n" + tag + " OK FETCH completed\r\n"))
 }
 
-// serverToClient 逐行转发 imapmemserver 的响应，字面量按声明的长度原样转发；响应行按用例选项改写。
+// serverToClient 逐行转发 imapmemserver 的响应，字面量按声明的长度原样转发；响应行按用例选项改写，noUIDNext 时删去报告 UIDNEXT 的行。
 func (pc *proxyConn) serverToClient() {
 	defer pc.close()
 	br := bufio.NewReader(pc.server)
@@ -572,6 +595,9 @@ func (pc *proxyConn) serverToClient() {
 		line, err := br.ReadString('\n')
 		if err != nil {
 			return
+		}
+		if pc.fs.opts.noUIDNext && uidNextPattern.MatchString(line) {
+			continue
 		}
 		if err := pc.send([]byte(pc.fs.rewrite(line))); err != nil {
 			return
@@ -619,4 +645,27 @@ func testMessage(n, size int) []byte {
 		body = strings.Repeat("x", pad) + "\r\n"
 	}
 	return []byte(head + body)
+}
+
+// messageWithHeader 构造第 n 封合成邮件：头部（含结束头部的空行）恰为 headerSize 字节，正文为 bodySize 字节，行尾为 CRLF。
+// 头部以若干行 X-Padding 补足，每行至多 80 字节，符合行长限制；headerSize 须比基本头部至少多 16 字节，bodySize 至少为 2。
+func messageWithHeader(n, headerSize, bodySize int) []byte {
+	var h strings.Builder
+	fmt.Fprintf(&h, "From: user@example.invalid\r\nTo: %s\r\nSubject: message %d\r\nMessage-ID: <m%d@example.invalid>\r\n", testUser, n, n)
+	const prefix, minLine = "X-Padding: ", 14 // 一行至少是前缀、一个字符与 CRLF
+	for rest := headerSize - h.Len() - 2; rest > 0; {
+		line := min(rest, 80)
+		if left := rest - line; left > 0 && left < minLine {
+			line = rest - minLine // 给最后一行留出最短的长度
+		}
+		h.WriteString(prefix + strings.Repeat("x", line-len(prefix)-2) + "\r\n")
+		rest -= line
+	}
+	h.WriteString("\r\n")
+	return []byte(h.String() + strings.Repeat("y", bodySize-2) + "\r\n")
+}
+
+// headerOf 返回合成邮件的头部：到结束头部的空行为止（含空行），即 BODY[HEADER] 应返回的字节。
+func headerOf(raw []byte) []byte {
+	return raw[:bytes.Index(raw, []byte("\r\n\r\n"))+4]
 }

@@ -1,5 +1,6 @@
-// Package imap 用离线假服务器验证单连接会话：收取与游标、只读、命令白名单、每条命令的期限、补扫中到达的 EXISTS、
-// IDLE 推送、UIDVALIDITY 变化、批量与大小上限、认证与传输安全、文件夹错误；测试不连接任何真实服务器。
+// Package imap 用离线假服务器验证单连接会话：收取与游标、只取头部的补扫、只读、命令白名单、每条命令的期限、
+// 补扫中到达的 EXISTS、IDLE 推送、UIDVALIDITY 变化、批量与大小上限、字面量中途断开、认证与传输安全、文件夹错误；
+// 测试不连接任何真实服务器。
 package imap
 
 import (
@@ -669,6 +670,273 @@ func TestScanBodyLiteralCutShort(t *testing.T) {
 	}
 }
 
+// TestScanHeadersLiteralCutShort 与 TestScanBodyLiteralCutShort 相同，但截断的是 ScanHeaders 取回的头部字面量：
+// 头部的取回与正文共用同一条「读到的字节少于声明长度即按连接断开结束」的检查，-race 下不得报告竞争。
+func TestScanHeadersLiteralCutShort(t *testing.T) {
+	fs := newFakeServer(t, proxyOptions{})
+	fs.appendMessage(FolderSent, messageWithHeader(1, 4096, 100))
+	s := dial(t, fs, testTimeouts())
+	fs.addRule(&rule{command: "UID FETCH", contains: "BODY.PEEK[HEADER]", kind: faultCloseAfter, bytes: 512})
+	b, err := s.ScanHeaders(context.Background(), FolderSent, Cursor{})
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+	if len(b.Messages) != 0 {
+		t.Fatalf("ScanHeaders returned %d messages after the literal was cut short", len(b.Messages))
+	}
+}
+
+// TestScanLiteralCutAtLimit 钉住上面那条检查的边界：字面量声明为上限加 1 字节，服务器只发出前「上限」个字节就以 close_notify
+// 关闭连接。此时读到的字节恰为上限，检查若只与上限（而不是上限加 1）比较，就会把残缺的字面量当作一封恰为上限的完整邮件，
+// 并再调用 Next 与解码协程争用读缓冲。Scan 与 ScanHeaders 都必须返回 ErrClosed、不交付邮件。
+// 那样的错误在功能上看不出来（连接随后照样按断开结束），只有 -race 能报告竞争，而单次运行报告与否取决于解码协程退出的先后，
+// 所以每个子用例在新连接上重复 rounds 次。
+func TestScanLiteralCutAtLimit(t *testing.T) {
+	const limit, rounds = 1024, 25
+	for _, tc := range []struct {
+		name    string
+		headers bool
+	}{{"Scan", false}, {"ScanHeaders", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			setVar(t, &maxMessageSize, limit)
+			setVar(t, &maxHeaderSize, limit)
+			fs := newFakeServer(t, proxyOptions{sizeOverride: 100}) // 声明大小低于上限，Scan 才会去取正文
+			fs.appendMessage(FolderInbox, testMessage(1, 100))
+			fs.addRule(&rule{command: "UID FETCH", contains: "BODY.PEEK", kind: faultWholeBody, bytes: limit + 1, cut: limit})
+			for i := range rounds {
+				s := dial(t, fs, testTimeouts())
+				scanFn := s.Scan
+				if tc.headers {
+					scanFn = s.ScanHeaders
+				}
+				b, err := scanFn(context.Background(), FolderInbox, Cursor{})
+				if !errors.Is(err, ErrClosed) {
+					t.Fatalf("round %d: err = %v, want ErrClosed", i, err)
+				}
+				if len(b.Messages) != 0 {
+					t.Fatalf("round %d: %s returned %d messages after the literal was cut at the limit", i, tc.name, len(b.Messages))
+				}
+			}
+		})
+	}
+}
+
+// fakeLiteral 是内存中的字面量：声明 size 字节，实际只能读出 data（可以更短，模拟字面量中途断开），读完之后返回 err
+// （为 nil 时返回 io.EOF，与 go-imap 在连接正常关闭时的表现相同）。
+type fakeLiteral struct {
+	data []byte
+	size int64
+	err  error
+}
+
+// Read 依次读出 data，读完之后返回 err 或 io.EOF。
+func (l *fakeLiteral) Read(p []byte) (int, error) {
+	if len(l.data) == 0 {
+		if l.err != nil {
+			return 0, l.err
+		}
+		return 0, io.EOF
+	}
+	n := copy(p, l.data)
+	l.data = l.data[n:]
+	return n, nil
+}
+
+// Size 返回字面量声明的长度。
+func (l *fakeLiteral) Size() int64 { return l.size }
+
+// TestReadLiteral 不经网络、确定地覆盖字面量读取的判定：完整的字面量照常返回（恰为上限的也算），超出上限的判为过大，
+// 读取失败原样返回错误；读到的字节少于声明长度时返回 io.ErrUnexpectedEOF——包括声明为上限加 1 字节、只读到「上限」个字节的情形。
+// 后一种在集成用例（TestScanLiteralCutAtLimit）中只有 -race 偶尔能看出来，这里把边界钉死：检查若只与上限比较，本用例即失败。
+func TestReadLiteral(t *testing.T) {
+	const limit = 8
+	broken := errors.New("connection reset")
+	for _, tc := range []struct {
+		name      string
+		declared  int64
+		sent      int
+		err       error // 读完 sent 字节之后返回的错误；nil 即 io.EOF
+		wantErr   error
+		wantLarge bool
+	}{
+		{"complete below the limit", 5, 5, nil, nil, false},
+		{"complete at the limit", limit, limit, nil, nil, false},
+		{"empty", 0, 0, nil, nil, false},
+		{"larger than the limit", 20, 20, nil, nil, true},
+		{"one byte over the limit", limit + 1, limit + 1, nil, nil, true},
+		{"cut short below the limit", 20, 5, nil, io.ErrUnexpectedEOF, false},
+		{"cut one byte short", 6, 5, nil, io.ErrUnexpectedEOF, false},
+		{"cut at the limit of a literal one byte longer", limit + 1, limit, nil, io.ErrUnexpectedEOF, false},
+		{"read fails", 20, 3, broken, broken, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := bytes.Repeat([]byte("x"), tc.sent)
+			data, tooLarge, err := readLiteral(&fakeLiteral{data: sent, size: tc.declared, err: tc.err}, limit)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			switch {
+			case err != nil || tooLarge:
+				if data != nil || tooLarge != tc.wantLarge {
+					t.Errorf("data = %d bytes, tooLarge = %v; want nil data and tooLarge %v", len(data), tooLarge, tc.wantLarge)
+				}
+			case tc.wantLarge || !bytes.Equal(data, sent):
+				t.Errorf("data = %d bytes, tooLarge = %v; want the %d bytes sent", len(data), tooLarge, tc.sent)
+			}
+		})
+	}
+}
+
+// headerItems 返回代理记录的 UID FETCH 中以 BODY 开头的数据项，按发出顺序。
+func headerItems(fs *fakeServer) []string {
+	var out []string
+	for _, cmd := range fs.commands() {
+		for _, item := range cmd.Items {
+			if strings.HasPrefix(item, "BODY") {
+				out = append(out, item)
+			}
+		}
+	}
+	return out
+}
+
+// TestScanHeadersReturnsHeadersReadOnly 覆盖 ScanHeaders：游标规则与 Scan 相同（全量补扫、过滤服务器对 last+1:* 返回的最后一个 UID、
+// 增量收取），但每封只返回头部（到结束头部的空行为止），Size 仍是整封的大小；全程没有设置 \Seen，每个数据项都是
+// BODY.PEEK[HEADER]<0.N>（N 为 maxHeaderSize+1），没有取整封的 BODY.PEEK[]。
+func TestScanHeadersReturnsHeadersReadOnly(t *testing.T) {
+	fs := newFakeServer(t, proxyOptions{})
+	var sent [][]byte
+	for i := 1; i <= 3; i++ {
+		raw := testMessage(i, 300*i)
+		sent = append(sent, raw)
+		fs.appendMessage(FolderSent, raw)
+	}
+	s := dial(t, fs, testTimeouts())
+	ctx := context.Background()
+	uv := fs.status(FolderSent).UIDValidity
+
+	b, err := s.ScanHeaders(ctx, FolderSent, Cursor{})
+	if err != nil {
+		t.Fatalf("ScanHeaders: %v", err)
+	}
+	if b.Folder != FolderSent || !b.Reset || b.UIDValidity != uv || b.More || b.Next != (Cursor{UIDValidity: uv, LastUID: 3}) {
+		t.Fatalf("first batch = %+v", b)
+	}
+	if !slices.Equal(uids(b), []uint32{1, 2, 3}) {
+		t.Fatalf("first batch UIDs = %v", uids(b))
+	}
+	for i, m := range b.Messages {
+		if !bytes.Equal(m.Raw, headerOf(sent[i])) || m.Size != int64(len(sent[i])) || m.TooLarge {
+			t.Errorf("message %d = size %d, too large %v, raw %q; want the header only", m.UID, m.Size, m.TooLarge, m.Raw)
+		}
+	}
+	again, err := s.ScanHeaders(ctx, FolderSent, b.Next)
+	if err != nil || again.Reset || len(again.Messages) != 0 || again.More || again.Next != b.Next {
+		t.Fatalf("rescan without new mail = %+v, %v; want an empty batch", again, err)
+	}
+	fourth := testMessage(4, 100)
+	fs.appendMessage(FolderSent, fourth)
+	next, err := s.ScanHeaders(ctx, FolderSent, b.Next)
+	if err != nil || next.Reset || !slices.Equal(uids(next), []uint32{4}) || !bytes.Equal(next.Messages[0].Raw, headerOf(fourth)) || next.Next.LastUID != 4 {
+		t.Fatalf("incremental batch = %+v, %v", next, err)
+	}
+
+	if st := fs.status(FolderSent); *st.NumUnseen != *st.NumMessages {
+		t.Errorf("Sent has %d unseen of %d messages; the client set \\Seen", *st.NumUnseen, *st.NumMessages)
+	}
+	want := "BODY.PEEK[HEADER]<0." + strconv.Itoa(maxHeaderSize+1) + ">"
+	items := headerItems(fs)
+	if len(items) != 4 {
+		t.Errorf("body items = %q, want 4 header fetches", items)
+	}
+	for _, item := range items {
+		if item != want {
+			t.Errorf("body item = %q, want %q", item, want)
+		}
+	}
+}
+
+// TestScanHeadersTooLarge 覆盖头部的大小上限：头部超过上限的邮件为 TooLarge、Raw 为 nil，头部恰为上限的照常返回；
+// 整封远大于正文上限而头部很小的邮件照常返回头部：ScanHeaders 不按整封的声明大小跳过取回。
+func TestScanHeadersTooLarge(t *testing.T) {
+	setVar(t, &maxHeaderSize, 1024)
+	setVar(t, &maxMessageSize, 1024)
+	fs := newFakeServer(t, proxyOptions{})
+	small := messageWithHeader(1, 200, 8192)
+	big := messageWithHeader(2, 2048, 100)
+	exact := messageWithHeader(3, 1024, 100)
+	for _, raw := range [][]byte{small, big, exact} {
+		fs.appendMessage(FolderSent, raw)
+	}
+	s := dial(t, fs, testTimeouts())
+	b, err := s.ScanHeaders(context.Background(), FolderSent, Cursor{})
+	if err != nil {
+		t.Fatalf("ScanHeaders: %v", err)
+	}
+	if len(b.Messages) != 3 || b.More || b.Next.LastUID != 3 {
+		t.Fatalf("batch = %+v", b)
+	}
+	if m := b.Messages[0]; m.TooLarge || !bytes.Equal(m.Raw, headerOf(small)) || m.Size != int64(len(small)) {
+		t.Errorf("message with a small header and a large body: too large %v, %d raw bytes, size %d", m.TooLarge, len(m.Raw), m.Size)
+	}
+	if m := b.Messages[1]; !m.TooLarge || m.Raw != nil || m.Size != int64(len(big)) {
+		t.Errorf("message with a large header: too large %v, %d raw bytes; want TooLarge and nil Raw", m.TooLarge, len(m.Raw))
+	}
+	if m := b.Messages[2]; len(headerOf(exact)) != 1024 || m.TooLarge || !bytes.Equal(m.Raw, headerOf(exact)) {
+		t.Errorf("message with a header of exactly maxHeaderSize: too large %v, %d raw bytes", m.TooLarge, len(m.Raw))
+	}
+	for _, item := range headerItems(fs) {
+		if item != "BODY.PEEK[HEADER]<0.1025>" {
+			t.Errorf("body item = %q, want BODY.PEEK[HEADER]<0.1025>", item)
+		}
+	}
+}
+
+// TestScanHeadersBatchBytes 覆盖头部补扫的正文合计上限：已取回的头部加下一封预计取回的字节数（声明大小与头部上限中较小者）
+// 超过上限时，与 Scan 一样提前结束并置 More；整封很大而头部上限较小时按头部上限预计，不因整封的大小把一批拆碎。
+func TestScanHeadersBatchBytes(t *testing.T) {
+	t.Run("declared size", func(t *testing.T) {
+		setVar(t, &maxBatchBytes, 2000)
+		fs := newFakeServer(t, proxyOptions{})
+		for i := 1; i <= 5; i++ {
+			fs.appendMessage(FolderSent, messageWithHeader(i, 800, 100)) // 头部 800 字节，整封 900 字节
+		}
+		s := dial(t, fs, testTimeouts())
+		cur := Cursor{}
+		var got [][]uint32
+		var more []bool
+		for range 3 {
+			b, err := s.ScanHeaders(context.Background(), FolderSent, cur)
+			if err != nil {
+				t.Fatalf("ScanHeaders: %v", err)
+			}
+			got = append(got, uids(b))
+			more = append(more, b.More)
+			cur = b.Next
+		}
+		want := [][]uint32{{1, 2}, {3, 4}, {5}}
+		if !slices.EqualFunc(got, want, slices.Equal) || !slices.Equal(more, []bool{true, true, false}) {
+			t.Errorf("batches = %v, more = %v; want %v, [true true false]", got, more, want)
+		}
+	})
+	t.Run("header limit", func(t *testing.T) {
+		setVar(t, &maxBatchBytes, 2000)
+		setVar(t, &maxHeaderSize, 512)
+		fs := newFakeServer(t, proxyOptions{})
+		for i := 1; i <= 5; i++ {
+			fs.appendMessage(FolderSent, testMessage(i, 4000))
+		}
+		s := dial(t, fs, testTimeouts())
+		b, err := s.ScanHeaders(context.Background(), FolderSent, Cursor{})
+		if err != nil {
+			t.Fatalf("ScanHeaders: %v", err)
+		}
+		if !slices.Equal(uids(b), []uint32{1, 2, 3, 4, 5}) || b.More {
+			t.Errorf("batch = %v, more %v; want all five headers in one batch", uids(b), b.More)
+		}
+	})
+}
+
 // TestScanBatchBytes 覆盖正文合计上限：已取回正文加下一封的大小超过上限时本批提前结束并置 More，下一批从未交付的第一封开始；
 // 恰好等于上限时仍在本批内。
 func TestScanBatchBytes(t *testing.T) {
@@ -844,7 +1112,7 @@ func TestCloseLogsOut(t *testing.T) {
 	if n := fs.count("LOGOUT"); n != 1 {
 		t.Errorf("client sent %d LOGOUT after closing twice, want 1", n)
 	}
-	if err := s.sleep(context.Background(), time.Millisecond); !errors.Is(err, ErrClosed) {
+	if err := s.sleep(context.Background(), time.Millisecond, nil); !errors.Is(err, ErrClosed) {
 		t.Errorf("sleep after Close = %v, want ErrClosed", err)
 	}
 }

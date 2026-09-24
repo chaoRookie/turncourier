@@ -1,4 +1,4 @@
-// Package imap 以只读方式从 IMAP 服务器收取新邮件：隐式 TLS 登录、EXAMINE、按 UID 补扫、BODY.PEEK 取信与 IDLE。
+// Package imap 以只读方式从 IMAP 服务器收取新邮件：隐式 TLS 登录、EXAMINE、按 UID 补扫、BODY.PEEK 取信（「已发送」只取头部）与 IDLE。
 // 每条命令都有期限，超时即关闭连接，以应对 QQ 对不支持命令只回无标签 BAD、以及半开连接时库永久阻塞的问题。
 // 本包不解析 MIME、不访问存储、不修改邮箱（不设 \Seen、不 MOVE、不 EXPUNGE、不 APPEND）。
 package imap
@@ -26,19 +26,25 @@ const (
 	FolderInbox = "INBOX"
 	// FolderJunk 是 QQ 的垃圾箱名称；以 LIST 结果判断是否存在，不存在时跳过。
 	FolderJunk = "Junk"
+	// FolderSent 是 QQ 的「已发送」名称（L1 第 1 步实测）；Watcher.Sent 为真时每轮最先以 ScanHeaders 补扫它。
+	FolderSent = "Sent Messages"
 	// MaxBatch 是一次补扫取回的最多邮件数。
 	MaxBatch = 50
 	// MaxMessageSize 是取回正文的默认上限；更大的邮件只返回 UID 与大小。实现读取包内变量 maxMessageSize，
 	// 其初值为本常量，测试可在包内降低它。
 	MaxMessageSize = 2 << 20
-	// MaxBatchBytes 是一批中已取回正文的合计上限；达到后本批提前结束并置 More，余下邮件留给下一批。
+	// MaxHeaderSize 是 ScanHeaders 每封取回头部的上限；头部更大的邮件只返回 UID 与大小。实现读取包内变量 maxHeaderSize，
+	// 其初值为本常量，测试可在包内降低它。
+	MaxHeaderSize = 64 << 10
+	// MaxBatchBytes 是一批中已取回正文（ScanHeaders 为头部）的合计上限；达到后本批提前结束并置 More，余下邮件留给下一批。
 	// 实现读取包内变量 maxBatchBytes，其初值为本常量，测试可在包内降低它。
 	MaxBatchBytes = 16 << 20
 )
 
-// maxMessageSize 与 maxBatchBytes 是实现实际使用的上限，初值为对应常量，测试可在包内降低。
+// maxMessageSize、maxHeaderSize 与 maxBatchBytes 是实现实际使用的上限，初值为对应常量，测试可在包内降低。
 var (
 	maxMessageSize = MaxMessageSize
+	maxHeaderSize  = MaxHeaderSize
 	maxBatchBytes  = MaxBatchBytes
 )
 
@@ -98,6 +104,8 @@ type Cursor struct {
 }
 
 // Message 是取回的一封邮件；超过 MaxMessageSize 时 Raw 为 nil、TooLarge 为 true。
+// ScanHeaders 取回的 Raw 只是头部（到结束头部的空行为止），头部超过 MaxHeaderSize 时 Raw 为 nil、TooLarge 为 true；
+// 两者的 Size 都是服务器声明的整封大小（RFC822.SIZE）。
 type Message struct {
 	UID      uint32
 	Size     int64
@@ -105,7 +113,8 @@ type Message struct {
 	TooLarge bool
 }
 
-// Batch 是一次补扫的结果。Reset 为 true 表示 UIDVALIDITY 与游标不同（或没有游标），本批从 UID 1 开始全量补扫。
+// Batch 是一次补扫的结果。Reset 为 true 表示 UIDVALIDITY 与游标不同（或没有游标），本批从 UID 1 开始全量补扫
+// （Watcher 按 SkipHistory 跳过历史时例外：批中没有邮件，Next 直接落在 UIDNEXT−1）。
 // Next 是本批全部处理完成后应持久化的游标；Messages 按 UID 升序。
 type Batch struct {
 	Folder      string
@@ -314,8 +323,9 @@ func (s *Session) shutdown() {
 	}
 }
 
-// sleep 等待 d；期间连接关闭返回 ErrClosed，ctx 结束返回 ctx 的错误。不发送任何命令。
-func (s *Session) sleep(ctx context.Context, d time.Duration) error {
+// sleep 等待 d；wake 收到信号时提前正常结束（wake 为 nil 时从不就绪），期间连接关闭返回 ErrClosed，ctx 结束返回 ctx 的错误。
+// 不发送任何命令。
+func (s *Session) sleep(ctx context.Context, d time.Duration, wake <-chan struct{}) error {
 	if s.closed {
 		return ErrClosed
 	}
@@ -323,6 +333,8 @@ func (s *Session) sleep(ctx context.Context, d time.Duration) error {
 	defer timer.Stop()
 	select {
 	case <-timer.C:
+		return nil
+	case <-wake:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -391,6 +403,27 @@ func (s *Session) Examine(ctx context.Context, folder string) (Mailbox, error) {
 // 合计不超过上限；每批至少交付一封，单封大于上限时也能前进。UID SEARCH 返回、但 FETCH 没有返回数据（或没有正文）的邮件
 // 已在两条命令之间被删除，跳过它，游标越过它。
 func (s *Session) Scan(ctx context.Context, folder string, cur Cursor) (Batch, error) {
+	return s.scan(ctx, folder, cur, scanOptions{})
+}
+
+// ScanHeaders 与 Scan 相同，但逐封只取头部：UID FETCH (BODY.PEEK[HEADER]<0.maxHeaderSize+1>)，字面量同样流式读取、
+// 至多读 maxHeaderSize+1 字节，超出即判为 TooLarge、Raw 为 nil。Raw 是头部（到结束头部的空行为止），Size 仍是整封声明的大小。
+// 头部的大小事先无从得知，所以不像 Scan 那样按声明大小跳过取回：整封很大的邮件也照常取回头部。正文合计上限照旧，
+// 取下一封之前按预计取回的字节数（声明大小与 maxHeaderSize 中较小者）检查。Watcher 用它补扫「已发送」：只需头部中的标识。
+func (s *Session) ScanHeaders(ctx context.Context, folder string, cur Cursor) (Batch, error) {
+	return s.scan(ctx, folder, cur, scanOptions{headers: true})
+}
+
+// scanOptions 是补扫的内部选项；零值即 Scan 的行为。
+type scanOptions struct {
+	headers bool // 只取头部（ScanHeaders）：BODY.PEEK[HEADER]，上限为 maxHeaderSize，不按整封的声明大小跳过取回
+	// skipHistory 非 nil 时，在 EXAMINE 返回且报告了 UIDNEXT 之后询问它；返回真即不取回任何已有邮件，只返回游标落在 UIDNEXT−1
+	// 的空批。没有报告 UIDNEXT 时不询问、照常补扫。只供 Watcher 在文件夹没有持久化游标时转交 SkipHistory，询问时机见其说明。
+	skipHistory func() bool
+}
+
+// scan 是 Scan、ScanHeaders 与 Watcher 跳过历史的共同实现，见 Scan 与 ScanHeaders 的说明。
+func (s *Session) scan(ctx context.Context, folder string, cur Cursor, opts scanOptions) (Batch, error) {
 	// 排空发生在 EXAMINE 之前：此后到达的 EXISTS 都会留下信号，新邮件要么被本次 UID SEARCH 覆盖，要么让下一次 Idle 立即返回。
 	select {
 	case <-s.exists:
@@ -404,6 +437,11 @@ func (s *Session) Scan(ctx context.Context, folder string, cur Cursor) (Batch, e
 	last := cur.LastUID
 	if cur.UIDValidity != box.UIDValidity {
 		b.Reset, last = true, 0
+	}
+	if opts.skipHistory != nil && box.UIDNext > 0 && opts.skipHistory() {
+		// 不补扫历史：UIDNEXT 之前的邮件一封也不取回，此后到达的邮件照常补扫。
+		b.Next = Cursor{UIDValidity: box.UIDValidity, LastUID: box.UIDNext - 1}
+		return b, nil
 	}
 	b.Next = Cursor{UIDValidity: box.UIDValidity, LastUID: last}
 	if last == math.MaxUint32 {
@@ -423,19 +461,24 @@ func (s *Session) Scan(ctx context.Context, folder string, cur Cursor) (Batch, e
 	if err != nil {
 		return Batch{}, err
 	}
+	section, limit := imap.PartSpecifierNone, int64(maxMessageSize)
+	if opts.headers {
+		section, limit = imap.PartSpecifierHeader, int64(maxHeaderSize)
+	}
 	var total int64
 	for _, uid := range uids {
 		size, ok := sizes[uid]
 		switch {
 		case !ok:
 			// 已被删除，跳过。
-		case size > int64(maxMessageSize):
+		case !opts.headers && size > limit:
 			b.Messages = append(b.Messages, Message{UID: uint32(uid), Size: size, TooLarge: true})
-		case len(b.Messages) > 0 && total+size > int64(maxBatchBytes):
+		case len(b.Messages) > 0 && total+min(size, limit) > int64(maxBatchBytes):
+			// 取整封时 size 不超过 limit，预计取回的就是 size；取头部时头部不会比整封大，超过 limit 的头部判为过大、不计入合计。
 			b.More = true
 			return b, nil
 		default:
-			raw, tooLarge, found, err := s.body(ctx, uid)
+			raw, tooLarge, found, err := s.fetchSection(ctx, uid, section, limit)
 			if err != nil {
 				return Batch{}, err
 			}
@@ -494,15 +537,16 @@ func (s *Session) sizes(ctx context.Context, uids []imap.UID) (map[imap.UID]int6
 	return sizes, nil
 }
 
-// body 执行 UID FETCH <uid> (BODY.PEEK[]<0.maxMessageSize+1>)，流式读取至多 maxMessageSize+1 字节：
-// 超出 maxMessageSize 时 tooLarge 为 true、raw 为 nil，其余部分由库读出丢弃。found 为 false 表示服务器没有返回正文。
-func (s *Session) body(ctx context.Context, uid imap.UID) (raw []byte, tooLarge, found bool, err error) {
-	limit := int64(maxMessageSize)
+// fetchSection 执行 UID FETCH <uid> (BODY.PEEK[<section>]<0.limit+1>)：section 为空时取整封（Scan，limit 为 maxMessageSize），
+// 为 HEADER 时只取头部（ScanHeaders，limit 为 maxHeaderSize）。字面量流式读取至多 limit+1 字节：超出 limit 时 tooLarge 为 true、
+// raw 为 nil，其余部分由库读出丢弃。found 为 false 表示服务器没有返回该数据项。正文与头部共用这一个函数与 readLiteral，
+// 对读取失败与字面量中途断开的处理因此对两者同样生效。
+func (s *Session) fetchSection(ctx context.Context, uid imap.UID, section imap.PartSpecifier, limit int64) (raw []byte, tooLarge, found bool, err error) {
 	var data []byte
 	var large, ok bool
 	err = s.do(ctx, "uid fetch", s.t.Fetch, func() error {
 		cmd := s.client.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
-			BodySection: []*imap.FetchItemBodySection{{Peek: true, Partial: &imap.SectionPartial{Offset: 0, Size: limit + 1}}},
+			BodySection: []*imap.FetchItemBodySection{{Specifier: section, Peek: true, Partial: &imap.SectionPartial{Offset: 0, Size: limit + 1}}},
 		})
 		for msg := cmd.Next(); msg != nil; msg = cmd.Next() {
 			for item := msg.Next(); item != nil; item = msg.Next() {
@@ -512,19 +556,10 @@ func (s *Session) body(ctx context.Context, uid imap.UID) (raw []byte, tooLarge,
 				}
 				ok = true
 				var err error
-				if data, err = io.ReadAll(io.LimitReader(section.Literal, limit+1)); err != nil {
-					// 读取失败说明连接已断开。此时不能再调用 Next：它会丢弃同一字面量而再次读取，与解码协程争用读缓冲。
-					// 连接断开后解码协程自行退出并结束本命令，不会因为没人取走数据而阻塞。
+				if data, large, err = readLiteral(section.Literal, limit); err != nil {
+					// 读取失败或字面量中途断开（见 readLiteral）都说明连接已断开。此时不能再调用 Next：它会丢弃同一字面量而再次读取，
+					// 与解码协程争用读缓冲。连接断开后解码协程自行退出并结束本命令，不会因为没人取走数据而阻塞。
 					return err
-				}
-				// 读到的字节少于字面量声明的长度（且未到上限），说明连接在字面量中途断开：服务器以 close_notify 正常关闭时，
-				// go-imap 的字面量读取器把 io.EOF 当作字面量结束，ReadAll 不报错，解码协程也已被放行、继续读同一个读缓冲。
-				// 这与读取失败是同一种情况，同样不能再调用 Next，只能按连接断开结束本命令。
-				if int64(len(data)) < min(section.Literal.Size(), limit+1) {
-					return io.ErrUnexpectedEOF
-				}
-				if int64(len(data)) > limit {
-					data, large = nil, true
 				}
 			}
 		}
@@ -536,12 +571,36 @@ func (s *Session) body(ctx context.Context, uid imap.UID) (raw []byte, tooLarge,
 	return data, large, ok, nil
 }
 
+// readLiteral 流式读取字面量 lit 至多 limit+1 字节：超出 limit 时 tooLarge 为 true、data 为 nil，其余部分留给库读出丢弃。
+// 读取失败时返回该错误。读到的字节少于字面量声明的长度（且未到 limit+1）时返回 io.ErrUnexpectedEOF：服务器以 close_notify
+// 正常关闭连接时，go-imap 的字面量读取器把 io.EOF 当作字面量结束，ReadAll 不报错，解码协程也已被放行、继续读同一个读缓冲；
+// 这与读取失败是同一种情况。比较的是 limit+1 而不是 limit：声明 limit+1 字节而只读到 limit 字节的字面量同样是残缺的。
+// 两种错误都要求调用方按连接断开结束本命令、不再调用 Next。
+func readLiteral(lit imap.LiteralReader, limit int64) (data []byte, tooLarge bool, err error) {
+	if data, err = io.ReadAll(io.LimitReader(lit, limit+1)); err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) < min(lit.Size(), limit+1) {
+		return nil, false, io.ErrUnexpectedEOF
+	}
+	if int64(len(data)) > limit {
+		return nil, true, nil
+	}
+	return data, false, nil
+}
+
 // Idle 若发现自上次 Scan 开始以来已收到 EXISTS（例如补扫的 UID FETCH 进行中新邮件到达；以 EXISTS 通道中是否有信号判断），
 // 不发送 IDLE，取走信号并立即返回 true。
 // 否则在已 EXAMINE 的文件夹上执行 IDLE，直到收到 EXISTS（返回 true）、达到 IdleMax（返回 false）或 ctx 结束；
 // 然后发出 DONE 并在 IdleStop 内等待完成，超时即关闭连接并返回 ErrTimeout。服务器未公告 IDLE 时返回 ErrCapability。
 // ctx 结束时不再发送 DONE，直接关闭连接并返回 ctx 的错误。
 func (s *Session) Idle(ctx context.Context) (newMail bool, err error) {
+	return s.idle(ctx, nil)
+}
+
+// idle 是 Idle 的实现，另外等待 wake（为 nil 时从不就绪）：IDLE 进行中 wake 收到信号时，与到达 IdleMax 一样发出 DONE，
+// 按正常结束返回 false。Watcher 以它实现 Wake；预先已在通道中的信号由调用方在调用之前处理。
+func (s *Session) idle(ctx context.Context, wake <-chan struct{}) (newMail bool, err error) {
 	if s.closed {
 		return false, ErrClosed
 	}
@@ -566,6 +625,7 @@ func (s *Session) Idle(ctx context.Context) (newMail bool, err error) {
 	case <-s.exists:
 		newMail = true
 	case <-timer.C:
+	case <-wake:
 	case <-ctx.Done():
 		s.shutdown()
 		return false, fmt.Errorf("imap: idle: %w", ctx.Err())
