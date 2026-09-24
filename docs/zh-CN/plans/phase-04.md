@@ -2686,7 +2686,7 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 4. **`%w` 也先于 `Format` 处理（质量审查，次要）。** `fmt.Errorf(f, tag)` 这类对非 error 操作数使用 `%w` 的调用，fmt 在调用 `Format` 之前按错误动词处理，标签值与指针都按原始字段打印，足以还原令牌；格式串为常量时 vet 的 printf 检查会拦下。类型本身无法拦截，因此写进 `Tag` 的已知局限与 `Tag.Format`、`Token.Format` 的注释（契约原文只写了「`%T`、`%p` 之外」）。
 5. **细节：** 金丝雀的动词表只是抽样，「`Format` 对 `%U` 或 `%c` 输出明文」存活，现逐一检查 `%T`、`%p`、`%w` 之外的全部字母动词；解析得到的任务 ID 是主题的子串、与整条主题共用底层内存，改为 `strings.Clone`，新增 `TestParseSubjectCopiesTaskID`（先失败）；`tagHolder` 的注释误称 slog 的 JSON 处理器会调用标签的方法，已更正；实现子代理的提交说明把文法表写成 57 行、称变异全部被拦下，实际为 56 行、另有上面第 3 条的存活变异，以本节为准。development.md 补上 `imports_test.go`、`reveal_test.go` 与 `FuzzParseSubject`，architecture.md 的 `tests/docs` 一行补上 `imports_test.go` 与守卫的扫描范围。
 
-**独立复查（Task 1 与 IMAP 修复，2026-09-24）：** 一名子代理复查 `5215fb5`（见 Task 6 之下「开工前修复的 4a 缺陷」）与 `1a2b17a`：修复都成立，没有「主要」与「次要」问题。它以 20 次独立进程的 `-race` 运行核实 IMAP 修复：去掉新检查时 `TestScanBodyLiteralCutShort` 20 次都报告竞争，带修复 0 次；原先出问题的 `body_literal_stalls_halfway` 在 4 个并行进程各跑 30 次的负载下，无修复时 4 个进程都报告竞争，有修复时 0 个。余下 7 条细节的处理：
+**独立复查（Task 1 与 IMAP 修复，2026-09-24）：** 一名子代理复查 `5215fb5`（见 Task 6 之下「开工前修复的 4a 缺陷」）与 `1a2b17a`：修复都成立，没有「主要」与「次要」问题。它以 20 次独立进程的 `-race` 运行核实 IMAP 修复：去掉新检查时 `TestScanBodyLiteralCutShort` 20 次都报告竞争，带修复 0 次（Task 6 实施时的复测只有 2/20，这个端到端用例并不稳定，见 Task 6 之下的更正）；原先出问题的 `body_literal_stalls_halfway` 在 4 个并行进程各跑 30 次的负载下，无修复时 4 个进程都报告竞争，有修复时 0 个。余下 7 条细节的处理：
 
 1. CHANGELOG 把文法写成「已冻结」，改为「按 D4 规定，待 L1b 用真实客户端复核后冻结」。
 2. 新检查中的 `limit+1` 没有用例钉住（改成 `limit` 的变异存活），与假服务器两处没跟上 `faultCloseAfter` 的注释一起并入 Task 6：它正在改这两个文件，给 `faultWholeBody` 加「只发前 N 字节后关闭」的选项即可构造这个边界。
@@ -2876,12 +2876,28 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 
 **测试（先写并确认失败，用 4a 的假服务器）：** `ScanHeaders` 只返回头部且不设 `\Seen`；Watcher 的补扫顺序（命令记录中「已发送」的 EXAMINE 在 INBOX 之前）；`Sent` 为假时不访问它；LIST 中没有「已发送」时每轮都发出 `folder_unavailable`、不调用 `Scanned`；「已发送」连续失败多次也不降级、不影响 INBOX；`Wake` 使 IDLE 以 DONE 结束且不重连、使 `Poll` 等待提前结束；`Scanned` 只在成功完成时调用、时刻是本轮开始的时刻；`SkipHistory` 为真时不取回任何历史邮件、游标落在 UIDNEXT−1，为假或已有游标时照常；`Scanned` 的时刻取自注入的 `Now`；`Handle` 返回 `ErrDefer` 时不发 `handle_failed`、不退避、游标停在 `Handle` 持久化的位置，下一轮重新交付被延后的邮件；原有测试全部照旧通过。
 
-- [ ] **Step 1：** 扩展假服务器（`BODY.PEEK[HEADER]` 的命令记录），写失败的测试。
-- [ ] **Step 2：** 实现。
-- [ ] **Step 3：** `make check` 通过（`internal/mail/imap` 覆盖率不低于 96%：`make test` 的 `-race -covermode=atomic` 下当前为 97% 左右，普通 `go test -cover` 略低）；变异测试：「已发送」排到 INBOX 之后、「已发送」照 Junk 降级、`ErrDefer` 当普通错误处理、`Wake` 不结束 IDLE、`Scanned` 在失败时也调用，都应被拦下。
-- [ ] **Step 4：** `git commit -m "feat(imap): scan Sent headers first, wake on demand, defer batches and skip history"`
+- [x] **Step 1：** 扩展假服务器（`BODY.PEEK[HEADER]` 的命令记录），写失败的测试。
+- [x] **Step 2：** 实现。
+- [x] **Step 3：** `make check` 通过（`internal/mail/imap` 覆盖率不低于 96%：`make test` 的 `-race -covermode=atomic` 下当前为 97% 左右，普通 `go test -cover` 略低）；变异测试：「已发送」排到 INBOX 之后、「已发送」照 Junk 降级、`ErrDefer` 当普通错误处理、`Wake` 不结束 IDLE、`Scanned` 在失败时也调用，都应被拦下。
+- [x] **Step 4：** `git commit -m "feat(imap): scan Sent headers first, wake on demand, defer batches and skip history"`
 
-**开工前修复的 4a 缺陷（2026-09-24）：** 验证 Task 1 时，`make check` 在机器负载较高时于 `TestCommandDeadlines/body_literal_stalls_halfway` 报告数据竞争。根因在 `Session.body`：服务器在正文字面量中途以 close_notify 正常关闭连接时，go-imap 的字面量读取器把 `io.EOF` 当作字面量结束，`io.ReadAll` 带着不完整的正文「成功」返回，解码协程也被放行；随后的 `msg.Next()` 丢弃剩余字面量时再次读取同一个读缓冲，与解码协程争用。4a 的注释只防住了「读取失败」这一条路径。修法：读到的字节少于字面量声明的长度（且未到上限）时，与读取失败同样处理，按连接断开结束本命令、不再调用 `Next`。假服务器新增故障 `faultCloseAfter`（转发 N 字节后以 close_notify 关闭），新用例 `TestScanBodyLiteralCutShort` 在修复前于 `-race` 下稳定报告竞争，修复后通过。本任务新增的 `ScanHeaders` 读取头部字面量时须沿用同一条检查。
+**开工前修复的 4a 缺陷（2026-09-24）：** 验证 Task 1 时，`make check` 在机器负载较高时于 `TestCommandDeadlines/body_literal_stalls_halfway` 报告数据竞争。根因在 `Session.body`：服务器在正文字面量中途以 close_notify 正常关闭连接时，go-imap 的字面量读取器把 `io.EOF` 当作字面量结束，`io.ReadAll` 带着不完整的正文「成功」返回，解码协程也被放行；随后的 `msg.Next()` 丢弃剩余字面量时再次读取同一个读缓冲，与解码协程争用。4a 的注释只防住了「读取失败」这一条路径。修法：读到的字节少于字面量声明的长度（且未到上限）时，与读取失败同样处理，按连接断开结束本命令、不再调用 `Next`。假服务器新增故障 `faultCloseAfter`（转发 N 字节后以 close_notify 关闭），新用例 `TestScanBodyLiteralCutShort` 在修复前于 `-race` 下报告竞争（Task 1 的独立复查当时连续 20 次独立运行都报告），修复后通过。本任务新增的 `ScanHeaders` 读取头部字面量时须沿用同一条检查。**更正（Task 6 实施时）：** 这个端到端用例能否看到竞争取决于调度与机器负载，并不稳定：Task 6 的实现子代理在同一台机器上去掉该检查后重跑，20 次中只有 2 次报告竞争，不带 `-race` 时 0 次（功能结果完全相同）。提交 `5215fb5` 说明中「每次都报告」的说法因此不成立（已推送的提交说明不改写，以此处为准）。Task 6 把这条检查提取为纯函数 `readLiteral`，由 `TestReadLiteral` 确定地钉住边界，端到端用例保留作辅证（见下方实施说明第 8 条）。
+
+**实施说明（2026-09-24）：** 由独立子代理按上述契约实现（提交 `5003bd9`，由 worktree 中的 `c002eab` 拣选而来）。先扩展假服务器（「已发送」文件夹、LIST 中不列出它的 `noSent`、EXAMINE 不报告 UIDNEXT 的 `noUIDNext`、`faultWholeBody` 只发出字面量前若干字节即关闭两侧连接的 `cut`，UIDFETCH 数据项白名单加入 `BODY.PEEK[HEADER]<0.N>`，取头部时响应的节与请求一致）并写测试，失败基线为编译失败：`FolderSent`、`ScanHeaders`、`maxHeaderSize` 未定义；`TestReadLiteral` 以 `undefined: readLiteral` 失败；`TestWatcherSkipHistoryAsksAfterExamine` 与 `TestWatcherSkipHistory` 的「UIDNEXT missing」子用例在当时「EXAMINE 之前询问」的实现上失败。
+
+- **新增用例：** `TestScanHeadersReturnsHeadersReadOnly`、`TestScanHeadersTooLarge`、`TestScanHeadersBatchBytes`（2 例）、`TestScanHeadersLiteralCutShort`、`TestScanLiteralCutAtLimit`（`Scan` 与 `ScanHeaders`，各重复 25 轮）、`TestReadLiteral`（9 例）、`TestWatcherScansSentFirst`、`TestWatcherLeavesSentAloneByDefault`、`TestWatcherSentMissingFromList`、`TestWatcherSentFailuresNeverDegrade`（带标签 BAD、`NO [UNAVAILABLE]`、无标签 BAD、`Handle` 一直失败）、`TestWatcherWakeEndsIdle`、`TestWatcherWakeEndsPoll`、`TestWatcherKeepsWakeFromScan`、`TestWatcherKeepsWakeDuringHandleBackoff`、`TestWatcherScanned`（3 例）、`TestWatcherSkipHistory`（4 例）、`TestWatcherSkipHistoryAsksAfterExamine`、`TestWatcherDefer`（INBOX、Junk、「已发送」）。原有测试只有 `TestCloseLogsOut` 随内部 `sleep` 的签名多传一个 `nil`；头部取回用的 `FetchItemBodySection` 字面量本身带 `Peek: true`，`source_test.go` 的白名单不需要扩展。
+- **变异测试：** 契约点名的 5 个（「已发送」排到 INBOX 之后、照 Junk 降级、`ErrDefer` 当普通错误处理、`Wake` 不结束 IDLE、`Scanned` 在失败时也调用）与另外 41 个全部被杀死。另外 41 个涉及：`Scanned` 的调用条件与开始时刻（取结束时刻、取 `time.Now`、取重试的开始、每批都调用）；「已发送」的失败处理（`resumeInbox` 不置或不清、连接层失败不报、失败时拆连接、LIST 中缺失时仍 EXAMINE 或不报、本地失败无限重试或只试一次、取整封）；`ErrDefer`（用 `==` 比较、把错误交给调用方、调用 `Scanned`）；`Wake`（等待前不检查已有信号、`Poll` 不响应、处理失败的退避被打断、`woken` 恒真、不发 DONE）；`SkipHistory`（不看 UIDNEXT、已有游标也跳过、游标差一、不置 `Reset`、在 EXAMINE 之前询问）；头部取回（取整封、按整封大小判过大、上限误用 `maxMessageSize`、合计上限的两种错误预计、部分取回长度改为上限）；`readLiteral` 的 4 个（`limit+1` 改为 `limit`、去掉短读检查、过大时仍返回已读字节、忽略读取错误）。每次恢复后 SHA-256 与原文件相同。
+- **按字面解释或补充的地方：**
+  1. `MaxHeaderSize`（64 KiB）导出，仿 `MaxMessageSize` 另有包内变量供测试调小。头部大小事先未知，不按整封的声明大小跳过取回；取下一封之前的合计上限检查按 `min(声明大小, maxHeaderSize)` 预计（生产中 50 × 64 KiB 远小于 16 MiB，这条检查实际不会触发）。`TooLarge` 的邮件 `Size` 仍是整封的 RFC822.SIZE。
+  2. 「已发送」的连接层失败（超时、断开）同样算失败、发出 `folder_unavailable`，与 Junk 对 `ErrClosed` 的例外不同：对 D6 而言任何失败的一轮都拿不到证据，必须计入 `sent_unavailable`。失败且连接已被关闭时，重连后的那一轮跳过「已发送」、从 INBOX 继续（`resumeInbox`），否则「已发送」持续超时会使 INBOX 永远轮不到补扫，做不到契约的「不影响 INBOX」。
+  3. 「已发送」的本地失败（`Handle` 返回错误）每轮至多重试 3 次（`sentFailLimit`），从不降级。
+  4. Junk 返回 `ErrDefer` 不算失败，Junk 的失败计数清零（说明它可以访问）；`ErrDefer` 不复位本地重试的退避，不发任何状态。
+  5. `Wake` 只在等待时读取。等待前已有的信号：取走、不发 IDLE，也不算 IDLE 正常结束（与 4a 审查后修正②对 EXISTS 的处理一致）；IDLE 中收到信号：发 DONE，按正常结束复位重连退避；退避与重连等待期间到达的信号留在通道里（重连之后多补扫一轮，无害）。
+  6. `Scanned` 对每个文件夹都调用；开始时刻取该文件夹本轮第一次读游标之前，同一连接内重试过也取第一次尝试之前；`Scanned` 为 nil 时不调用 `Now`；跳过历史的那一轮也调用（按字面）。
+  7. `SkipHistory` 在 EXAMINE 返回之后才询问（按契约目的补充）：通知恰在 EXAMINE 途中发出时，其副本计入 UIDNEXT、被新游标越过，若在 EXAMINE 之前询问、得到「库中没有通知」，这条通知就永远拿不到实际投递 ID。已有游标或服务器没有报告 UIDNEXT 时不询问。跳过历史的批 `Reset` 为真、没有邮件、`More` 为假。Task 13 的 `SkipHistory` 因此必须在每次调用时实时查询 `HasNotifications`，不能在启动时缓存结果（已写入 Task 13 的契约）。
+  8. `5215fb5` 的「短读即按连接断开、不再调用 `Next`」检查提取为纯函数 `readLiteral`，正文与头部共用 `fetchSection`，头部因此同样受它约束。实测端到端的截断只有 `-race` 偶尔能看出：单次场景 `-race -count=10` 的 20 次子用例中 3 次报告竞争、每个子用例重复 25 轮时 20 次中 8 次、原有的 `TestScanBodyLiteralCutShort` 20 次中 2 次、头部版 0 次，不带 `-race` 都是 0 次；因此以 `TestReadLiteral` 确定地钉住边界（`limit+1` 改为 `limit` 的变异不带 `-race` 也确定失败），端到端用例保留作辅证。
+- **既有问题（未改）：** 补扫 Junk 期间到达 INBOX 的新邮件，重新 EXAMINE INBOX 时服务器报告的 EXISTS 被 SelectData 吸收、不留下信号，要等到 `IdleMax` 或 `Wake` 才补扫；「已发送」排在 INBOX 之前没有带来新的这类窗口。
+- **验证：** `make check`（`internal/mail/imap` 的 `-race -covermode=atomic` 覆盖率 98.1%，总覆盖率 93.59%）、`go test -race -count=2 ./internal/mail/imap/`、`CGO_ENABLED=0 go test ./internal/mail/imap/`、`make secrets`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...` 通过，无不可见字符；拣选到集成分支后 `make check`（总覆盖率 94.26%）与 `make secrets` 再次通过。未运行：govulncheck（云端网络策略拒绝 vuln.go.dev）。
 
 ### Task 7：QQ 行为模拟器（`tests/qqsim`）
 
@@ -3051,7 +3067,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 **契约：**
 
 - `New(Options) (*App, error)`：`Options` 含配置、Keychain、Agent、事件回调，以及只供测试注入的时钟、随机源、根证书池、SMTP 与 IMAP 期限、退避参数。`(*App) StartTask` 与 `(*App) TaskEvent` 转交 Task 12 的 `taskEvents`。
-- `(*App) Run(ctx) error`：按顺序 ① 取得单实例锁；② 以无正文密钥打开存储读取实例 ID（没有则提示先运行 `init`），`LoadSecrets` 核对密钥，关闭后以正文密钥重新打开；③ `RecoverInFlight` 与 `RecoverSendingNotifications`，结果作为事件发出；④ 启动 Watcher（`Sent: true`，容量为 1 的唤醒通道，`Scanned` 接 Task 10，`SkipHistory` 在 `HasNotifications` 为假时返回真，`Now` 取 App 的时钟）、发送循环、派发循环与每天一次的 `PruneRejections(now − 30 天)`（返回值等于单次上限 10000 时继续调用，直到不足 10000）；⑤ ctx 结束后依次停止各循环、关闭存储、释放锁。①–③ 任一失败即返回错误，不启动任何循环；某个循环以错误结束（例如 Task 11 的状态写入失败）时停止其余循环并返回该错误。
+- `(*App) Run(ctx) error`：按顺序 ① 取得单实例锁；② 以无正文密钥打开存储读取实例 ID（没有则提示先运行 `init`），`LoadSecrets` 核对密钥，关闭后以正文密钥重新打开；③ `RecoverInFlight` 与 `RecoverSendingNotifications`，结果作为事件发出；④ 启动 Watcher（`Sent: true`，容量为 1 的唤醒通道，`Scanned` 接 Task 10，`SkipHistory` 在 `HasNotifications` 为假时返回真——每次调用时实时查询、不在启动时缓存（Watcher 在 EXAMINE 返回之后才询问，缓存会重新打开 Task 6 实施说明第 7 条关闭的竞争），查询失败时返回假、照常补扫，`Now` 取 App 的时钟）、发送循环、派发循环与每天一次的 `PruneRejections(now − 30 天)`（返回值等于单次上限 10000 时继续调用，直到不足 10000）；⑤ ctx 结束后依次停止各循环、关闭存储、释放锁。①–③ 任一失败即返回错误，不启动任何循环；某个循环以错误结束（例如 Task 11 的状态写入失败）时停止其余循环并返回该错误。
 - `Event{Kind, TaskID, NotificationID, ReplySeq, Reason, Folder, Count, Delay}`，`Kind` 为本节各任务列出的事件名与 Watcher 的状态名（`credentials_unavailable` 报告为 `keychain_unavailable`，与「4b 与 4a 的衔接」一致；熔断引起的除外，见 Task 11）。被拒来信的事件按原因码聚合，每分钟至多一次、带计数。事件回调不得阻塞。
 
 **测试（先写并确认失败）：** 启动顺序（锁被占用、实例不存在、密钥不符、Keychain 不可用时都不启动循环，也不改动数据库）；启动时存在 DISPATCHING 回复与 SENDING 通知时转为 UNCERTAIN 并发出事件；`Run` 在 ctx 结束后按序退出、锁被释放；一个循环以错误结束时 `Run` 返回该错误；拒绝事件的聚合与清理；**装配后的金丝雀测试**：用模拟器跑一轮完整的收发，主题、令牌、正文与地址都取金丝雀值，断言全部事件与错误文本中都不出现它们（4a「风险与后续」对未导出字段打印原始字节的担忧，由这一条在实际路径上覆盖）。
