@@ -1,8 +1,8 @@
 //go:build live
 
-// Package live_test 的 L1 探测项：记录 IMAP 能力与文件夹、发出合成通知并找回各来源的实际投递 ID、
+// Package live_test 的 L1 探测项：记录 IMAP 能力与文件夹、发出主题标签携带一次性令牌的合成通知并找回各来源的实际投递 ID、
 // 收取并脱敏各客户端的回复，以及分三个独立会话观测 IDLE 的推送与断开。
-// 每封邮件发出前都经 /dev/tty 逐封确认；对机器人邮箱只做只读访问，样本中只有结构特征。
+// 每封邮件发出前都经 /dev/tty 逐封确认，确认文本只显示主题标签之后的文字；对机器人邮箱只做只读访问，样本中只有结构特征。
 package live_test
 
 import (
@@ -143,9 +143,10 @@ func TestL1Capabilities(t *testing.T) {
 	record(t, "capabilities", data)
 }
 
-// TestL1SendNotification 发出 TURNCOURIER_LIVE_SEND_COUNT（默认 1，至多 5）封合成通知给配置中的接收地址，
-// 每封发出前逐项确认；发出后在 60 秒内以只读方式查找「已发送」与（设置 TURNCOURIER_LIVE_CC_BOT=1 时）抄送副本，
-// 把各来源的 ID 与一次性令牌写入 state.json，DATA 的 250 响应脱敏后写入样本。
+// TestL1SendNotification 发出 TURNCOURIER_LIVE_SEND_COUNT（默认 1，至多 5）封合成通知给配置中的接收地址：
+// 主题为 D4 的新形态标签 [TC <任务 ID> <令牌>] 加标题，页脚照旧保留一份令牌。每封发出前逐项确认，确认文本只显示标签之后的文字；
+// 发出后在 60 秒内以只读方式查找「已发送」与（设置 TURNCOURIER_LIVE_CC_BOT=1 时）抄送副本，
+// 把各来源的 ID 与一次性令牌写入 state.json（SubjectToken 记为 true），DATA 的 250 响应脱敏后写入样本。
 func TestL1SendNotification(t *testing.T) {
 	count := intEnv(t, sendCountEnv, 1, 1, 5)
 	ccBot := os.Getenv(ccBotEnv) == "1"
@@ -156,8 +157,9 @@ func TestL1SendNotification(t *testing.T) {
 	}
 }
 
-// sendOne 发出第 index 封合成通知并记录结果：先逐项确认，再记下发信前两个文件夹的游标，发送后查找副本。
-// 结果不确定（ErrUncertain）时同样不重发，只记录状态。
+// sendOne 发出第 index 封合成通知并记录结果：先逐项确认（文本由 live.SendPrompt 渲染，不含主题标签，令牌不进入 /dev/tty），
+// 再记下发信前两个文件夹的游标，发送后查找副本。结果不确定（ErrUncertain）时同样不重发，只记录状态。
+// 令牌文本同时写入主题标签与页脚：主题标签是 D4 中唯一的验证输入，页脚只是给人看的副本。
 func sendOne(t *testing.T, state *live.State, key *token.Key, index, total int, ccBot bool) {
 	t.Helper()
 	ctx, cancel := probeTimeout(10 * time.Minute)
@@ -177,9 +179,11 @@ func sendOne(t *testing.T, state *live.State, key *token.Key, index, total int, 
 		t.Fatalf("签发合成令牌失败：%v", err)
 	}
 	mail.Token = issued.Reveal()
-	subject := fmt.Sprintf("[TC %s] TurnCourier L1 探测 %d/%d", mail.TaskID, index, total)
+	mail.SubjectToken = true
+	// 标题与 4b 通知的长度相近：B 编码后被拆成多个 encoded-word，L1b 复核因此也覆盖标题部分的折行。
+	title := fmt.Sprintf("TurnCourier L1b 探测 %d/%d：新主题格式复核，请用不同客户端直接回复本邮件", index, total)
 	notification := live.Notification{
-		From: bot, To: recipient, Subject: subject,
+		From: bot, To: recipient, Tag: live.SubjectTag(mail.TaskID, mail.Token), Title: title,
 		MessageID: mail.MessageID, ProbeID: mail.ProbeID, Token: mail.Token, Date: time.Now(),
 	}
 	recipients := []string{recipient}
@@ -191,8 +195,7 @@ func sendOne(t *testing.T, state *live.State, key *token.Key, index, total int, 
 	if err != nil {
 		t.Fatalf("渲染通知失败：%v", err)
 	}
-	if !confirm(t, fmt.Sprintf("将用 %s 向 %s 发送第 %d/%d 封合成探测邮件，主题「%s」，抄送机器人自己：%v。",
-		bot, recipient, index, total, subject, ccBot)) {
+	if !confirm(t, live.SendPrompt(bot, recipient, index, total, title, ccBot)) {
 		record(t, "send", sendRecord{Index: index, Total: total, Status: "skipped"})
 		t.Logf("第 %d 封已跳过", index)
 		return
@@ -537,12 +540,14 @@ func idleMeasure(t *testing.T, minutes int, selfSend bool) measureRecord {
 }
 
 // prepareSelfSend 在开始测量之前渲染自发邮件并逐封确认；确认被拒绝时返回的记录状态为 skipped，邮件为 nil。
+// 自发邮件只用于测量推送延迟，不写入 state.json，因此用旧形态标签 [TC <任务 ID>]、不带令牌。
 func prepareSelfSend(t *testing.T) ([]byte, *selfSendRecord) {
 	t.Helper()
 	bot := input.cfg.Mailbox.Address
 	message, err := live.ComposeNotification(live.Notification{
 		From: bot, To: bot,
-		Subject:   fmt.Sprintf("[TC %s] TurnCourier L1 IDLE 探测", randomID(t, 10)),
+		Tag:       live.SubjectTag(randomID(t, 10), ""),
+		Title:     "TurnCourier L1 IDLE 探测",
 		MessageID: "<tc." + randomID(t, 24) + "@" + domainOf(bot) + ">",
 		ProbeID:   randomID(t, 16),
 		Date:      time.Now(),

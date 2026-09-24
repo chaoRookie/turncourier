@@ -2359,13 +2359,14 @@ L1 余下的真机工作合为一轮，称为 L1b。它只有一项是 4b 的门
      3. `intact`：某封邮件的期望标签按字节原样出现在主题中。
      4. `case_changed`：按 ASCII 不区分大小写能找到某个期望标签。
      5. `whitespace_changed`：主题与期望标签都删去全部空白（`unicode.IsSpace`，含全角空格）后，按 ASCII 不区分大小写能找到——对应折行插入、替换或删除了标签内的空白。
-     6. `truncated`：在删去空白、转小写后的主题中，从某个 `[tc` 起的剩余部分与某个期望标签（同样处理）的公共前缀至少覆盖 `[tc` 加完整的任务 ID（14 个字符）、短于整个期望标签，且公共前缀之后是主题末尾，或是字母表与 `]` 之外的字符（例如省略号）。
+     6. `truncated`：在删去空白、转小写后的主题中，从某个 `[tc` 起的剩余部分与某个期望标签（同样处理）的公共前缀至少覆盖 `[tc` 加完整的任务 ID（删去空白后二者相连，共 13 个字节）、短于整个期望标签，且公共前缀之后是主题末尾，或是字母表与 `]` 之外的字符（例如省略号）。
      7. `other`：其余情况（有 `[TC`，但与任何期望标签都对不上）。
    - `tag_intact` 当且仅当 `tag_state` 为 `intact`。
 4. **自动回复前缀。** `prefix` 的白名单改为按 ASCII 不区分大小写匹配（输出来信中的原文，至多 20 个字符），条目为 `回复：`、`回复:`、`答复：`、`答复:`、`转发：`、`转发:`、`Re:`、`Fwd:`、`FW:`，再加自动回复前缀 `自动回复：`、`自动回复:`、`自動回覆：`、`自動回覆:`、`Auto-Reply:`、`AutoReply:`、`AutomaticReply:`（前缀先删去空白再比较，`Automatic reply:` 因此对应最后一项）。这样假期自动回复的冒号是全角还是半角会直接出现在样本里，不必再回头看原始头部。`classifyKind` 增加与产品规则相同的一条：解码后的主题删去空白、转小写后以上述任一自动回复前缀开头，即记为 `auto`；`Auto` 增加 `subject_prefix`（布尔）记录这一信号。第一轮的假期自动回复只有 `text/html`，原有的「正文以 QQ 自动回复的固定开头起始」只查纯文本，对它不起作用，这一条补上了探测工具自己的漏判。
 5. **`Return-Path`。** 样本增加 `return_path`：`count`（`Return-Path` 头的个数）、`empty`（第一个取值是否为 `<>`）、`role`（第一个地址的角色，规则同 `from_role`；没有该头或为空信封时为空串，无法解析时为 `other`）、`matches_from`（规范化后与 `From` 地址相同）、`same_domain_as_from`（域名相同，不区分大小写）。仍然只输出角色与布尔值，不输出地址。原有的 `auto.return_path_empty` 保留。
-6. **逐封确认不回显标签。** 新增纯函数 `SendPrompt(bot, recipient string, index, total int, title string, ccBot bool) string` 渲染逐封确认的文本，签名里没有标签参数，含令牌的标签因此无从进入 `/dev/tty`；文案注明「主题标签含一次性令牌，不回显」。`sendOne` 改用它。
-7. **样本格式升为 `turncourier-l1/4`。**
+6. **标题长度与 4b 通知相近。** `sendOne` 的标题约 40 个字符、含中文（「TurnCourier L1b 探测 k/n：新主题格式复核，请用不同客户端直接回复本邮件」），B 编码后被拆成多个 encoded-word，复核因此覆盖 4b 通知（标题至多 60 个字符）会遇到的折行，而不只是一个短标题。
+7. **逐封确认不回显标签。** 新增纯函数 `SendPrompt(bot, recipient string, index, total int, title string, ccBot bool) string` 渲染逐封确认的文本，签名里没有标签参数，含令牌的标签因此无从进入 `/dev/tty`；文案注明「主题标签含一次性令牌，不回显」。`sendOne` 改用它。
+8. **样本格式升为 `turncourier-l1/4`。**
 
 **离线测试（`sample_test.go`，先写并确认失败）：**
 
@@ -2377,6 +2378,37 @@ L1 余下的真机工作合为一轮，称为 L1b。它只有一项是 4b 的门
 - 变异测试：逐条删去 `tag_state` 的判定分支、把严格文法改为不区分大小写、去掉 `classifyKind` 的主题前缀规则、`matches_from` 改为区分大小写，都应被上述用例拦下。
 
 **验证：** `go test -count=1 ./tests/live/`、`make check`、`make secrets`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...`；`go vet -tags live ./tests/live/` 与 `staticcheck -tags live ./tests/live/`（均含在 `make check` 中）。修改期间不运行任何真机探测。
+
+**实施说明（2026-09-24）：** 由独立子代理按上述契约实现。先写离线测试，失败基线为编译失败：`SubjectTag`、`SendPrompt`、`ErrInvalidTag`、`ReturnPath`、`Mail.SubjectToken`、`Subject.TagState` 与 `TagCount`、`Auto.SubjectPrefix`、`Notification.Tag` 与 `Title` 都未定义。
+
+- **新增用例：**
+  - `TestSubjectTag`；
+  - `TestComposeNotificationSubjects`：长标题拆成多个 encoded-word、纯 ASCII 标题、空标题、旧形态标签；
+  - `TestComposeNotificationRejectsBadTag`：9 种形状；
+  - `TestSendPrompt`；
+  - `TestAnalyzeTagStates`：23 例，七种状态都有，`tag_count` 取 0、1、2 的都有；
+  - `TestAnalyzeAutoReplySubject`：7 例；
+  - `TestAnalyzeReturnPath`：9 例。
+
+  测试中的主题用标准库（`net/mail` 与 `mime.WordDecoder`）独立解码，不经过被测代码所用的 go-message。
+- **变异测试：** 契约列出的 10 个变异与另外 18 个全部被杀死。另外 18 个涉及：前缀与大小写（白名单区分大小写、用 `strings.ToLower` 代替只折叠 ASCII——被开尔文符号的用例拦下、自动回复前缀改为在任意位置匹配）；截断规则（下限改为 14、公共前缀之后是字母表字符或 `]` 也算截断）；期望标签（忽略 `SubjectToken`、只比较第一封邮件、不跳过没有任务 ID 的记录）；其他判定（`missing` 区分大小写、为前缀查找 `[TC` 时区分大小写、域名比较区分大小写、只删去 ASCII 空格、`return_path` 忽略空信封）；主题渲染（不校验标签、标题不做 B 编码、整个主题交给 `SetSubject`）。「对已编码的主题调用 `SetSubject`」是等价变异：该主题是纯 ASCII，`SetSubject` 不改动它；改用真正的旧行为（把原始标题交给 `SetSubject`）后被杀死。
+- **按字面解释或补充的地方：**
+  1. 截断的下限按删去空白后的形式计为 13 个字节（`[tc` 加 10 位任务 ID）。契约初稿误写为 14，已更正。
+  2. 标签形状不对时返回新导出的哨兵错误 `ErrInvalidTag`，文本固定。
+  3. 没有任务 ID 的记录不产生期望标签，`[TC ]` 这样的残片不会因它被判为完整。
+  4. `missing` 在未删去空白的解码主题上判定，`[ TC …` 因此记为 `missing`。
+  5. `Return-Path` 存在但取值为空白时，`role` 为 `other`，`empty` 为 false。
+  6. 另把 `sendOne` 的标题加长到约 40 个字符（第 6 项）。
+- **读 L1b 样本时注意：** 引用原文的回复（例如 QQ 邮箱 App）在引用头块的「主题:」行里也带着令牌，所以 `plain.tokens` 与 `html.tokens` 预计为 2。`token_line_prefix` 描述的是先出现的那一行，也就是主题行，会记为 `other`，不再对应页脚的令牌行。这不影响 4b，因为正文中的令牌永不回读。
+- **验证：** 以下均通过：
+  - `go test -count=1 ./tests/live/`，不带标签部分覆盖率 92.2%；
+  - `make check`，总覆盖率 93.36%；
+  - `make secrets`；
+  - `GOOS=linux go vet ./...` 与 `GOOS=windows go vet ./...`；
+  - `go vet -tags live ./tests/live/`；
+  - `env -u TURNCOURIER_LIVE go test -count=1 -tags live -v ./tests/live/`：输出「跳过」并通过。
+
+  没有运行任何真机探测。
 
 ### 规程（维护者本机执行）
 
@@ -2729,12 +2761,12 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 **契约：** 一个进程内的离线假服务器，供 `internal/app`、`internal/cli` 与 `tests/e2e` 的测试共用；只用 go-imap/v2 的 `imapserver`、`imapmemserver` 与 go-smtp 的服务端，不联网，监听 `127.0.0.1` 的随机端口，隐式 TLS 使用测试时生成的自签 CA（调用方经 `RootCAs` 信任它）。
 
 - 一个机器人账户（地址与授权码由测试给出，授权码在运行时构造），文件夹 INBOX、Junk、`Sent Messages`。
-- SMTP 收下邮件时按 L1 实测的 QQ 行为：把 `Message-Id` 改写为 `<tencent_<随机十六进制>@qq.com>`，原 ID 写入 `X-OQ-MSGID`，改写后的副本追加到「已发送」；DATA 的 250 响应为 `OK: queued as.`（不含 ID）；收件人副本放入 `Delivered()` 通道，供测试据此构造回复。
+- SMTP 收下邮件时按 L1 实测的 QQ 行为：把 `Message-Id` 改写为 `<tencent_<随机十六进制>@qq.com>`，原 ID 写入 `X-OQ-MSGID`，改写后的副本追加到「已发送」；DATA 的 250 响应不含 ID（go-smtp 服务端固定回 `OK: queued`，与 QQ 实测的 `OK: queued as.` 一样不含 ID）；收件人副本放入 `Delivered()` 通道，供测试据此构造回复。
 - 测试辅助：`Reply(delivered, from, subjectPrefix, body)` 按 QQ 邮箱 App 的结构（Task 3 的样本）合成回复；`Deliver(folder, raw)` 把任意字节追加到 INBOX 或 Junk。
-- 故障注入：AUTH 失败、MAIL/RCPT/DATA 的 4xx 与 5xx、收到结束标记后不回响应即断开（产生 `ErrUncertain`）、「已发送」副本延迟 N 秒写入或不写入（模拟关闭「保存到已发送」）、IMAP 登录失败。
+- 故障注入：AUTH 失败、MAIL/RCPT/DATA 的 4xx 与 5xx、收到结束标记后不回响应即断开（产生 `ErrUncertain`）、「已发送」副本延迟 N 秒写入或不写入（模拟关闭「保存到已发送」）、IMAP 登录失败、立即断开当前全部 IMAP 与 SMTP 连接（断网恢复用）。
 - 模拟器是测试基础设施，放在 `tests/` 下，不进入产品二进制；它有自己的测试，计入覆盖率。
 
-**测试（先写并确认失败）：** 用 `internal/mail/smtp.Send` 发一封信后，「已发送」中出现改写了 ID 的副本且 `X-OQ-MSGID` 等于原 ID；`imap.Session` 能登录、`ScanHeaders` 取到副本；每种故障注入都产生对应的客户端错误分类（`ErrAuth`、`*ReplyError` 4xx/5xx、`ErrUncertain`、`ErrAuthFailed`）；延迟写入的副本在延迟之后才出现。
+**测试（先写并确认失败）：** 用 `internal/mail/smtp.Send` 发一封信后，「已发送」中出现改写了 ID 的副本且 `X-OQ-MSGID` 等于原 ID；`imap.Session` 能登录、`ScanHeaders` 取到副本；每种故障注入都产生对应的客户端错误分类（`ErrAuth`、`*ReplyError` 4xx/5xx、`ErrUncertain`、`ErrAuthFailed`、断开后的 `ErrClosed`）；延迟写入的副本在延迟之后才出现。
 
 - [ ] **Step 1：** 写失败的测试。
 - [ ] **Step 2：** 实现。
@@ -2751,6 +2783,7 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 - `AcquireLock(dataDir string) (*Lock, error)`：以 `O_RDWR|O_CREATE|O_NOFOLLOW`、0600 打开 `<数据目录>/turncourier.lock`，`flock(LOCK_EX|LOCK_NB)`；被占用返回 `ErrAlreadyRunning`，锁文件是符号链接或不是普通文件时返回错误（错误文本不含路径）。`(*Lock) Close()` 释放。非 Unix 平台（`lock_other.go`）返回 `ErrUnsupported`。锁文件留在数据目录中，不删除（删除会让另一个进程在旧 inode 上持锁，形成两把锁）。flock 在网络文件系统上不可靠，development.md 写明数据目录须在本地磁盘。
 - `LoadSecrets(ctx, kc keychain.Store, st *sqlite.Store, instanceID string) (*Secrets, error)`：读取授权码与两类 active 密钥（`ActiveKeyID`），每把密钥解码后用 `keychain.KeyCheck` 与 `KeyCheckOf` 比对，不符返回 `ErrKeyMismatch`（「Keychain 中的密钥与登记不符」）；Keychain 读取超时或 `ErrInteractionNotAllowed` 包装为 `ErrKeychainUnavailable`。`Secrets` 持有 `*token.Key`（按 kid）、`*payload.Key` 与授权码缓存，格式化输出一律脱敏。
 - 授权码缓存：`(*Secrets) AuthCode(ctx)` 返回缓存值；`Invalidate()` 清空缓存，下一次调用重新读取 Keychain（认证失败后、熔断结束时由 Task 11 调用）。
+- Keychain 的期限：`internal/app` 在收发循环中用 `keychain.New(keychain.DefaultTimeout)`（10 秒，后台不等人输入）；`init` 的往返测试沿用 init 已有的交互期限（`InteractiveTimeout`）。
 
 **测试（先写并确认失败）：** 同一进程两次加锁第二次失败、`Close` 后可再次加锁；以测试二进制再启动一个子进程加锁，父进程持锁时子进程得到 `ErrAlreadyRunning`；锁文件为符号链接时拒绝、权限为 0600；`LoadSecrets` 用 4a 的假 Keychain：正常、条目缺失、校验值不符、交互不允许、超时；`Secrets` 的 `%v`、`%+v`、`slog` 输出不含授权码与密钥；`Invalidate` 之后重新读取。
 
@@ -2765,7 +2798,7 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 - Create: `internal/app/inbound.go`、`inbound_test.go`
 - Modify: `tests/docs/imports_test.go`（「产品代码中没有包同时导入邮件与存储」改为「只有 `internal/app`」）
 
-**契约：** `(*inbound) Handle(ctx, b imap.Batch) error` 与 `Cursor(ctx, folder)` 接到 `imap.Watcher`；「已发送」的批交给 Task 10。INBOX 与 Junk 的每封邮件按 UID 升序依次经过下列步骤，第一步不通过即以括号中的原因码调用 `RecordRejection`（只记元数据：账户、文件夹、UIDVALIDITY、UID，以及能取得时的 Message-ID、规范化发件人与任务 ID），并继续处理下一封：
+**契约：** `(*inbound) Handle(ctx, b imap.Batch) error` 与 `Cursor(ctx, folder)` 接到 `imap.Watcher`；「已发送」的批交给 Task 10。INBOX 与 Junk 的每封邮件按 UID 升序依次经过下列步骤，第一步不通过即以括号中的原因码调用 `RecordRejection`（只记元数据：账户、文件夹、UIDVALIDITY、UID，以及能取得时的 Message-ID、规范化发件人与任务 ID），并继续处理下一封。被拒记录中的任务 ID 只填已由通知行确认的任务（经 nid 或实际投递 ID 找到的通知所属的任务）：主题标签里的任务 ID 未经验证，而 `RecordRejection` 对不存在的任务返回 `ErrNotFound`。
 
 1. `Raw` 为 nil（过大）→ `too_large`。
 2. `parser.Parse` 失败，或没有 `Message-Id` → `malformed`。
@@ -2828,7 +2861,7 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 - 每次循环：熔断打开时等待到熔断结束；滚动 1 小时内已发 30 封（D8）时发出一次 `send_rate_limited` 事件并每分钟重查；否则 `ClaimNextNotification`。每次领取之前以 `AbandonedSince` 取出上次检查以来因令牌将过期或任务关闭而被放弃的通知，各发出一次 `notification_expired` 或 `notification_dropped` 事件；`ErrNoSendableNotification` 等待下一次触发；`ErrPayloadKeyUnavailable`、`ErrPayloadMissing` 发出 `payload_unavailable` 事件（通知 ID，便于人工放弃）后等待定时检查，不空转。
 - 领取成功后：`DecodeContent` 失败或渲染 `ErrTooLarge` → `AbandonNotification(rejected)` 并发出事件；令牌密钥不可用 → 重新排队 15 分钟；`token.Issue`（Claims 取自通知行）→ `token.NewTag` → `ThreadReferences(任务, 通知 ID, 20)` → `renderer.Render`（模式取 `notify.content`）→ 自检信封（来自配置，已校验）与大小 → `smtp.Send`。
 - 结果按「已定的实现细节」分流：250 → `MarkNotificationSent`，唤醒 Watcher（D6），发出 `notification_sent`；`ErrAuth` → 打开熔断、`Invalidate` 授权码、重新排队到熔断结束之后；`*ReplyError` 4xx → 按退避重新排队，5xx → `AbandonNotification(rejected)`；`ErrUncertain` → `MarkNotificationUncertain`，发出事件；其余 `ErrNotSent` → 按退避重新排队。`MarkNotificationSent` 本身失败时通知停在 SENDING，下次启动由 `RecoverSendingNotifications` 转为 UNCERTAIN，再由 D7 凭副本解除。
-- 熔断：`breaker` 由发送循环与收取循环共享。收取循环的 `auth_failed` 状态同样打开它；熔断期间 Watcher 的 `Password` 回调返回错误，Watcher 因此不登录；熔断结束后第一次取授权码重新读取 Keychain。
+- 熔断：`breaker` 由发送循环与收取循环共享。收取循环的 `auth_failed` 状态同样打开它；熔断期间 Watcher 的 `Password` 回调返回内部错误 `errBreakerOpen`，Watcher 因此不登录；熔断结束后第一次取授权码重新读取 Keychain。装配层据 `errBreakerOpen` 把随后的 `credentials_unavailable` 报告为 `auth_circuit_open`，不误报为 `keychain_unavailable`。
 - 组装好的主题与 MIME 字节只作为局部变量存在，不进入事件、错误与任何结构体字段。
 
 **测试（先写并确认失败，用 Task 7 的模拟器）：** 正常发送后通知为 SENT、「已发送」中有副本且 Watcher 被唤醒；每种 SMTP 故障的分流结果与退避时长（注入时钟）；认证失败后 15 分钟内不再领取、不登录 IMAP，结束后重新读取授权码；第 31 封被推迟而不是放弃；无法解密的通知不让循环空转；第二封通知的 `References` 含第一封的实际投递 ID；金丝雀：事件与错误中不出现主题、令牌、正文与地址，出站 MIME 字节只交给 SMTP。变异测试：先按 5xx 再判 `ErrAuth`（认证失败用例应失败）、`ErrUncertain` 改为重新排队（应失败）、去掉频率上限。
@@ -2866,7 +2899,7 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 
 - `New(Options) (*App, error)`：`Options` 含配置、Keychain、Agent、事件回调，以及只供测试注入的时钟、随机源、根证书池、SMTP 与 IMAP 期限、退避参数。
 - `(*App) Run(ctx) error`：按顺序 ① 取得单实例锁；② 以无正文密钥打开存储读取实例 ID（没有则提示先运行 `init`），`LoadSecrets` 核对密钥，关闭后以正文密钥重新打开；③ `RecoverInFlight` 与 `RecoverSendingNotifications`，结果作为事件发出；④ 启动 Watcher（`Sent: true`，共享的唤醒通道）、发送循环与派发循环；⑤ ctx 结束后依次停止三个循环、关闭存储、释放锁。①–③ 任一失败即返回错误，不启动任何循环。
-- `Event{Kind, TaskID, NotificationID, ReplySeq, Reason, Folder, Delay}`，`Kind` 为本节各任务列出的事件名与 Watcher 的状态名（`credentials_unavailable` 报告为 `keychain_unavailable`，与「4b 与 4a 的衔接」一致）。事件回调不得阻塞。
+- `Event{Kind, TaskID, NotificationID, ReplySeq, Reason, Folder, Delay}`，`Kind` 为本节各任务列出的事件名与 Watcher 的状态名（`credentials_unavailable` 报告为 `keychain_unavailable`，与「4b 与 4a 的衔接」一致；熔断引起的除外，见 Task 11）。事件回调不得阻塞。
 
 **测试（先写并确认失败）：** 启动顺序（锁被占用、实例不存在、密钥不符、Keychain 不可用时都不启动循环，也不改动数据库）；启动时存在 DISPATCHING 回复与 SENDING 通知时转为 UNCERTAIN 并发出事件；`Run` 在 ctx 结束后按序退出、锁被释放；**装配后的金丝雀测试**：用模拟器跑一轮完整的收发，主题、令牌、正文与地址都取金丝雀值，断言全部事件与错误文本中都不出现它们（4a「风险与后续」对未导出字段打印原始字节的担忧，由这一条在实际路径上覆盖）。
 
@@ -2899,7 +2932,7 @@ tests/live（L2，live 标签） ─► internal/app、store/sqlite、security/k
 
 **Files:**
 - Create: `internal/app/roundtrip.go`、`roundtrip_test.go`
-- Modify: `internal/cli/init.go`、`init_test.go`、`internal/cli/cli.go`（`InitDeps` 增加诊断与往返测试的依赖）、`cmd/turncourier/main.go`（装配生产实现）
+- Modify: `internal/cli/init.go`、`init_test.go`、`internal/cli/cli.go`（`InitDeps` 增加诊断与往返测试的依赖；`help` 的说明改为「pre-alpha：可以用 init 保存配置、授权码与密钥并做一次真实往返测试；尚不能执行任务或运行后台服务」）与 `cli_test.go`、`cmd/turncourier/main.go`（装配生产实现）
 
 **契约：**
 
