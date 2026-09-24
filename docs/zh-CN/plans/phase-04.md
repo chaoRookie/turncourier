@@ -2561,7 +2561,7 @@ D4 要求一道「与分类无关的回环刹车」：同一任务每小时至�
 | 派发契约 | `app.Agent.Deliver(ctx, sessionID, body)`：返回 nil 表示 Agent 已确认收到；返回包装 `app.ErrNotDelivered` 的错误表示确定没有送达（放回队列）；其他错误表示结果不确定（UNCERTAIN，不自动重发）。Codex 与 Claude 适配器在后续阶段实现它，届时移入 `internal/agent` | 12 |
 | 常驻命令 | 4b 不增加 `run`、`service` 等常驻命令：没有 Agent 适配器时，常驻的收发循环对用户没有用处。收发循环只在 `tests/e2e`、`init` 的真实往返测试与 L2 验收工具中运行；四个邮件模块经 `init` 进入产品二进制。解除邮件暂停（D8）、人工核对 UNCERTAIN 的命令也随常驻命令一起在后续阶段提供 | 13、15 |
 | 本地事件 | `app.Event` 只含种类、任务 ID、通知 ID、回复序号、原因码、文件夹、计数与时长，不含地址、主题、正文、令牌与授权码；由调用方注入的回调接收。被拒来信的事件按原因码聚合，同一原因码每分钟至多一次（带计数），垃圾邮件突发不会刷屏。4b 不写日志文件 | 13 |
-| 被拒记录的保留 | 被拒来信保留 30 天，运行中的 `App` 每天清理一次更早的记录，表不会随垃圾邮件无限增长。「拒绝不翻案」在清理之后仍成立，靠的是 30 天不短于令牌有效期的上限（720 小时）：记录被清理时，其中的令牌都已过期，重新判定只会以 `token_expired` 或更早的原因码拒绝。改动这两个数中的任何一个，都要重新核对这一点 | 2、13 |
+| 被拒记录的保留 | 被拒来信保留 30 天，运行中的 `App` 每天清理一次更早的记录（`PruneRejections` 单次至多删 10000 条，返回满额时继续删），表不会随垃圾邮件无限增长。「拒绝不翻案」在清理之后仍成立，靠的是 30 天不短于令牌有效期的上限（720 小时）：记录被清理时，其中的令牌都已过期，重新判定只会以 `token_expired` 或更早的原因码拒绝。改动这两个数中的任何一个，都要重新核对这一点 | 2、13 |
 | 被拒原因码增补 | `subject_tag_missing`、`subject_tag_multiple`、`subject_tag_damaged`、`token_superseded`、`rate_limited`、`mail_paused`、`empty_body`；原有代码保留 | 2 |
 | 解析器变更与摘要 | 键控摘要依赖解析器的确定性（「风险与后续」）。4b 冻结解析规则后不给摘要加版本：补扫中出现的 `message_conflict` 照常记录并告警（原回复早已处理，只是一条多余的拒绝记录）；以后修改解析规则的 PR 须评估这一点 | 3、9 |
 | 送达率 | 通知落进收件人垃圾箱（L1 人工观察）是已知约束：主题中的随机令牌本身像垃圾邮件特征。4b 做三件事：通知只用标准头部与纯文本、HTML 两个部件，不带跟踪与外链；`init` 与文档提示用户把机器人地址加入通讯录或白名单；L2 验收逐封记录通知落在收件箱还是垃圾箱。改善送达率的其他办法（例如 DKIM 对齐的发信域）不在 alpha 范围 | 5、15、16 |
@@ -2706,7 +2706,7 @@ CREATE TABLE mail_pauses (
 CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folder, message_id) WHERE message_id IS NOT NULL;
 ```
 
-按 Message-ID 查找被拒记录用上面的新索引；其余查询都落在已有的唯一约束或索引上（`notifications.message_id` 与 `delivered_message_id` 的 UNIQUE、`notifications_by_task`、`inbound_messages` 的 `UNIQUE (account, message_id)`、`inbound_rejections` 的 UID 唯一键与 `inbound_rejections_by_time`、`replies_by_task_state`），表的规模是单用户的量级。
+按 Message-ID 查找被拒记录用上面的新索引；其余查询大多落在已有的唯一约束或索引上（`notifications.message_id` 与 `delivered_message_id` 的 UNIQUE、`notifications_by_task`、`inbound_messages` 的 `UNIQUE (account, message_id)`、`inbound_rejections` 的 UID 唯一键与 `inbound_rejections_by_time`、`replies_by_task_state`）。`CountNotificationsSince`、`AbandonedSince` 扫描通知表，`TasksWithQueuedReplies` 扫描 `replies_by_task_state`（2026-09-24 审查时以 `EXPLAIN QUERY PLAN` 核实）：表的规模是单用户的量级，每次毫秒级，不为它们增加索引。
 
 **新增接口：**
 
@@ -2719,12 +2719,12 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 | `ResolveUncertainAsDelivered(ctx, id, deliveredID)` | 在一个事务中把 UNCERTAIN 通知核对为已送达并记下实际投递 ID（D7），`sent_at` 取它进入 UNCERTAIN 的时刻（核对前的 `updated_at`），不取核对时刻；通知不是 UNCERTAIN 时返回 `queue.ErrInvalidOutboxTransition`，实际投递 ID 已属于别的通知时返回 `ErrDeliveredMessageIDConflict`，两种情况都不改动数据 |
 | `ThreadReferences(ctx, taskID, beforeID, limit)` | 该任务 id 小于 `beforeID`、已记下实际投递 ID 的 SENT 通知的实际投递 ID，按 `sent_at` 升序取最后 `limit` 个（1–20） |
 | `CountNotificationsSince(ctx, since)` | 状态为 SENT 或 UNCERTAIN、且 `COALESCE(sent_at, updated_at)` 不早于 `since` 的通知数（D8 的 M）。经 D7 核对为已送达的通知按进入 UNCERTAIN 的时刻计（`sent_at` 沿用该时刻） |
-| `AbandonedSince(ctx, since)` | `updated_at` 不早于 `since`、原因为 `expired` 或 `task_closed` 的 ABANDONED 通知，按 id 升序，至多 100 条；供发送循环提示「令牌将过期而放弃」（4a「风险与后续」要求 4b 在本地提示） |
-| `SentWithoutDeliveredID(ctx, sentBefore)` | `sent_at` 早于 `sentBefore` 仍没有实际投递 ID 的 SENT 通知，按 id 升序，至多 100 条；供「副本缺失」告警 |
+| `AbandonedSince(ctx, since, afterID)` | 原因为 `expired` 或 `task_closed`、且 `(updated_at, id)` 在 `(since, afterID)` 之后（`updated_at > since`，或 `updated_at = since` 且 `id > afterID`）的 ABANDONED 通知，按 `(updated_at, id)` 升序，至多 100 条；调用方以上一次返回的最后一行为下一次的起点，返回满 100 条时继续取，同一毫秒被批量放弃的通知因此不重不漏（2026-09-24 审查后由 `(since)`、按 id 升序改为游标分页）。供发送循环提示「令牌将过期而放弃」（4a「风险与后续」要求 4b 在本地提示） |
+| `SentWithoutDeliveredID(ctx, sentBefore, afterID)` | `sent_at` 早于 `sentBefore`、`id > afterID`、仍没有实际投递 ID 的 SENT 通知，按 id 升序，至多 100 条；调用方记住已报告的最大 id（2026-09-24 审查后增加 `afterID`：关闭「保存到已发送」后这类通知只增不减，没有游标时积满 100 条就只返回最旧的 100 条，新通知不再告警）。供「副本缺失」告警 |
 | `InboundByMessageID(ctx, account, messageID)` | 按 (账户, Message-ID) 读取入站记录：任务 ID、摘要、文件夹、UIDVALIDITY、UID 与回复序号；供验证流水线在有效期与任务状态之前去重 |
 | `RejectionExists(ctx, account, folder, uidValidity, uid)` | 该封邮件是否已有被拒记录；供验证流水线跳过已经判定过的邮件 |
 | `RejectedBeforeReset(ctx, account, folder, uidValidity, messageID)` | 同一账户与文件夹中，是否有 Message-ID 相同、而 UIDVALIDITY 不同于 `uidValidity` 的被拒记录：UIDVALIDITY 重置后的全量补扫中 UID 都变了，Message-ID 没变。只认 UIDVALIDITY 不同的记录，是为了不让伪造者借一条被拒记录挡掉同一 UIDVALIDITY 下 Message-ID 相同的合法回复 |
-| `PruneRejections(ctx, before)` | 删除 `received_at` 早于 `before` 的被拒记录，返回删除条数；一次至多删 10000 条，多的留给下一次 |
+| `PruneRejections(ctx, before)` | 删除 `received_at` 早于 `before` 的被拒记录，返回删除条数；一次至多删 10000 条（一个短事务，实测 40–80 毫秒），调用方在返回值等于 10000 时继续调用 |
 | `CountAcceptedRepliesSince(ctx, taskID, since)` | 该任务 `created_at` 不早于 `since`、状态不是 REJECTED 的回复数（D8 的 1 小时与 24 小时上限都用它；调用方取窗口起点与最近一次解除时刻中较晚的一个作为 `since`） |
 | `PauseMail(ctx, taskID, reason)`、`MailPaused(ctx, taskID)`、`ResumeMail(ctx, taskID)` | D8 的持久暂停，每个任务至多一行：`PauseMail` 写入原因与 `paused_at` 并清空 `resumed_at`（正在暂停时不改动）；`MailPaused` 返回是否暂停与最近一次解除的时刻（从未解除为零值）；`ResumeMail` 记下 `resumed_at`（没有暂停时不是错误）。保留解除时刻，刹车才能只计解除之后的回复（Task 9 第 15 步） |
 | `TasksWithQueuedReplies(ctx)` | 有 QUEUED 回复、且任务状态可以派发（COMPLETED 或 WAITING_INPUT）的任务 ID，按各自最早 QUEUED 回复的序号升序 |
@@ -2805,6 +2805,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
   - `multipart/alternative`：纯文本与 HTML 两部分，均 utf-8、quoted-printable；HTML 部分由纯文本经 `html.EscapeString` 转义后放入 `white-space: pre-wrap` 的容器，不接受任何来自内容的标签；
   - 正文：`ModeFiltered` 为过滤后的 `Body`，`ModeStatus` 为固定的一句状态说明；其后是页脚，第一行为标记行，然后是任务 ID 与事件、回复说明（「直接回复本邮件即可把新消息交给该任务；请保留主题中的 [TC …] 标签，不要改动。」）、令牌副本（`RevealToken`，注明仅供核对）、内容被省略或截断时的「部分内容已省略，完整输出留在本机（任务 <ID>）」、「请把机器人地址加入通讯录，以免通知落进垃圾箱」，以及「请不要在接收本通知的邮箱中开启假期自动回复」；
   - 渲染结果超过 256 KiB 返回 `ErrTooLarge`；组装好的主题只作为局部变量存在，写入头部后即弃（D4「令牌脱敏的边界」）。
+  - `Envelope` 的 `MessageID` 与 `References` 中的每个 ID 在写入头部之前按 msg-id 的形状校验：`<` + 左部 + `@` + 右部 + `>`，只含可打印 ASCII（0x21–0x7e），不含空白与控制字符；不合法即返回错误、不渲染。这些值来自存储，而存储的 `ValidMessageID` 只要求合法 UTF-8、不含 NUL，不排除 CR、LF（2026-09-24 Task 2 质量审查指出）；它们又来自机器人自己的「已发送」，风险低，这一条是防头部注入的纵深防御。
 - `Filter(text string, scrub Scrubber) string`：按「已定的实现细节」的顺序执行，确定性，幂等（对输出再过滤一次不变）。
 
 **测试（先写并确认失败）：** 主题头的原始字节：第一行恰为 `Subject: ` 加标签，解码后等于「标签 + 空格 + 标题」，标题被拆成多个 encoded-word 时同样成立；`ParseSubject` 能从渲染结果的主题中取回同一个标签（跨包的往返测试放在 `tests/e2e`，本包用字符串断言）；页脚第一行等于 `mail.FooterMarker`，`X-TurnCourier-ID` 用 `mail.IDHeader`；过滤规则逐条的正反用例：URL 的主机与路径保留而 userinfo、查询串与片段被抹去、`file://` 链接按路径处理、`PATH=/usr/bin:/Users/…` 的每一段、`host:/path`、Windows 路径、PEM 块、`Authorization:`、`OPENAI_API_KEY=…` 与 `db_password: …`、围栏代码块计行（含没有闭合与带缩进的围栏）、双向控制与零宽字符、`Scrubber` 抹去的机密与令牌形状的串、截断——以及幂等；金丝雀：解码后的 `Subject`、`text/plain` 与 `text/html` 三处各恰好出现一次令牌文本（原始字节中 quoted-printable 的软换行可能把它拆开，所以按解码后计数），`Render` 的错误、`Content` 的 `%v` 都不含正文与令牌；`ModeStatus` 的输出（含主题）不含 `Title` 与 `Body` 中的任何金丝雀；配置 `notify.content` 的默认值、两个合法值、非法值与大小写变体键名被拒绝。
@@ -2918,7 +2919,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 - **单封来信不能卡住收取：** 下列来信都被拒绝并推进游标，批不失败——伪造的白名单发件人配上形状合法的标签（随机任务 ID、版本 1、kid 不为 0 的随机令牌，不需要任何机密）；Message-ID 为 `<>`、超过 998 个字符或非法 UTF-8；线程头中含不合法的 ID；声明 utf-8 而实为非法字节的正文；让解析器 panic 的输入（以测试替身注入）。反过来，查询因数据库错误失败时批失败、游标不前进：只有 `ErrInvalidArgument` 按找不到处理。
 - 批因数据库忙被重新交付时，已以 `rate_limited`、`sender_not_allowed`、`thread_mismatch` 拒绝的邮件不被重新判定。
 - 延后：没有实际投递 ID 时（SENT、SENDING、UNCERTAIN 各一例）返回 `ErrDefer`、游标停在前一封、记下实际投递 ID 后下一轮通过；「已发送」一直补扫失败时继续延后而不拒绝；成功的补扫开始于 10 分钟之后仍没有副本时 `thread_mismatch`；没有线程头的回复立即 `thread_mismatch`；较新的通知为 UNCERTAIN 时，回复上一条通知在缺失证据成立之前延后（`ErrDefer`），证据成立后被接受，那条通知改为凭副本核对为已送达时则以 `token_superseded` 拒绝；更新的通知中有一条 SENT 时直接 `token_superseded`（即使还有更新的 UNCERTAIN）。
-- 回环刹车：第 11 封（1 小时）与第 41 封（24 小时，注入时钟模拟慢循环）被 `rate_limited` 拒绝并暂停，此后的来信为 `mail_paused`；`ResumeMail` 之后恢复接受（时钟不动：解除之前的回复不再计入），再接受 10 封后再次暂停。
+- 回环刹车：第 11 封（1 小时）与第 41 封（24 小时，注入时钟模拟慢循环）被 `rate_limited` 拒绝并暂停，此后的来信为 `mail_paused`；`ResumeMail` 之后恢复接受（时钟不跨过窗口：解除之前的回复不再计入），再接受 10 封后再次暂停。存储按毫秒记时，刹车只计「不早于解除时刻」的回复，与解除同一毫秒接受的回复也计入（偏严的一侧），所以这个用例在回复、暂停与解除之间各让时钟前进至少 1 毫秒；完全冻结的时钟下，用例的前后两半不可能同时成立（2026-09-24 Task 2 规格审查指出，措辞随之修订）。
 - 关闭的任务得到 REJECTED 回复；正文密钥不可用时 `Handle` 返回错误且不写任何记录；金丝雀：事件与错误中不出现主题、正文、令牌、地址。
 - 变异测试：把第 3 步移到第 5 步之后（自动回复用例应失败）、去掉第 0 步、去掉第 11 步（补扫用例应失败）、去掉第 13 步、延后不要求证据（按固定时长拒绝）、只按小时计的刹车、不暂停、刹车计入解除之前的回复、`ErrInvalidArgument` 以外的查询错误也按找不到处理、去掉 `RejectedBeforeReset`、较新的 UNCERTAIN 没有证据时直接拒绝而不延后、第 13 步只查 `LatestAttemptedNotification`（中间夹着 SENT 通知的用例应失败）。
 
@@ -2943,7 +2944,9 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 | SENDING | 发送循环尚未把它标为 SENT：游标停在这封之前，安排 30 秒后唤醒 Watcher，返回 `imap.ErrDefer` |
 | PENDING、ABANDONED | 发出 `notification_copy_unexpected` 事件（可能已被人工改回待发送），不改动 |
 
-处理完成后推进「已发送」的游标。Watcher 的 `Scanned` 回调记下「已发送」最近一次成功补扫的开始时刻，供 Task 9 第 9 步判断证据；每次成功补扫之后查询 `SentWithoutDeliveredID(本轮开始时刻 − 10 分钟)`，对每条通知在本进程生命周期内只发出一次 `sent_copy_missing` 事件；连续 3 轮补扫失败（含「已发送」不在 LIST 中）时发出一次 `sent_unavailable`，恢复后清零。
+写入实际投递 ID 时的两种拒绝（2026-09-24 Task 2 规格审查后补充）：`RecordDeliveredMessageID` 或 `ResolveUncertainAsDelivered` 返回 `ErrDeliveredMessageIDConflict`（副本的 Message-ID 已记在另一条通知上）时发出 `delivered_id_conflict` 事件、不改动，照常处理下一封并推进游标；返回 `queue.ErrInvalidOutboxTransition`（读取与写入之间通知的状态已变，例如发送循环刚把它从 SENDING 标为 SENT）时重新读取该通知，按新状态再查一次上表；仍然被拒则发出事件并跳过这份副本。两者都不是基础设施错误：按「其余存储错误」处理会让整批无限重试，「已发送」的游标、D6 的证据与其后的回复都随之停摆。
+
+处理完成后推进「已发送」的游标。Watcher 的 `Scanned` 回调记下「已发送」最近一次成功补扫的开始时刻，供 Task 9 第 9 步判断证据；每次成功补扫之后以 `SentWithoutDeliveredID(本轮开始时刻 − 10 分钟, 已报告的最大 id)` 分页取完，对每条通知在本进程生命周期内只发出一次 `sent_copy_missing` 事件；连续 3 轮补扫失败（含「已发送」不在 LIST 中）时发出一次 `sent_unavailable`，恢复后清零。
 
 **测试（先写并确认失败）：** 表中每一行；不是本实例的副本、无法解析的头部、不合法的 Message-ID 与不合法的我方 ID（超长、非法 UTF-8）都被忽略且批不失败；查询因数据库错误失败时批失败、游标不前进；SENDING 的副本延后，30 秒后重试；游标推进；`Scanned` 只在成功时更新证据时刻；`sent_copy_missing` 与 `sent_unavailable` 只发一次；D7 的解除只在副本存在时发生，没有副本的 UNCERTAIN 保持不变，解除与记录在同一事务中（注入失败时两者都没有生效）。
 
@@ -2960,7 +2963,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 **契约：**
 
 - 触发：创建通知后与启动时各唤醒一次，另有 30 秒的定时检查（`not_before` 到期的通知）。
-- 每次循环：熔断打开或发送循环处于暂停时等待到结束；滚动 1 小时内已发 40 封（D8）时发出一次 `send_rate_limited` 事件并每分钟重查；否则 `ClaimNextNotification`。每次领取之前以 `AbandonedSince` 取出上次检查以来因令牌将过期或任务关闭而被放弃的通知，各发出一次 `notification_expired` 或 `notification_dropped` 事件。领取的结果：
+- 每次循环：熔断打开或发送循环处于暂停时等待到结束；滚动 1 小时内已发 40 封（D8）时发出一次 `send_rate_limited` 事件并每分钟重查；否则 `ClaimNextNotification`。每次领取之前以 `AbandonedSince`（起点是上一次取到的最后一行的 `(updated_at, id)`，返回满 100 条时继续取）取出上次检查以来因令牌将过期或任务关闭而被放弃的通知，各发出一次 `notification_expired` 或 `notification_dropped` 事件。领取的结果：
   - `ErrNoSendableNotification` 等待下一次触发；
   - `ErrPayloadMissing` 或包装 `payload.ErrDecrypt` 的错误（返回值带着该通知未改动的 PENDING 快照）→ 按「本地的永久失败」`AbandonNotification(rejected)`，发出带通知 ID 的事件，继续领取下一条；
   - `ErrPayloadKeyUnavailable` → 发出 `payload_unavailable` 事件后等待定时检查，不空转、不放弃。
@@ -3007,7 +3010,7 @@ CREATE INDEX inbound_rejections_by_message ON inbound_rejections (account, folde
 **契约：**
 
 - `New(Options) (*App, error)`：`Options` 含配置、Keychain、Agent、事件回调，以及只供测试注入的时钟、随机源、根证书池、SMTP 与 IMAP 期限、退避参数。`(*App) StartTask` 与 `(*App) TaskEvent` 转交 Task 12 的 `taskEvents`。
-- `(*App) Run(ctx) error`：按顺序 ① 取得单实例锁；② 以无正文密钥打开存储读取实例 ID（没有则提示先运行 `init`），`LoadSecrets` 核对密钥，关闭后以正文密钥重新打开；③ `RecoverInFlight` 与 `RecoverSendingNotifications`，结果作为事件发出；④ 启动 Watcher（`Sent: true`，容量为 1 的唤醒通道，`Scanned` 接 Task 10，`SkipHistory` 在 `HasNotifications` 为假时返回真，`Now` 取 App 的时钟）、发送循环、派发循环与每天一次的 `PruneRejections(now − 30 天)`；⑤ ctx 结束后依次停止各循环、关闭存储、释放锁。①–③ 任一失败即返回错误，不启动任何循环；某个循环以错误结束（例如 Task 11 的状态写入失败）时停止其余循环并返回该错误。
+- `(*App) Run(ctx) error`：按顺序 ① 取得单实例锁；② 以无正文密钥打开存储读取实例 ID（没有则提示先运行 `init`），`LoadSecrets` 核对密钥，关闭后以正文密钥重新打开；③ `RecoverInFlight` 与 `RecoverSendingNotifications`，结果作为事件发出；④ 启动 Watcher（`Sent: true`，容量为 1 的唤醒通道，`Scanned` 接 Task 10，`SkipHistory` 在 `HasNotifications` 为假时返回真，`Now` 取 App 的时钟）、发送循环、派发循环与每天一次的 `PruneRejections(now − 30 天)`（返回值等于单次上限 10000 时继续调用，直到不足 10000）；⑤ ctx 结束后依次停止各循环、关闭存储、释放锁。①–③ 任一失败即返回错误，不启动任何循环；某个循环以错误结束（例如 Task 11 的状态写入失败）时停止其余循环并返回该错误。
 - `Event{Kind, TaskID, NotificationID, ReplySeq, Reason, Folder, Count, Delay}`，`Kind` 为本节各任务列出的事件名与 Watcher 的状态名（`credentials_unavailable` 报告为 `keychain_unavailable`，与「4b 与 4a 的衔接」一致；熔断引起的除外，见 Task 11）。被拒来信的事件按原因码聚合，每分钟至多一次、带计数。事件回调不得阻塞。
 
 **测试（先写并确认失败）：** 启动顺序（锁被占用、实例不存在、密钥不符、Keychain 不可用时都不启动循环，也不改动数据库）；启动时存在 DISPATCHING 回复与 SENDING 通知时转为 UNCERTAIN 并发出事件；`Run` 在 ctx 结束后按序退出、锁被释放；一个循环以错误结束时 `Run` 返回该错误；拒绝事件的聚合与清理；**装配后的金丝雀测试**：用模拟器跑一轮完整的收发，主题、令牌、正文与地址都取金丝雀值，断言全部事件与错误文本中都不出现它们（4a「风险与后续」对未导出字段打印原始字节的担忧，由这一条在实际路径上覆盖）。
