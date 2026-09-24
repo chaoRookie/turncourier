@@ -2899,10 +2899,34 @@ B 组：须维护者在冻结解析规则之前决定（均按契约字面实现
 
 **测试（先写并确认失败）：** 主题头的原始字节：第一行恰为 `Subject: ` 加标签，解码后等于「标签 + 空格 + 标题」，标题被拆成多个 encoded-word 时同样成立；`ParseSubject` 能从渲染结果的主题中取回同一个标签（跨包的往返测试放在 `tests/e2e`，本包用字符串断言）；页脚第一行等于 `mail.FooterMarker`，`X-TurnCourier-ID` 用 `mail.IDHeader`；过滤规则逐条的正反用例：URL 的主机与路径保留而 userinfo、查询串与片段被抹去、`file://` 链接按路径处理、`PATH=/usr/bin:/Users/…` 的每一段、`host:/path`、Windows 路径、PEM 块、`Authorization:`、`OPENAI_API_KEY=…` 与 `db_password: …`、围栏代码块计行（含没有闭合与带缩进的围栏）、双向控制与零宽字符、`Scrubber` 抹去的机密与令牌形状的串、截断——以及幂等；金丝雀：解码后的 `Subject`、`text/plain` 与 `text/html` 三处各恰好出现一次令牌文本（原始字节中 quoted-printable 的软换行可能把它拆开，所以按解码后计数），`Render` 的错误、`Content` 的 `%v` 都不含正文与令牌；`ModeStatus` 的输出（含主题）不含 `Title` 与 `Body` 中的任何金丝雀；配置 `notify.content` 的默认值、两个合法值、非法值与大小写变体键名被拒绝。
 
-- [ ] **Step 1：** 写失败的测试。
-- [ ] **Step 2：** 实现，更新配置与示例、依赖表。
-- [ ] **Step 3：** `make check`、`make secrets` 通过；变异测试：去掉 HTML 转义、去掉路径规则、`ModeStatus` 仍写标题、页脚少写令牌副本、主题改用 `SetSubject`（标签进入 encoded-word），都应被拦下。
-- [ ] **Step 4：** `git commit -m "feat(renderer): render notifications with subject tag, thread headers and content filter"`
+- [x] **Step 1：** 写失败的测试。
+- [x] **Step 2：** 实现，更新配置与示例、依赖表。
+- [x] **Step 3：** `make check`、`make secrets` 通过；变异测试：去掉 HTML 转义、去掉路径规则、`ModeStatus` 仍写标题、页脚少写令牌副本、主题改用 `SetSubject`（标签进入 encoded-word），都应被拦下。
+- [x] **Step 4：** `git commit -m "feat(renderer): render notifications with subject tag, thread headers and content filter"`
+
+**实施说明（2026-09-24）：** 由独立子代理按上述契约实现（提交 `360dbfc`，由 worktree 中的 `7ab27f4` 拣选而来）。**规格审查、质量审查与独立复查都尚未进行**（维护者 2026-09-24 暂停本轮工作，留给下一次会话；审查时一并核对 Task 3 规格审查提出的「纯文本页脚含 `mail.FooterNotice + "；请保留…"`」，实现者称 `TestRenderFooter` 已断言）。先写测试，失败基线为编译失败：`internal/mail/renderer` 的 `Content`、`Scrubber`、`Envelope`、`Options`、`Tag` 未定义，`internal/config` 的 `Notify.Content`、`ContentFiltered`、`ContentStatus` 未定义；实现之后 `tests/docs` 的依赖表检查因 go-message 的使用方一栏缺 `internal/mail/renderer` 失败，更新两份依赖表后通过。
+
+- **新增用例：** 内容格式 8 个（`TestContentWireFormat`、`TestContentRoundTrip`、`TestContentInvalidUTF8`、`TestContentValidation`、`TestDecodeContentStrict`（38 种输入）、`TestContentSizeLimit`、`TestContentRedaction`、`TestContentErrorsDoNotEcho`）；过滤规则逐条 7 个与规则之间 3 个（`TestFilterOrder`、`TestFilterCrossRuleStability`、`TestFilterOmittedFlag`），每一行都同时核对再过滤一次不变；渲染 14 个（主题原始字节与 `token.ParseSubject` 往返、头部、页脚第一行单独是 `mail.FooterMarker` 且纯文本与 HTML 都含以 `mail.FooterNotice` 起头的整句、省略说明、HTML 转义、标题、金丝雀、纯状态模式、msg-id 形状、信封、标签、选项与内容的拒绝、256 KiB 上限、错误不回显），渲染结果一律用标准库独立解析并核对只用 CRLF、每行不超过 998 字节；模糊测试 `FuzzFilter`、`FuzzDecodeContent`；配置新增 `TestLoadNotifyContent`（默认值、两个合法值、7 个非法值、3 个变体键名）与 `TestRenderWritesNotifyContent`，扩充示例、往返与环境变量三个用例。
+- **变异测试：** 共 142 个，契约列出的五个都被拦下；另 137 个覆盖过滤的每条规则、规则先后、截断的长度与切口、严格解码、脱敏出口、头部、信封与 msg-id、标签与选项的校验、大小上限与 `notify.content`。首轮存活的三个（「前缀之后只要 10 个字符」「不在空白处切」「④ 在 ③ 之前」）补用例后被拦下；三个等价变异：对已编码的主题调用 `SetSubject`（纯 ASCII，不被改动）、④ 与 ⑤ 对调（⑤ 用同一份链接识别避开链接）、把回复说明写死成与常量相同的整句（常量改动时测试照样失败）。每次恢复后 SHA-256 不变。
+- **幂等：** 用规则片段随机拼接的临时测试（未提交）找出 6 类「后面的规则改动文字、下一次过滤时前面的规则判断随之改变」的问题，都已修复并以确定性用例钉住；其中一类是泄漏而不只是不幂等：按字面把 PEM 私钥块放在第 ⑥ 步时，紧贴 BEGIN 行的链接查询串或路径会先吞掉 BEGIN 行，使私钥正文漏过。修复后片段搜索约 222 万例、`FuzzFilter` 150 秒约 20 万次、`FuzzDecodeContent` 60 秒约 61 万次，都没有失败。
+- **按字面解释或补充的地方：**
+  1. 字符按 Unicode 码点计，标题至多 60 个字符（含事件名、「：」与「…」），正文连同省略号至多 4000 个字符，长度按过滤之后计。截断先硬切，每个候选切口都用 ② 至 ⑥ 复核、再过一遍不变才采用，不稳定时依次后退（逐字符至多 64 次、最后一个空白处、行首、只留「…」）。
+  2. 令牌形状：恰好 48 个 Crockford 字母表字符，不区分大小写，两侧不是字母表字符，与解析器的残留检查一致。
+  3. **唯一的顺序调整：** PEM 私钥块紧接 ②（围栏）之后整体替换，而不是按字面放在 ⑥（理由见「幂等」）。PEM 与围栏都是跨行的块，其余情况下两种顺序结果相同。
+  4. 为幂等另加的约束：行首三个以上反引号的行一律是围栏（不按 CommonMark 排除信息串含反引号的行，代价是行首的行内 ``` 也会被当作围栏）；scheme 前须是单词边界；路径起点不紧跟「]」、不伸进链接；④ 之后的规则不改写链接的 scheme。已知局限（人为构造的粘连输入，写入注释并由测试钉住）：粘在 scheme 上的串原样留下；字母表字符紧贴在 scheme 之前、连同 scheme 恰为 48 个时，链接连同 scheme 被当作令牌形状抹去，其后的查询串留下。
+  5. 围栏：开头行缩进至多 3 个空格（制表不算），至少 3 个同一字符（反引号或波浪线），闭合行不短于开头、之后只许空白，没有闭合的替换到结尾，替代文字「[代码块已省略：N 行]」保留结尾换行。
+  6. URL：止于空白、引号、尖括号、反引号与非 ASCII 标点；链接中再出现 `scheme://` 时并入同一个链接；userinfo 取到 authority 中最后一个 `@`；查询串与片段从第一个 `?` 或 `#` 起整体换成「[已省略]」；`file://` 链接整个换成「[路径已省略]」。
+  7. 路径：绝对路径至少两段且第一段非空，`~/` 与 `X:\` 之后一段即可；起点可以在行首、空白、冒号（覆盖 PATH 各段与 `host:/path`）以及非 ASCII 字符之后（可以紧贴中文）；止于空白、若干 ASCII 标点与非 ASCII 标点；相对路径不替换。
+  8. 键值与已知前缀：键名严格按契约清单、允许任意前缀（`DB_PASSWORD`、`x-api-key`），`SECRET_KEY` 这类以 `_key` 结尾的不在其列；不区分大小写，api/access/private 的 key 中 `-` 与 `_` 等价；分隔符认 `:=`、`==`、`=>`、`:`、`=`；带引号的取值只替换引号之内（认反斜杠转义），其他取值替换到行尾，空取值不动；Authorization 经键值规则处理（同时覆盖 Proxy-Authorization）；已知前缀含 GitHub、GitLab、`sk-` 与 Stripe、Slack、npm、PyPI、Hugging Face、AWS 的 AKIA/ASIA、Google 的 AIza 与 JWT。
+  9. 省略标志：② 至 ⑦ 改动了文字就算，标题截断也算，只去掉控制字符不算；纯状态模式不写这一行。控制字符：CRLF 与单独的 CR 换成换行，删除换行与制表之外的 Cc 以及全部 Cf，非法 UTF-8 换成 U+FFFD；`Filter(text, nil)` 跳过机密抹除。
+  10. 标题过滤前后都把连续空白合并为一个空格，过滤后为空时只写事件名、不带「：」；事件中文名为回合完成、等待输入、等待审批、任务失败。正文去掉首尾空行，页脚依次为标记行、「任务 <ID> · <事件名>」、回复说明（`mail.FooterNotice` 加「；请保留主题中的 [TC …] 标签，不要改动。」）、令牌副本、有省略时的说明行、联系与自动回复提示。纯状态模式的正文固定为「任务 <ID> 的新状态是「<事件>」，本通知只含状态，任务输出留在本机。」
+  11. 超出契约的校验（出错时返回固定文本的哨兵）：地址须是单个 addr-spec、至多 254 字节，日期不能为零值；标签的形状、令牌副本与任务 ID 须一致，nil 被拒绝；`Mode` 零值不合法，过滤模式必须提供 `Scrubber`。
+  12. msg-id 只校验形状：`<左部@右部>`，两部非空、只含 0x21–0x7E 且不含 `<`、`>`、`@`，总长至多 980 字节（`X-Turncourier-Id: ` 加 ID 恰好不超过 998 字节的行长上限）；不做 RFC 5322 的完整语法检查。它保证 ID 中没有空白、控制字符与非 ASCII 字符（防头部注入），接受的 ID 都能被解析器完整取回。Message-ID 与每个 References 都按此校验；In-Reply-To 取最后一个引用，References 为空时两者都不写。
+  13. 头名按 go-message 的规范形式写出（`X-Turncourier-Id`，头名不区分大小写），头部顺序由 go-message 决定。
+  14. `Content`：导出 `ContentVersion` 与 `Event*` 常量；严格解码（五个字段齐全、字段名逐字比较、不容重复、未知字段或 null、版本须是字面量 1、UTF-8 合法、对象之后只许空白）；Encode 不转义 HTML 字符；`MarshalJSON` 也输出脱敏文本。
+  15. `notify.content`：导出 `ContentFiltered`、`ContentStatus`，只接受两个精确取值、默认 filtered，错误不回显取值，不读取环境变量；init 模板与示例写出 `content = "filtered"` 并附注释「过滤不保证发现所有机密」。
+  16. renderer 的非测试代码只依赖 `internal/mail` 与 go-message；测试文件导入 `internal/security/token` 签发真实标签并核对往返（测试专用导入，依赖表测试与 `reveal_test` 都通过）。给后续任务：Task 11 把 `config.ContentFiltered`/`ContentStatus` 映射到 `renderer.ModeFiltered`/`ModeStatus`，并在 `internal/app` 断言 `renderer.MaxContentSize == payload.MaxPlaintext`；Task 8 的 `*Secrets` 实现 `Scrubber` 即可。
+- **验证：** `go test -count=1 ./internal/mail/renderer/ ./internal/config/ ./tests/docs/`、`make check`（总覆盖率 94.44%，renderer 97.3%，config 97.9%）、`make secrets`、`GOOS=linux go vet ./...`、`GOOS=windows go vet ./...`、`go vet -tags live ./tests/live/`、四个相关包的 `CGO_ENABLED=0 go test`、不可见字符检查通过。未运行：全仓 `CGO_ENABLED=0 go test ./...`；govulncheck（云端网络策略拒绝 vuln.go.dev）。
 
 ### Task 6：IMAP 扩展（`internal/mail/imap`）
 
