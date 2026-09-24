@@ -1062,3 +1062,14 @@ func TestTasksWithQueuedReplies(t *testing.T) {
 		t.Errorf("未知的任务状态: TasksWithQueuedReplies = %q, %v; want 未知状态错误", got, err)
 	}
 }
+
+// TestTasksWithQueuedRepliesSkipsInFlightOnly 验证可派发的任务只有在途回复（DISPATCHING）、没有 QUEUED 回复时不返回。
+func TestTasksWithQueuedRepliesSkipsInFlightOnly(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	completed, _ := completedTask(t, store, 1)
+	_, running := claim(t, store, completed.ID)
+	applyEvents(t, store, running, task.TurnCompleted)
+	if got, err := store.TasksWithQueuedReplies(t.Context()); err != nil || got != nil {
+		t.Errorf("只有在途回复的 COMPLETED 任务: TasksWithQueuedReplies = %q, %v; want 空", got, err)
+	}
+}

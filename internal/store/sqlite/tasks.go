@@ -1,4 +1,5 @@
-// Package sqlite 持久化任务与任务事件；状态变化只由 task 状态机决定，写入以版本号做乐观并发控制。任务的邮件触发可被持久地暂停（D8）。
+// Package sqlite 持久化任务与任务事件；任务状态的变化只由 task 状态机决定，写入以版本号做乐观并发控制。任务的邮件触发可被持久地
+// 暂停（D8）：暂停不是任务状态，不经状态机，每个任务至多一行，由 PauseMail 与 ResumeMail 直接写入。
 package sqlite
 
 import (
@@ -389,8 +390,10 @@ func (s *Store) PauseMail(ctx context.Context, taskID string, reason PauseReason
 }
 
 // MailPaused 返回任务的邮件触发是否正在暂停，以及最近一次解除的时刻：从未解除或正在暂停时为零值（解除之后再次暂停会清空它）。
-// 任务没有暂停记录（包括任务不存在）时返回 false 与零值。回环刹车只计解除时刻之后接受的回复（CountAcceptedRepliesSince），
-// 否则同一窗口里的旧回复会让它立刻再次暂停。任务 ID 不合法时在查询前返回包装 ErrInvalidArgument 的错误。
+// 任务没有暂停记录（包括任务不存在）时返回 false 与零值。回环刹车只计不早于解除时刻接受的回复：调用方以窗口起点与解除时刻中较晚的
+// 一个作为 CountAcceptedRepliesSince 的 since，否则同一窗口里的旧回复会让它立刻再次暂停；比较按毫秒，与解除同一毫秒接受的回复也计入。
+// 这是偏严的一侧：至多多计与解除同一毫秒、先于解除接受的几封，让刹车提前触发，而不会漏计解除之后接受的回复。任务 ID 不合法时在查询前
+// 返回包装 ErrInvalidArgument 的错误；读取失败（包括 ctx 结束）时返回错误，从不当作没有暂停。
 func (s *Store) MailPaused(ctx context.Context, taskID string) (paused bool, resumedAt time.Time, err error) {
 	if err := checkTaskID(taskID); err != nil {
 		return false, time.Time{}, fmt.Errorf("invalid mail pause query: %w", err)
@@ -409,9 +412,10 @@ func (s *Store) MailPaused(ctx context.Context, taskID string) (paused bool, res
 	return false, time.UnixMilli(resumed.Int64).UTC(), nil
 }
 
-// ResumeMail 解除任务的邮件暂停：正在暂停时以当前时间记下 resumed_at，时钟回拨到 paused_at 之前时取 paused_at，使表约束
-// resumed_at >= paused_at 成立；没有暂停（从未暂停或已解除）时不改动，也不是错误。任务 ID 不合法时在开始前返回包装
-// ErrInvalidArgument 的错误。4b 只提供存储接口，解除用的本地命令随常驻命令在后续阶段提供。
+// ResumeMail 解除任务的邮件暂停，只改动该任务的一行：正在暂停时记下 resumed_at = max(当前时间, paused_at)。取两者中较大的一个，
+// 是为了在时钟回拨到 paused_at 之前时仍满足表约束 resumed_at >= paused_at；代价是回拨期间刹车不计回拨幅度内接受的回复（它们的
+// created_at 早于记下的解除时刻），直到时钟重新越过 paused_at。没有暂停（从未暂停或已解除）时不改动，也不是错误。任务 ID 不合法时
+// 在开始前返回包装 ErrInvalidArgument 的错误。4b 只提供存储接口，解除用的本地命令随常驻命令在后续阶段提供。
 func (s *Store) ResumeMail(ctx context.Context, taskID string) error {
 	if err := checkTaskID(taskID); err != nil {
 		return fmt.Errorf("invalid mail resume: %w", err)

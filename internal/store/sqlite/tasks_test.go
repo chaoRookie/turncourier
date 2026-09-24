@@ -1,5 +1,5 @@
 // Package sqlite 的任务持久化测试用临时目录中的真实 SQLite 数据库验证创建、启动、事件、版本冲突、失败回滚与事件记录，
-// 邮件触发的持久暂停，以及 4b 新增接口的输入校验都包装 ErrInvalidArgument。
+// 邮件触发的持久暂停与解除之后的刹车计数，以及 4b 新增接口的输入校验都包装 ErrInvalidArgument。
 package sqlite
 
 import (
@@ -573,6 +573,90 @@ func TestMailPause(t *testing.T) {
 	if got := countRows(t, store.db, "mail_pauses"); got != 1 {
 		t.Errorf("mail_pauses 行数 = %d; want 1", got)
 	}
+}
+
+// TestMailPauseCanceledContext 验证输入合法而上下文已取消时 PauseMail、MailPaused 与 ResumeMail 返回 context.Canceled（不是
+// ErrInvalidArgument，也不是「没有暂停」）且不改动数据：暂停状态读不出来时，流水线不能把它当作没有暂停。
+func TestMailPauseCanceledContext(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	current := startTask(t, store)
+	if err := store.PauseMail(t.Context(), current.ID, PauseHourly); err != nil {
+		t.Fatalf("PauseMail 返回错误: %v", err)
+	}
+	before := dumpRows(t, store.db, "SELECT * FROM mail_pauses")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, pausedErr := store.MailPaused(ctx, current.ID)
+	for name, err := range map[string]error{
+		"MailPaused": pausedErr,
+		"PauseMail":  store.PauseMail(ctx, current.ID, PauseDaily),
+		"ResumeMail": store.ResumeMail(ctx, current.ID),
+	} {
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: err = %v; want context.Canceled", name, err)
+		}
+	}
+	if after := dumpRows(t, store.db, "SELECT * FROM mail_pauses"); len(after) != 1 || after[0] != before[0] {
+		t.Errorf("mail_pauses = %q; want 不变 %q", after, before)
+	}
+}
+
+// TestResumeMailOnlyThatTask 验证解除一个任务的暂停不影响另一个正在暂停的任务。
+func TestResumeMailOnlyThatTask(t *testing.T) {
+	store, _ := openTaskStore(t, nil)
+	ctx := t.Context()
+	first, second := startTask(t, store), startTask(t, store)
+	for _, id := range []string{first.ID, second.ID} {
+		if err := store.PauseMail(ctx, id, PauseHourly); err != nil {
+			t.Fatalf("PauseMail 返回错误: %v", err)
+		}
+	}
+	if err := store.ResumeMail(ctx, first.ID); err != nil {
+		t.Fatalf("ResumeMail 返回错误: %v", err)
+	}
+	if paused, at, err := store.MailPaused(ctx, second.ID); err != nil || !paused || !at.IsZero() {
+		t.Errorf("另一任务 MailPaused = %t, %v, %v; want 仍在暂停", paused, at, err)
+	}
+}
+
+// TestBrakeCountsFromResume 钉住回环刹车在解除之后的计数：按调用方的做法以 1 小时窗口的起点与 MailPaused 给出的解除时刻中较晚的一个
+// 为 since，计入不早于解除时刻（按毫秒）接受的回复，与解除同一毫秒接受的也计入（偏严的一侧）。冻结时钟下接受 10 封回复、暂停、解除，
+// 计数为 10；时钟前进 1 毫秒后再暂停、解除，计数为 0。
+func TestBrakeCountsFromResume(t *testing.T) {
+	store, clock := openTaskStore(t, nil)
+	ctx := t.Context()
+	current := startTask(t, store)
+	enqueueReplies(t, store, current.ID, 10)
+	// pauseAndResume 在当前时钟下暂停并随即解除该任务，失败时终止测试。
+	pauseAndResume := func(step string) {
+		t.Helper()
+		if err := store.PauseMail(ctx, current.ID, PauseHourly); err != nil {
+			t.Fatalf("%s: PauseMail 返回错误: %v", step, err)
+		}
+		if err := store.ResumeMail(ctx, current.ID); err != nil {
+			t.Fatalf("%s: ResumeMail 返回错误: %v", step, err)
+		}
+	}
+	// requireBrakeCount 按调用方的做法取刹车计数并断言它为 want。
+	requireBrakeCount := func(step string, want int) {
+		t.Helper()
+		paused, resumedAt, err := store.MailPaused(ctx, current.ID)
+		if err != nil || paused || resumedAt.IsZero() {
+			t.Fatalf("%s: MailPaused = %t, %v, %v; want 已解除", step, paused, resumedAt, err)
+		}
+		since := clock.Add(-time.Hour)
+		if resumedAt.After(since) {
+			since = resumedAt
+		}
+		if got, err := store.CountAcceptedRepliesSince(ctx, current.ID, since); err != nil || got != want {
+			t.Errorf("%s: CountAcceptedRepliesSince(%v) = %d, %v; want %d", step, since, got, err, want)
+		}
+	}
+	pauseAndResume("与回复同一毫秒")
+	requireBrakeCount("与 10 封回复同一毫秒解除", 10)
+	*clock = clock.Add(time.Millisecond)
+	pauseAndResume("1 毫秒之后")
+	requireBrakeCount("1 毫秒之后再次暂停并解除", 0)
 }
 
 // TestNewInterfacesRejectInvalidArguments 验证 4b 新增接口的每项输入校验：不合法的任务 ID（空、9 个字符、含 u、含大写字母、

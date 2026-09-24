@@ -75,7 +75,7 @@ const (
 	maxOwnerLen = 255
 	// maxThreadReferences 是 ThreadReferences 的 limit 上限：一封通知的 References 至多列出 20 个此前的实际投递 ID。
 	maxThreadReferences = 20
-	// maxNotificationList 是 AbandonedSince 与 SentWithoutDeliveredID 一次最多返回的条数。
+	// maxNotificationList 是 AbandonedSince 与 SentWithoutDeliveredID 一页最多返回的条数；返回满这个数时，调用方以本页最后一行为游标接着取。
 	maxNotificationList = 100
 )
 
@@ -117,10 +117,13 @@ const (
 		"ORDER BY coalesce(sent_at, updated_at) DESC, id DESC LIMIT 1)"
 	// latestSent 取任务的 SENT 通知中 sent_at 最晚、相同时 id 较大的一条；参数依次为任务 ID 与 SENT。
 	latestSent = "n.id = (SELECT id FROM notifications WHERE task_id = ? AND state = ? ORDER BY sent_at DESC, id DESC LIMIT 1)"
-	// abandonedSince 取 updated_at 不早于给定时刻、原因为给定两者之一的 ABANDONED 通知；参数依次为 ABANDONED、两个原因、时刻与上限。
-	abandonedSince = "n.state = ? AND n.abandon_reason IN (?, ?) AND n.updated_at >= ? ORDER BY n.id LIMIT ?"
-	// sentWithoutDelivered 取 sent_at 早于给定时刻、仍没有实际投递 ID 的 SENT 通知；参数依次为 SENT、时刻与上限。
-	sentWithoutDelivered = "n.state = ? AND n.delivered_message_id IS NULL AND n.sent_at < ? ORDER BY n.id LIMIT ?"
+	// abandonedSince 取原因为给定两者之一、位于游标 (updated_at, id) 之后的 ABANDONED 通知，按 (updated_at, id) 升序：updated_at 晚于
+	// 给定时刻，或恰为该时刻且 id 大于给定的 id。参数依次为 ABANDONED、两个原因、时刻、同一时刻、id 与上限。
+	abandonedSince = "n.state = ? AND n.abandon_reason IN (?, ?) AND (n.updated_at > ? OR (n.updated_at = ? AND n.id > ?)) " +
+		"ORDER BY n.updated_at, n.id LIMIT ?"
+	// sentWithoutDelivered 取 sent_at 早于给定时刻、仍没有实际投递 ID、id 大于给定 id 的 SENT 通知，按 id 升序；参数依次为 SENT、时刻、
+	// id 与上限。
+	sentWithoutDelivered = "n.state = ? AND n.delivered_message_id IS NULL AND n.sent_at < ? AND n.id > ? ORDER BY n.id LIMIT ?"
 )
 
 // validate 在事务开始前检查事件、域名、有效期、内容长度与任务 ID 的形式，不合法时返回包装 ErrInvalidArgument 的错误；错误文本不含内容。
@@ -314,11 +317,11 @@ func abandonPending(ctx context.Context, tx *sql.Tx, reason string, now int64, w
 	return abandonedRows, nil
 }
 
-// MarkNotificationSent 在 SMTP 返回 250 后把 SENDING 改为 SENT 并记录 sent_at；内容由触发器删除，提交后执行检查点。
+// MarkNotificationSent 在 SMTP 返回 250 后把 SENDING 改为 SENT，以当前时间记录 sent_at；内容由触发器删除，提交后执行检查点。
 // 任务在发送期间被关闭时照样记为 SENT：邮件已经发出。
 func (s *Store) MarkNotificationSent(ctx context.Context, id int64) (Notification, error) {
 	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, _ Task, now int64) error {
-		return markSent(ctx, tx, n, queue.OutboxSending, now)
+		return markSent(ctx, tx, n, queue.OutboxSending, time.UnixMilli(now).UTC(), now)
 	})
 }
 
@@ -362,13 +365,16 @@ func (s *Store) AbandonNotification(ctx context.Context, id int64, reason string
 	})
 }
 
-// ResolveUncertainNotification 记录本地核对结果：delivered 为 true 时 UNCERTAIN 改为 SENT；为 false 时改回 PENDING
-// （not_before 为当前时间），任务已关闭时改为 ABANDONED(task_closed)。进入 SENT 或 ABANDONED 时内容由触发器删除，
-// 提交后执行检查点。由本地核对调用；D7 的副本证据改走 ResolveUncertainAsDelivered。
+// ResolveUncertainNotification 记录本地核对结果：delivered 为 true 时 UNCERTAIN 改为 SENT，sent_at 取通知进入 UNCERTAIN 的时刻
+// （核对前的 updated_at）而不是核对时刻，与 D7 的副本核对（ResolveUncertainAsDelivered）相同：发出顺序与发信计数因此不随核对而变，
+// 较早进入 UNCERTAIN、在较新的通知发出之后才核对的通知不会因此成为最新的 SENT 通知（否则对较新通知的回复会被误判为
+// token_superseded），也不会在核对时刻再计入一次发信；updated_at 为核对时刻。为 false 时改回 PENDING（not_before 为当前时间），
+// 任务已关闭时改为 ABANDONED(task_closed)。进入 SENT 或 ABANDONED 时内容由触发器删除，提交后执行检查点。
+// 由本地核对调用；D7 的副本证据改走 ResolveUncertainAsDelivered。
 func (s *Store) ResolveUncertainNotification(ctx context.Context, id int64, delivered bool) (Notification, error) {
 	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, t Task, now int64) error {
 		if delivered {
-			return markSent(ctx, tx, n, queue.OutboxUncertain, now)
+			return resolveDelivered(ctx, tx, n, now)
 		}
 		return putBackNotification(ctx, tx, n, queue.OutboxUncertain, t, now, now)
 	})
@@ -399,8 +405,9 @@ func (s *Store) RecordDeliveredMessageID(ctx context.Context, id int64, messageI
 }
 
 // ResolveUncertainAsDelivered 按 D7 凭「已发送」中的副本把 UNCERTAIN 通知核对为已送达：在一个事务中改为 SENT 并记下实际投递的
-// Message-ID，状态与实际投递 ID 同时生效。sent_at 取通知进入 UNCERTAIN 的时刻（核对前的 updated_at）而不是核对时刻，通知的发出顺序
-// 与发信计数因此不随核对而变（LatestAttemptedNotification 与 CountNotificationsSince 都依赖这一点）；updated_at 为核对时刻。
+// Message-ID，状态与实际投递 ID 同时生效。与本地核对（ResolveUncertainNotification）相同，sent_at 取通知进入 UNCERTAIN 的时刻（核对前的
+// updated_at）而不是核对时刻，通知的发出顺序与发信计数因此不随核对而变（LatestAttemptedNotification、LatestSentNotification 与
+// CountNotificationsSince 都依赖这一点）；updated_at 为核对时刻。
 // deliveredID 按 ValidMessageID 校验，不合法时在开始事务前返回包装 ErrInvalidArgument 的错误。通知不是 UNCERTAIN 时返回
 // queue.ErrInvalidOutboxTransition，实际投递 ID 已属于别的通知时返回 ErrDeliveredMessageIDConflict，两种情况都不改动数据。
 // 内容由触发器删除，提交后执行检查点。解除的方向始终是「已送达」，找不到副本的 UNCERTAIN 仍等待本地核对，从不自动重发。
@@ -409,13 +416,8 @@ func (s *Store) ResolveUncertainAsDelivered(ctx context.Context, id int64, deliv
 		return Notification{}, invalidArgument("invalid notification delivered message id: must be 3-998 characters of valid UTF-8 without NUL")
 	}
 	return s.changeNotification(ctx, id, func(ctx context.Context, tx *sql.Tx, n Notification, _ Task, now int64) error {
-		next, err := nextNotification(n, queue.OutboxUncertain, queue.OutboxDelivered)
-		if err != nil {
-			return err
-		}
-		next.SentAt = n.UpdatedAt
 		// 表约束只允许 SENT 通知记录实际投递 ID，因此先改状态、再在同一事务中写入它；冲突或失败时整个事务回滚。
-		if err := updateNotification(ctx, tx, n, next, now); err != nil {
+		if err := resolveDelivered(ctx, tx, n, now); err != nil {
 			return err
 		}
 		return recordDeliveredID(ctx, tx, n.ID, deliveredID, now)
@@ -500,7 +502,7 @@ func (s *Store) NotificationByDeliveredID(ctx context.Context, deliveredID strin
 // 「最新一条已发出通知」：UNCERTAIN 多半已经送达，尚无缺失证据时按进入 UNCERTAIN 的时刻计入。uncertainAfter 由调用方按 D7 的缺失证据
 // 给出——最近一次成功补扫「已发送」的开始时刻减 10 分钟，还没有成功补扫时为零值（零值早于任何记录的时刻，全部 UNCERTAIN 都计入）；
 // updated_at 早于它的 UNCERTAIN 通知已有缺失证据，不再计入。按发出时刻而不是 id 排序：重新排队会推迟较早通知的 not_before，
-// 它可能在较新的通知之后才发出，用户最后看到的是它；经 ResolveUncertainAsDelivered 核对为已送达的通知沿用进入 UNCERTAIN 的时刻，
+// 它可能在较新的通知之后才发出，用户最后看到的是它；核对为已送达的通知（本地核对与 D7 的副本核对都如此）沿用进入 UNCERTAIN 的时刻，
 // 顺序不随核对而变。任务 ID 不合法时在查询前返回包装 ErrInvalidArgument 的错误。
 func (s *Store) LatestAttemptedNotification(ctx context.Context, taskID string, uncertainAfter time.Time) (Notification, error) {
 	if err := checkTaskID(taskID); err != nil {
@@ -509,9 +511,9 @@ func (s *Store) LatestAttemptedNotification(ctx context.Context, taskID string, 
 	return getNotification(ctx, s.db, latestAttempted, taskID, string(queue.OutboxSent), string(queue.OutboxUncertain), uncertainAfter.UnixMilli())
 }
 
-// LatestSentNotification 返回任务的 SENT 通知中 sent_at 最晚的一条（相同时取 id 较大者）；没有时返回 ErrNotFound。
-// 验证流水线据此判断有没有比令牌所属通知更新、确已发出的通知（4b Task 9 第 13 步）。任务 ID 不合法时在查询前返回包装
-// ErrInvalidArgument 的错误。
+// LatestSentNotification 返回任务的 SENT 通知中 sent_at 最晚的一条（相同时取 id 较大者）；没有时返回 ErrNotFound。核对为已送达的通知
+// 按进入 UNCERTAIN 的时刻参与（sent_at 沿用该时刻）。验证流水线据此判断有没有比令牌所属通知更新、确已发出的通知（4b Task 9 第 13 步）。
+// 任务 ID 不合法时在查询前返回包装 ErrInvalidArgument 的错误。
 func (s *Store) LatestSentNotification(ctx context.Context, taskID string) (Notification, error) {
 	if err := checkTaskID(taskID); err != nil {
 		return Notification{}, fmt.Errorf("invalid notification query: %w", err)
@@ -554,22 +556,30 @@ func (s *Store) ThreadReferences(ctx context.Context, taskID string, beforeID in
 
 // CountNotificationsSince 返回状态为 SENT 或 UNCERTAIN、且发出时刻 COALESCE(sent_at, updated_at) 不早于 since（按毫秒，恰在 since 的
 // 计入）的通知数，即 D8 全局发信上限 M 所计的「滚动窗口内已发出的通知」。SENT 按 sent_at 计，记下实际投递 ID 改动 updated_at 不影响；
-// 经 D7 核对为已送达的通知按进入 UNCERTAIN 的时刻计（sent_at 沿用该时刻）。
+// 核对为已送达的通知（本地核对与 D7 的副本核对都如此）按进入 UNCERTAIN 的时刻计（sent_at 沿用该时刻），不在核对时刻再计一次。
 func (s *Store) CountNotificationsSince(ctx context.Context, since time.Time) (int, error) {
 	return s.count(ctx, "notifications", "SELECT count(*) FROM notifications WHERE state IN (?, ?) AND coalesce(sent_at, updated_at) >= ?",
 		string(queue.OutboxSent), string(queue.OutboxUncertain), since.UnixMilli())
 }
 
-// AbandonedSince 返回 updated_at 不早于 since（按毫秒，恰在 since 的返回）、原因为 expired 或 task_closed 的 ABANDONED 通知，按 id 升序，
-// 至多 100 条；发送循环据此在本地提示「令牌将过期而放弃」与「任务已关闭而放弃」（4a「风险与后续」要求 4b 在本地提示）。
-func (s *Store) AbandonedSince(ctx context.Context, since time.Time) ([]Notification, error) {
-	return s.listNotifications(ctx, abandonedSince, string(queue.OutboxAbandoned), abandonExpired, abandonTaskClosed, since.UnixMilli(), maxNotificationList)
+// AbandonedSince 返回原因为 expired 或 task_closed、位于游标 (since, afterID) 之后的 ABANDONED 通知——updated_at 晚于 since，或恰为
+// since（按毫秒）且 id 大于 afterID——按 (updated_at, id) 升序，至多 100 条；发送循环据此在本地提示「令牌将过期而放弃」与「任务已关闭
+// 而放弃」（4a「风险与后续」要求 4b 在本地提示）。调用方记住上一次返回的最后一行的 (updated_at, id) 作为下一次的游标，返回满 100 条时
+// 接着取，直到不足 100 条：同一毫秒放弃的通知多于 100 条时（例如关闭一个积压很多通知的任务）也因此不重不漏，而只以时刻作游标，
+// 要么重复返回那一毫秒，要么漏掉其中第 100 条之后的。游标的前提是通知按 (updated_at, id) 的先后被放弃：放弃都以当前时间写 updated_at，
+// ABANDONED 是终态，之后 updated_at 不再改变；时钟回拨，或同一毫秒内读取之后才放弃一条 id 更小的通知时，它落在游标之前，不会返回。
+func (s *Store) AbandonedSince(ctx context.Context, since time.Time, afterID int64) ([]Notification, error) {
+	at := since.UnixMilli()
+	return s.listNotifications(ctx, abandonedSince, string(queue.OutboxAbandoned), abandonExpired, abandonTaskClosed, at, at, afterID, maxNotificationList)
 }
 
-// SentWithoutDeliveredID 返回 sent_at 早于 sentBefore（按毫秒，恰在 sentBefore 的不返回）、仍没有实际投递 ID 的 SENT 通知，按 id 升序，
-// 至多 100 条；供「「已发送」中找不到通知副本」告警（4b Task 10）。
-func (s *Store) SentWithoutDeliveredID(ctx context.Context, sentBefore time.Time) ([]Notification, error) {
-	return s.listNotifications(ctx, sentWithoutDelivered, string(queue.OutboxSent), sentBefore.UnixMilli(), maxNotificationList)
+// SentWithoutDeliveredID 返回 sent_at 早于 sentBefore（按毫秒，恰在 sentBefore 的不返回）、仍没有实际投递 ID、id 大于 afterID 的 SENT
+// 通知，按 id 升序，至多 100 条；供「「已发送」中找不到通知副本」告警（4b Task 10）。调用方记住已报告的最大 id 作为下一次的 afterID
+// （第一次为 0），返回满 100 条时以本页最后一行的 id 接着取：关闭「保存到已发送」后这类通知只增不减，不带游标时一次只能取到最旧的
+// 100 条，此后的通知永远不会被报告。以最大 id 为游标的前提是通知按 id 的先后越过 sentBefore：id 较小的通知因重新排队而较晚发出、
+// 在 id 较大的通知被报告之后才越过 sentBefore 时，它落在游标之前，不会返回。
+func (s *Store) SentWithoutDeliveredID(ctx context.Context, sentBefore time.Time, afterID int64) ([]Notification, error) {
+	return s.listNotifications(ctx, sentWithoutDelivered, string(queue.OutboxSent), sentBefore.UnixMilli(), afterID, maxNotificationList)
 }
 
 // HasNotifications 报告库中是否有过任何通知（任何状态，包括已放弃与已发出的）；收取循环据此判断首次运行时是否跳过历史邮件：
@@ -612,14 +622,21 @@ func (s *Store) changeNotification(ctx context.Context, id int64, change func(ct
 	return updated, nil
 }
 
-// markSent 把处于 from 的通知改为 SENT 并以 now 记录 sent_at。
-func markSent(ctx context.Context, tx *sql.Tx, n Notification, from queue.OutboxState, now int64) error {
+// markSent 把处于 from 的通知改为 SENT，sent_at 记为 sentAt，updated_at 记为 now。
+func markSent(ctx context.Context, tx *sql.Tx, n Notification, from queue.OutboxState, sentAt time.Time, now int64) error {
 	next, err := nextNotification(n, from, queue.OutboxDelivered)
 	if err != nil {
 		return err
 	}
-	next.SentAt = time.UnixMilli(now).UTC()
+	next.SentAt = sentAt
 	return updateNotification(ctx, tx, n, next, now)
+}
+
+// resolveDelivered 把 UNCERTAIN 通知 n 核对为已送达（SENT），本地核对与 D7 的副本核对共用它：sent_at 取通知进入 UNCERTAIN 的时刻，
+// 即核对前的 updated_at（UNCERTAIN 通知的 updated_at 只在进入 UNCERTAIN 时写入），而不是核对时刻 now，发出顺序与发信计数因此不随
+// 核对而变；updated_at 记为 now。通知不是 UNCERTAIN 时返回 queue.ErrInvalidOutboxTransition。
+func resolveDelivered(ctx context.Context, tx *sql.Tx, n Notification, now int64) error {
+	return markSent(ctx, tx, n, queue.OutboxUncertain, n.UpdatedAt, now)
 }
 
 // putBackNotification 处理确认未投递、处于 from 的通知：任务已关闭时改为 ABANDONED(task_closed)，已关闭任务的通知不再回到 PENDING；
