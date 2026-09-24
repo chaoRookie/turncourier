@@ -211,9 +211,11 @@ turncourier/
 │   │   ├── payload/                 # 待处理正文加密
 │   │   │   ├── payload.go           # AES-256-GCM、关联数据与密文格式
 │   │   │   └── payload_test.go      # 绑定、调换与长度测试
-│   │   └── token/                   # 回复令牌
+│   │   └── token/                   # 回复令牌与主题标签
 │   │       ├── token.go             # 签发、解析、验证与键控正文摘要
+│   │       ├── subject.go           # 主题标签类型与主题的严格文法
 │   │       ├── token_test.go        # 篡改、绑定、有效期、金丝雀与模糊测试
+│   │       ├── subject_test.go      # 文法表、往返、金丝雀与模糊测试
 │   │       └── source_test.go       # 源码检查：常数时间比较
 │   ├── store/sqlite/                # SQLite 存储
 │   │   ├── store.go                 # Open、Close 与连接参数
@@ -247,7 +249,8 @@ turncourier/
 ├── tests/                           # 跨包测试与人工执行的测试
 │   ├── docs/                        # 核对文档与代码是否一致
 │   │   ├── deps_test.go             # 依赖表与 go.mod、实际导入的比对
-│   │   └── imports_test.go          # 整仓扫描包的依赖方向
+│   │   ├── imports_test.go          # 整仓扫描包的依赖方向
+│   │   └── reveal_test.go           # 令牌明文方法只在 token 与 renderer 中引用
 │   ├── integration/                 # 跨包测试
 │   │   ├── lifecycle_test.go        # 配置、存储与状态机的完整生命周期
 │   │   └── payload_test.go          # 通知、令牌、摘要与正文密文的生命周期

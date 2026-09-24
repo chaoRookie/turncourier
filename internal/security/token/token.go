@@ -1,6 +1,7 @@
 // Package token 签发与验证回复令牌 v1：HMAC-SHA256 截断到 128 位的持有者凭证。
 // 令牌只携带版本、密钥号与随机通知 ID（nid）；任务、owner 与有效期由通知行和任务行提供并参与 MAC。
-// 本包不解析邮件，不规定令牌在邮件中的位置，也不包含线程匹配规则；这些在 L1 之后于 4b 定稿（D4）。
+// 令牌在邮件中的载体是主题标签 [TC <任务 ID> <令牌>]（D4：主题标签是唯一的验证输入），本包定义它的类型与严格文法
+// （subject.go）。本包不解析 MIME 与邮件头（主题由调用方解码后传入），不规定页脚副本的格式，也不包含线程匹配与发件人规则。
 package token
 
 import (
@@ -167,7 +168,8 @@ func (t Token) NID() NID {
 	return t.nid
 }
 
-// Reveal 返回 48 个小写字符的令牌文本；只用于写入通知正文，调用处须能被代码审查检索到。
+// Reveal 返回 48 个小写字符的令牌文本；只用于构造主题标签与页脚副本（Tag.Reveal、Tag.RevealToken）。
+// 产品代码中引用它的位置由 tests/docs/reveal_test.go 限定在本包与 internal/mail/renderer。
 func (t Token) Reveal() string {
 	raw := make([]byte, 0, rawLen)
 	raw = append(raw, Version1, t.kid)
@@ -237,11 +239,16 @@ func (k *Key) tag(nid NID, c Claims) [16]byte {
 
 // valid 检查任务 ID 为 10 个字母表字符、owner 为 1–255 字节、有效期晚于 Unix 纪元（毫秒值为正）。
 func (c Claims) valid() bool {
-	if len(c.TaskID) != 10 || len(c.Owner) == 0 || len(c.Owner) > 255 || c.ExpiresAt.UnixMilli() <= 0 {
+	return validTaskID(c.TaskID) && len(c.Owner) > 0 && len(c.Owner) <= 255 && c.ExpiresAt.UnixMilli() > 0
+}
+
+// validTaskID 判断任务 ID 是否恰为 10 个字母表字符（小写，没有 i、l、o、u）；Claims 与 NewTag 共用这一条规则。
+func validTaskID(id string) bool {
+	if len(id) != 10 {
 		return false
 	}
-	for i := range len(c.TaskID) {
-		if strings.IndexByte(alphabet, c.TaskID[i]) < 0 {
+	for i := range len(id) {
+		if strings.IndexByte(alphabet, id[i]) < 0 {
 			return false
 		}
 	}

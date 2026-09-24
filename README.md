@@ -211,9 +211,11 @@ turncourier/
 │   │   ├── payload/                 # Pending body encryption
 │   │   │   ├── payload.go           # AES-256-GCM, associated data, format
 │   │   │   └── payload_test.go      # Binding, swapping and size tests
-│   │   └── token/                   # Reply tokens
+│   │   └── token/                   # Reply tokens and subject tags
 │   │       ├── token.go             # Issue, parse, verify; keyed body digest
+│   │       ├── subject.go           # Subject tag type, strict subject grammar
 │   │       ├── token_test.go        # Tampering, binding, expiry, canary, fuzz
+│   │       ├── subject_test.go      # Grammar table, round trip, canary, fuzz
 │   │       └── source_test.go       # Source check: constant-time comparison
 │   ├── store/sqlite/                # SQLite storage
 │   │   ├── store.go                 # Open, Close, connection parameters
@@ -247,7 +249,8 @@ turncourier/
 ├── tests/                           # Cross-package and manual tests
 │   ├── docs/                        # Checks that documentation matches the code
 │   │   ├── deps_test.go             # Dependency tables against go.mod and imports
-│   │   └── imports_test.go          # Package dependency direction across the repo
+│   │   ├── imports_test.go          # Package dependency direction across the repo
+│   │   └── reveal_test.go           # Reveal and RevealToken only in token, renderer
 │   ├── integration/                 # Cross-package tests
 │   │   ├── lifecycle_test.go        # Config, storage and state machines together
 │   │   └── payload_test.go          # Notifications, tokens, digests, ciphertext
