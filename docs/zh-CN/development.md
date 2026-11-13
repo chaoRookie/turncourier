@@ -65,17 +65,17 @@ git check-ignore .local/toolchains/go/bin/go
 
 | 模块 | 版本 | 许可证 | 使用方 |
 | --- | --- | --- | --- |
-| `modernc.org/sqlite` | v1.59.0 | BSD 风格 | `internal/store/sqlite`；纯 Go 实现，构建保持 `CGO_ENABLED=0`。`tests/live` 另以只读方式打开数据库读取实例 ID |
+| `modernc.org/sqlite` | v1.62.0 | BSD 风格 | `internal/store/sqlite`；纯 Go 实现，构建保持 `CGO_ENABLED=0`。`tests/live` 另以只读方式打开数据库读取实例 ID |
 | `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`；用 `MetaData.Keys()` 列出全部键路径，与白名单逐段区分大小写比对来拒绝未知键（该库会把大小写变体匹配到字段，`MetaData.Undecoded()` 看不到它们） |
-| `golang.org/x/term` | v0.46.0 | BSD-3-Clause | `internal/cli`；`init` 以不回显方式读入授权码 |
+| `golang.org/x/term` | v0.48.0 | BSD-3-Clause | `internal/cli`；`init` 以不回显方式读入授权码 |
 | `github.com/emersion/go-smtp` | v0.25.0 | MIT | `internal/mail/smtp` 用它的客户端发信，测试用它的服务端作离线假服务器。选它而不用已冻结的 `net/smtp`：它自带命令超时，`CloseWithResponse` 还能取回服务端的 DATA 响应文本（L1 需要它查找 QQ 分配的 ID）。它不阻止在明文连接上发送凭据，因此只允许 `DialTLS`，并由源码测试钉住 |
 | `github.com/emersion/go-imap/v2` | v2.0.0-beta.8 | MIT | `internal/mail/imap` 只用 `imapclient`；`imapserver` 与 `imapmemserver` 只在测试中用作离线假服务器。仍是 beta，各 beta 之间有破坏性 API 变更，因此固定精确版本、封装在本包之后，升级 PR 须人工审阅 |
 | `github.com/emersion/go-message` | v0.18.2 | MIT | 随 `imapclient`（它导入 `go-message/mail`）进入 `internal/mail/imap`；`tests/live` 直接导入它与 `charset` 解码 GB18030、GBK |
 | `github.com/emersion/go-sasl` | 伪版本 `b788ff22d5a6` | MIT | `internal/mail/smtp` 用 `NewPlainClient` 做 `AUTH PLAIN`；go-imap/v2 也会引入它 |
-| `golang.org/x/text` | v0.42.0 | BSD-3-Clause | `tests/live/sample.go` 直接导入 `encoding/simplifiedchinese`，`go-message/charset` 也需要它，因此经 `tests/live` 进入构建图。显式固定：go-message 要求的 v0.14.0 有模块级漏洞 GO-2026-5970，修复于 v0.39.0 |
-| `golang.org/x/sys` | v0.48.0 | BSD-3-Clause | `internal/cli`；在 macOS 上经 termios 关闭终端回显。同时也是 `golang.org/x/term` 与 `modernc.org/sqlite` 的依赖 |
+| `golang.org/x/text` | v0.44.0 | BSD-3-Clause | `tests/live/sample.go` 直接导入 `encoding/simplifiedchinese`，`go-message/charset` 也需要它，因此经 `tests/live` 进入构建图。显式固定：go-message 要求的 v0.14.0 有模块级漏洞 GO-2026-5970，修复于 v0.39.0 |
+| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause | `internal/cli`；在 macOS 上经 termios 关闭终端回显。同时也是 `golang.org/x/term` 与 `modernc.org/sqlite` 的依赖 |
 
-`modernc.org/sqlite` 另外带入 `dustin/go-humanize`、`google/uuid`、`mattn/go-isatty`、`ncruces/go-strftime`、`remyoudompheng/bigfft`、`modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory`，许可证均为 MIT 或 BSD 风格；`golang.org/x/sys` 固定在 v0.48.0，这是 `golang.org/x/term` v0.46.0 的要求。选型理由与实测记录见 [Phase 3 实施清单](plans/phase-03.md) 的决策 D1 与 [Phase 4 实施清单](plans/phase-04.md) 的决策 D2。
+`modernc.org/sqlite` 另外带入 `dustin/go-humanize`、`google/uuid`、`mattn/go-isatty`、`ncruces/go-strftime`、`remyoudompheng/bigfft`、`modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory`，许可证均为 MIT 或 BSD 风格；`golang.org/x/sys` 固定在 v0.50.0，这是 `golang.org/x/term` v0.48.0 的要求。选型理由与实测记录见 [Phase 3 实施清单](plans/phase-03.md) 的决策 D1 与 [Phase 4 实施清单](plans/phase-04.md) 的决策 D2。
 
 依赖规则：
 
