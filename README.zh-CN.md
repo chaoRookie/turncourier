@@ -30,7 +30,7 @@ Phase 0–1 的研究探针（Node.js 脚本，不是产品代码）在一台 Ma
 
 ## 快速开始
 
-从源码构建。需要 Go 1.27.1（见 `go.mod`）、`make` 和 `git`。
+从源码构建。需要 Go 1.27.3（见 `go.mod`）、`make` 和 `git`。
 
 ```sh
 git clone https://github.com/chaoRookie/turncourier.git
@@ -41,7 +41,7 @@ make build
 ./dist/turncourier doctor --json
 ```
 
-如果 `PATH` 中没有 Go 1.27.1，可以把它解压到被 Git 忽略的 `.local/toolchains/go`，再执行 `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`；也可以直接指定工具链：`make build GO=/path/to/go`。
+如果 `PATH` 中没有 Go 1.27.3，可以把它解压到被 Git 忽略的 `.local/toolchains/go`，再执行 `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`；也可以直接指定工具链：`make build GO=/path/to/go`。
 
 文本输出目前是简体中文。使用 `--json` 时，字段名和状态值为英文，`description` 和 `detail` 的文字为中文。
 
@@ -106,7 +106,7 @@ make build
 | `make modverify` | `go mod verify`：模块内容须与 `go.sum` 记录的校验和一致。 |
 | `make comments` | `tools/commentcheck`：检查包、类型和具名函数的中文注释。 |
 | `make test` | `go test -race` 并写入 `coverage.out`；`tools/covercheck` 统计全部手写 Go 代码，语句覆盖率低于 80% 即失败，无排除。 |
-| `make lint` | staticcheck v0.8.1，`staticcheck.conf` 额外启用 ST1020–ST1022；再以 `-tags live` 检查 `tests/live`。 |
+| `make lint` | staticcheck v0.8.2，`staticcheck.conf` 额外启用 ST1020–ST1022；再以 `-tags live` 检查 `tests/live`。 |
 | `make check` | 包含 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint`。 |
 | `make security` | govulncheck v1.8.0 和 `secrets`。 |
 | `make secrets` | gitleaks v8.30.1 扫描全部 Git 历史、暂存区，以及受跟踪和未忽略文件的快照。仓库根目录存在 `.gitleaks.toml` 或 `.gitleaksignore` 时拒绝扫描。 |
@@ -293,7 +293,7 @@ turncourier/
 ├── README.md                        # 英文说明
 ├── README.zh-CN.md                  # 中文说明
 ├── SECURITY.md                      # 漏洞报告方式
-├── go.mod                           # 模块路径、Go 1.27.1 与依赖
+├── go.mod                           # 模块路径、Go 1.27.3 与依赖
 ├── go.sum                           # 依赖校验和
 └── staticcheck.conf                 # 启用 ST1020–ST1022
 ```

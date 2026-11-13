@@ -6,9 +6,9 @@
 
 ## 环境准备
 
-### Go 1.27.1
+### Go 1.27.3
 
-`go.mod` 要求 Go 1.27.1。仓库依赖若干第三方模块（见[第三方依赖](#第三方依赖)），首次运行 `go vet`、`go test` 或 `make check` 时，go 命令会从模块代理下载它们；`modernc.org/sqlite` 体积较大，首次下载和编译需要几分钟。
+`go.mod` 要求 Go 1.27.3。仓库依赖若干第三方模块（见[第三方依赖](#第三方依赖)），首次运行 `go vet`、`go test` 或 `make check` 时，go 命令会从模块代理下载它们；`modernc.org/sqlite` 体积较大，首次下载和编译需要几分钟。
 
 本机已经装有 Go 时，先确认版本：
 
@@ -20,20 +20,20 @@ go version
 
 ```sh
 mkdir -p .local/toolchains
-curl -fL -o .local/toolchains/go1.27.1.darwin-arm64.tar.gz https://go.dev/dl/go1.27.1.darwin-arm64.tar.gz
-echo "ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12  .local/toolchains/go1.27.1.darwin-arm64.tar.gz" | shasum -a 256 -c -
-tar -C .local/toolchains -xzf .local/toolchains/go1.27.1.darwin-arm64.tar.gz
+curl -fL -o .local/toolchains/go1.27.3.darwin-arm64.tar.gz https://go.dev/dl/go1.27.3.darwin-arm64.tar.gz
+echo "dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2  .local/toolchains/go1.27.3.darwin-arm64.tar.gz" | shasum -a 256 -c -
+tar -C .local/toolchains -xzf .local/toolchains/go1.27.3.darwin-arm64.tar.gz
 ```
 
 校验必须输出 `OK`，否则删掉归档重新下载，不要解压。如果 `.local/toolchains/go` 已经存在，先用 `.local/toolchains/go/bin/go version` 看清版本，不要解压到旧目录上。
 
-其他平台换成对应的归档名和校验值。下表数值于 2026-09-17 与 go.dev 发布清单核对；其他平台以 go.dev 下载页公布的 SHA-256 为准。升级 `go.mod` 中的 Go 版本时，同步更新本节。
+其他平台换成对应的归档名和校验值。下表数值于 2026-11-13 与 go.dev 发布清单核对；其他平台以 go.dev 下载页公布的 SHA-256 为准。升级 `go.mod` 中的 Go 版本时，同步更新本节。
 
 | 归档 | SHA-256 |
 | --- | --- |
-| `go1.27.1.darwin-arm64.tar.gz` | `ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12` |
-| `go1.27.1.darwin-amd64.tar.gz` | `8f8f52c6649542cf027bbc9b9c68d1ec042f9f34808a40413f0b8b3f66f3caa4` |
-| `go1.27.1.linux-amd64.tar.gz` | `63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445` |
+| `go1.27.3.darwin-arm64.tar.gz` | `dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2` |
+| `go1.27.3.darwin-amd64.tar.gz` | `b6f8e931e4ab497fcde6da8ae4499a58f9d258e55c8a80824a516eae5950a750` |
+| `go1.27.3.linux-amd64.tar.gz` | `65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40` |
 
 系统里没有 `shasum` 的 Linux 可以改用 `sha256sum -c -`。
 
@@ -45,7 +45,7 @@ go version
 git check-ignore .local/toolchains/go/bin/go
 ```
 
-`go version` 应输出 `go1.27.1`；`git check-ignore` 打印出路径，说明该文件已被忽略。
+`go version` 应输出 `go1.27.3`；`git check-ignore` 打印出路径，说明该文件已被忽略。
 
 不修改全局配置：
 
@@ -95,7 +95,7 @@ git check-ignore .local/toolchains/go/bin/go
 | `make modverify` | `go mod verify`，校验依赖与 `go.sum` 记录的哈希一致 | 首次下载模块依赖时 |
 | `make comments` | `go run ./tools/commentcheck .`，检查中文注释 | 否 |
 | `make test` | `go test -race -covermode=atomic -coverprofile=coverage.out ./...`，再用 `tools/covercheck` 要求覆盖率不低于 80% | 首次下载模块依赖时 |
-| `make lint` | staticcheck v0.8.1 检查 `./...`，再加 `staticcheck -tags live ./tests/live/` | 首次安装或首次下载模块依赖时 |
+| `make lint` | staticcheck v0.8.2 检查 `./...`，再加 `staticcheck -tags live ./tests/live/` | 首次安装或首次下载模块依赖时 |
 | `make check` | 依次运行 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint` | 首次下载模块依赖或安装 staticcheck 时 |
 | `make secrets` | 用 gitleaks v8.30.1 执行 `scripts/scan-secrets.sh` | 首次安装时 |
 | `make security` | 先执行 `make secrets`，再用 govulncheck v1.8.0 检查 `./...` | 是：govulncheck 每次运行都要查询 Go 漏洞数据库 |

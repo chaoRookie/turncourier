@@ -30,7 +30,7 @@ You start a Codex or Claude Code task through TurnCourier on your Mac. By defaul
 
 ## Quick start
 
-Build from source. You need Go 1.27.1 (as declared in `go.mod`), `make` and `git`.
+Build from source. You need Go 1.27.3 (as declared in `go.mod`), `make` and `git`.
 
 ```sh
 git clone https://github.com/chaoRookie/turncourier.git
@@ -41,7 +41,7 @@ make build
 ./dist/turncourier doctor --json
 ```
 
-If Go 1.27.1 is not on your `PATH`, either unpack it into `.local/toolchains/go` (ignored by Git) and run `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`, or pass the toolchain to Make: `make build GO=/path/to/go`.
+If Go 1.27.3 is not on your `PATH`, either unpack it into `.local/toolchains/go` (ignored by Git) and run `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`, or pass the toolchain to Make: `make build GO=/path/to/go`.
 
 Text output is currently in Simplified Chinese. With `--json`, keys and status values are in English; `description` and `detail` text is in Chinese.
 
@@ -106,7 +106,7 @@ Contributors should read [CONTRIBUTING.md](CONTRIBUTING.md) and the [development
 | `make modverify` | `go mod verify`: module checksums must match `go.sum`. |
 | `make comments` | `tools/commentcheck`: Chinese doc comments on packages, types and named functions. |
 | `make test` | `go test -race` writing `coverage.out`; `tools/covercheck` fails below 80% statement coverage of all hand-written Go code, with no exclusions. |
-| `make lint` | staticcheck v0.8.1, with ST1020–ST1022 enabled in `staticcheck.conf`, then the same with `-tags live` over `tests/live`. |
+| `make lint` | staticcheck v0.8.2, with ST1020–ST1022 enabled in `staticcheck.conf`, then the same with `-tags live` over `tests/live`. |
 | `make check` | `fmt-check`, `vet`, `modverify`, `comments`, `test` and `lint`. |
 | `make security` | govulncheck v1.8.0 and `secrets`. |
 | `make secrets` | gitleaks v8.30.1 over all Git history, the staged changes and a snapshot of tracked and non-ignored files. Refuses to run if `.gitleaks.toml` or `.gitleaksignore` exists at the repository root. |
@@ -293,7 +293,7 @@ turncourier/
 ├── README.md                        # English README
 ├── README.zh-CN.md                  # Chinese README
 ├── SECURITY.md                      # Vulnerability reporting
-├── go.mod                           # Module path, Go 1.27.1, dependencies
+├── go.mod                           # Module path, Go 1.27.3, dependencies
 ├── go.sum                           # Dependency checksums
 └── staticcheck.conf                 # Enables ST1020–ST1022
 ```
