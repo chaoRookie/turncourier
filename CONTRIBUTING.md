@@ -21,11 +21,11 @@ The approved scope, boundaries and target directory tree are in [docs/zh-CN/desi
 
 ## Development environment
 
-- Go 1.27.1, as declared in [go.mod](go.mod). Besides the Go standard library, the product binary links `modernc.org/sqlite` v1.59.0, `github.com/BurntSushi/toml` v1.6.0, `golang.org/x/term` v0.46.0 and `golang.org/x/sys` v0.48.0; the mail packages use the `emersion` modules and `tests/live` uses `golang.org/x/text`, and no command imports those yet. All versions are pinned in `go.mod` and `go.sum`. A new dependency must have its reason and license stated in an implementation plan or issue. Only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
+- Go 1.27.3, as declared in [go.mod](go.mod). Besides the Go standard library, the product binary links `modernc.org/sqlite` v1.59.0, `github.com/BurntSushi/toml` v1.6.0, `golang.org/x/term` v0.46.0 and `golang.org/x/sys` v0.48.0; the mail packages use the `emersion` modules and `tests/live` uses `golang.org/x/text`, and no command imports those yet. All versions are pinned in `go.mod` and `go.sum`. A new dependency must have its reason and license stated in an implementation plan or issue. Only permissive licenses such as MIT, BSD, Apache-2.0 and ISC are accepted.
 - `git`, `bash` and `tar` for `make secrets`.
 - Network access the first time each quality tool is installed, and the first time Go module dependencies are downloaded (by `make vet`, `make modverify`, `make test`, `make lint` or `make check`).
 
-If Go 1.27.1 is not your default toolchain, unpack it into `.local/toolchains/go` (ignored by Git) and put it first on `PATH` in the current shell:
+If Go 1.27.3 is not your default toolchain, unpack it into `.local/toolchains/go` (ignored by Git) and put it first on `PATH` in the current shell:
 
 ```sh
 export PATH="$PWD/.local/toolchains/go/bin:$PATH"
@@ -139,11 +139,11 @@ TurnCourier 处于 pre-alpha 阶段。没有发布版本，也没有版本标签
 
 ## 开发环境
 
-- Go 1.27.1，以 [go.mod](go.mod) 为准。除 Go 标准库外，产品二进制链接 `modernc.org/sqlite` v1.59.0、`github.com/BurntSushi/toml` v1.6.0、`golang.org/x/term` v0.46.0 与 `golang.org/x/sys` v0.48.0；邮件包使用 `emersion` 系列模块，`golang.org/x/text` 由 `tests/live` 使用，目前没有命令导入它们。版本全部固定在 `go.mod` 与 `go.sum`。新增依赖须在实施清单或 issue 中说明理由与许可证，只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。
+- Go 1.27.3，以 [go.mod](go.mod) 为准。除 Go 标准库外，产品二进制链接 `modernc.org/sqlite` v1.59.0、`github.com/BurntSushi/toml` v1.6.0、`golang.org/x/term` v0.46.0 与 `golang.org/x/sys` v0.48.0；邮件包使用 `emersion` 系列模块，`golang.org/x/text` 由 `tests/live` 使用，目前没有命令导入它们。版本全部固定在 `go.mod` 与 `go.sum`。新增依赖须在实施清单或 issue 中说明理由与许可证，只接受 MIT、BSD、Apache-2.0、ISC 等宽松许可证。
 - `make secrets` 需要 `git`、`bash` 和 `tar`。
 - 每个质量工具首次安装时需要联网；首次下载 Go 模块依赖时（由 `make vet`、`make modverify`、`make test`、`make lint` 或 `make check` 触发）也需要联网。
 
-如果默认工具链不是 Go 1.27.1，可以把它解压到被 Git 忽略的 `.local/toolchains/go`，并在当前终端把它放到 `PATH` 最前面：
+如果默认工具链不是 Go 1.27.3，可以把它解压到被 Git 忽略的 `.local/toolchains/go`，并在当前终端把它放到 `PATH` 最前面：
 
 ```sh
 export PATH="$PWD/.local/toolchains/go/bin:$PATH"

@@ -62,7 +62,7 @@ CLI output meant for people is in Chinese. JSON field names are in English.
 
 ## Packages and dependency direction
 
-The module is `github.com/chaoRookie/turncourier`. It requires Go 1.27.1 (see `go.mod`). Besides the standard library, the packages import the modules listed under [Dependencies](#dependencies).
+The module is `github.com/chaoRookie/turncourier`. It requires Go 1.27.3 (see `go.mod`). Besides the standard library, the packages import the modules listed under [Dependencies](#dependencies).
 
 ```text
 cmd/turncourier ─► internal/cli ─► internal/doctor

@@ -22,7 +22,7 @@ TurnCourier is pre-alpha. It still does not send or receive email and has no Age
 
 #### Phase 2: engineering skeleton
 
-- Go module `github.com/chaoRookie/turncourier` targeting Go 1.27.1. Production code uses only the standard library.
+- Go module `github.com/chaoRookie/turncourier` targeting Go 1.27.3. Production code uses only the standard library.
 - `turncourier` CLI with `help`, `version` and `doctor`, each with an optional `--json` flag. The planned commands `init`, `run`, `tasks`, `logs` and `service` report that they are not implemented and exit with code 2.
 - Exit codes: `0` for success; `1` when `doctor` is not ready or output cannot be written; `2` for usage errors, unknown commands and planned commands. A closed stdout pipe terminates the process by `SIGPIPE` (exit status 141).
 - Read-only `doctor`: checks the platform (only macOS is supported) and runs `git`, `codex` and `claude` with `--version`. Each tool has a 3-second timeout; on timeout the version process (on Unix, its whole process group) is killed and output is collected for at most one more second. Reports contain no executable paths or raw errors. It does not verify logins, permissions, Agent sessions or mailboxes.

@@ -30,7 +30,7 @@ You start a Codex or Claude Code task through TurnCourier on your Mac. By defaul
 
 ## Quick start
 
-Build from source. You need Go 1.27.1 (as declared in `go.mod`), `make` and `git`.
+Build from source. You need Go 1.27.3 (as declared in `go.mod`), `make` and `git`.
 
 ```sh
 git clone https://github.com/chaoRookie/turncourier.git
@@ -41,7 +41,7 @@ make build
 ./dist/turncourier doctor --json
 ```
 
-If Go 1.27.1 is not on your `PATH`, either unpack it into `.local/toolchains/go` (ignored by Git) and run `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`, or pass the toolchain to Make: `make build GO=/path/to/go`.
+If Go 1.27.3 is not on your `PATH`, either unpack it into `.local/toolchains/go` (ignored by Git) and run `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`, or pass the toolchain to Make: `make build GO=/path/to/go`.
 
 Text output is currently in Simplified Chinese. With `--json`, keys and status values are in English; `description` and `detail` text is in Chinese.
 
@@ -293,7 +293,7 @@ turncourier/
 ├── README.md                        # English README
 ├── README.zh-CN.md                  # Chinese README
 ├── SECURITY.md                      # Vulnerability reporting
-├── go.mod                           # Module path, Go 1.27.1, dependencies
+├── go.mod                           # Module path, Go 1.27.3, dependencies
 ├── go.sum                           # Dependency checksums
 └── staticcheck.conf                 # Enables ST1020–ST1022
 ```

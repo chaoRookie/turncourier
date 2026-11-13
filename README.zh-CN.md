@@ -30,7 +30,7 @@ Phase 0–1 的研究探针（Node.js 脚本，不是产品代码）在一台 Ma
 
 ## 快速开始
 
-从源码构建。需要 Go 1.27.1（见 `go.mod`）、`make` 和 `git`。
+从源码构建。需要 Go 1.27.3（见 `go.mod`）、`make` 和 `git`。
 
 ```sh
 git clone https://github.com/chaoRookie/turncourier.git
@@ -41,7 +41,7 @@ make build
 ./dist/turncourier doctor --json
 ```
 
-如果 `PATH` 中没有 Go 1.27.1，可以把它解压到被 Git 忽略的 `.local/toolchains/go`，再执行 `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`；也可以直接指定工具链：`make build GO=/path/to/go`。
+如果 `PATH` 中没有 Go 1.27.3，可以把它解压到被 Git 忽略的 `.local/toolchains/go`，再执行 `export PATH="$PWD/.local/toolchains/go/bin:$PATH"`；也可以直接指定工具链：`make build GO=/path/to/go`。
 
 文本输出目前是简体中文。使用 `--json` 时，字段名和状态值为英文，`description` 和 `detail` 的文字为中文。
 
@@ -293,7 +293,7 @@ turncourier/
 ├── README.md                        # 英文说明
 ├── README.zh-CN.md                  # 中文说明
 ├── SECURITY.md                      # 漏洞报告方式
-├── go.mod                           # 模块路径、Go 1.27.1 与依赖
+├── go.mod                           # 模块路径、Go 1.27.3 与依赖
 ├── go.sum                           # 依赖校验和
 └── staticcheck.conf                 # 启用 ST1020–ST1022
 ```
