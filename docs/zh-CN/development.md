@@ -32,8 +32,8 @@ tar -C .local/toolchains -xzf .local/toolchains/go1.27.3.darwin-arm64.tar.gz
 | 归档 | SHA-256 |
 | --- | --- |
 | `go1.27.3.darwin-arm64.tar.gz` | `dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2` |
-| `go1.27.3.darwin-amd64.tar.gz` | `8f8f52c6649542cf027bbc9b9c68d1ec042f9f34808a40413f0b8b3f66f3caa4` |
-| `go1.27.3.linux-amd64.tar.gz` | `63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445` |
+| `go1.27.3.darwin-amd64.tar.gz` | `b6f8e931e4ab497fcde6da8ae4499a58f9d258e55c8a80824a516eae5950a750` |
+| `go1.27.3.linux-amd64.tar.gz` | `65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40` |
 
 系统里没有 `shasum` 的 Linux 可以改用 `sha256sum -c -`。
 
