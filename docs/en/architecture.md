@@ -189,17 +189,17 @@ There is still no column for a plaintext body or a credential.
 
 | Module | Version | License | Used by |
 | --- | --- | --- | --- |
-| `modernc.org/sqlite` | v1.59.0 | BSD-style | `internal/store/sqlite`. Pure Go SQLite, so builds keep `CGO_ENABLED=0`. `tests/live` also opens the database read-only to read the instance ID. |
+| `modernc.org/sqlite` | v1.62.0 | BSD-style | `internal/store/sqlite`. Pure Go SQLite, so builds keep `CGO_ENABLED=0`. `tests/live` also opens the database read-only to read the instance ID. |
 | `github.com/BurntSushi/toml` | v1.6.0 | MIT | `internal/config`. The loader compares every key path from `MetaData.Keys()` against an allowlist, segment by segment and case-sensitively. `MetaData.Undecoded()` is not enough, because the library matches keys to struct fields case-insensitively. |
-| `golang.org/x/term` | v0.46.0 | BSD-3-Clause | `internal/cli`. Reads the authorization code without echoing it during `init`. |
+| `golang.org/x/term` | v0.48.0 | BSD-3-Clause | `internal/cli`. Reads the authorization code without echoing it during `init`. |
 | `github.com/emersion/go-smtp` | v0.25.0 | MIT | `internal/mail/smtp`, and its server side as the offline fake server in tests. Chosen over the frozen `net/smtp` because it has command timeouts and because `CloseWithResponse` returns the server's DATA response, which L1 needs to find the ID QQ assigns. It does not itself refuse to send credentials over plaintext, so only `DialTLS` is allowed and a source test pins that. |
 | `github.com/emersion/go-imap/v2` | v2.0.0-beta.8 | MIT | `internal/mail/imap` uses `imapclient`; `imapserver` and `imapmemserver` appear only in tests. Still a beta with breaking changes between betas, so the version is exact, the library is wrapped and an upgrade PR gets a human review. |
 | `github.com/emersion/go-message` | v0.18.2 | MIT | Reaches `internal/mail/imap` because `imapclient` imports `go-message/mail`. `tests/live` imports it directly, with `charset` for GB18030 and GBK decoding. |
 | `github.com/emersion/go-sasl` | `b788ff22d5a6` | MIT | `internal/mail/smtp` uses `NewPlainClient` for `AUTH PLAIN`; go-imap/v2 also pulls it in. |
-| `golang.org/x/text` | v0.42.0 | BSD-3-Clause | `tests/live/sample.go` imports `encoding/simplifiedchinese` directly, and `go-message/charset` needs it too, so it enters the build graph through `tests/live`. Pinned explicitly: the v0.14.0 that go-message asks for carries GO-2026-5970, fixed in v0.39.0. |
-| `golang.org/x/sys` | v0.48.0 | BSD-3-Clause | `internal/cli` turns terminal echo off through termios on macOS. Also required by `golang.org/x/term` and `modernc.org/sqlite`. |
+| `golang.org/x/text` | v0.44.0 | BSD-3-Clause | `tests/live/sample.go` imports `encoding/simplifiedchinese` directly, and `go-message/charset` needs it too, so it enters the build graph through `tests/live`. Pinned explicitly: the v0.14.0 that go-message asks for carries GO-2026-5970, fixed in v0.39.0. |
+| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause | `internal/cli` turns terminal echo off through termios on macOS. Also required by `golang.org/x/term` and `modernc.org/sqlite`. |
 
-`modernc.org/sqlite` also brings in `dustin/go-humanize`, `google/uuid`, `mattn/go-isatty`, `ncruces/go-strftime`, `remyoudompheng/bigfft`, `modernc.org/libc`, `modernc.org/mathutil` and `modernc.org/memory`, all under MIT or BSD-style licenses. `golang.org/x/sys` is pinned at v0.48.0, which `golang.org/x/term` v0.46.0 requires.
+`modernc.org/sqlite` also brings in `dustin/go-humanize`, `google/uuid`, `mattn/go-isatty`, `ncruces/go-strftime`, `remyoudompheng/bigfft`, `modernc.org/libc`, `modernc.org/mathutil` and `modernc.org/memory`, all under MIT or BSD-style licenses. `golang.org/x/sys` is pinned at v0.50.0, which `golang.org/x/term` v0.48.0 requires.
 
 The product binary links only `BurntSushi/toml`, `modernc.org/sqlite` with its dependencies, `golang.org/x/term` and `golang.org/x/sys`. The four mail modules and `golang.org/x/text` are used by tests and `tests/live` only; they enter the binary in Phase 4b, when `internal/app` wires the mail loop into a command. `go version -m dist/turncourier` is the check.
 
