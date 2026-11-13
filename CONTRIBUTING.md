@@ -38,7 +38,7 @@ Or pass the Go binary to Make:
 make GO=/path/to/go check
 ```
 
-Quality tools are pinned and installed on first use into `.local/bin/<tool>-<version>/`: staticcheck v0.8.1, govulncheck v1.8.0, gitleaks v8.30.1 and actionlint v1.7.12. `make tools` installs all four.
+Quality tools are pinned and installed on first use into `.local/bin/<tool>-<version>/`: staticcheck v0.8.2, govulncheck v1.8.0, gitleaks v8.30.1 and actionlint v1.7.12. `make tools` installs all four.
 
 ## Checks before you submit
 
@@ -156,7 +156,7 @@ go version
 make GO=/path/to/go check
 ```
 
-质量工具版本固定，首次使用时安装到 `.local/bin/<tool>-<version>/`：staticcheck v0.8.1、govulncheck v1.8.0、gitleaks v8.30.1、actionlint v1.7.12。`make tools` 一次安装全部四个。
+质量工具版本固定，首次使用时安装到 `.local/bin/<tool>-<version>/`：staticcheck v0.8.2、govulncheck v1.8.0、gitleaks v8.30.1、actionlint v1.7.12。`make tools` 一次安装全部四个。
 
 ## 提交前检查
 

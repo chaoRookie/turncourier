@@ -28,7 +28,7 @@ TurnCourier is pre-alpha. It still does not send or receive email and has no Age
 - Read-only `doctor`: checks the platform (only macOS is supported) and runs `git`, `codex` and `claude` with `--version`. Each tool has a 3-second timeout; on timeout the version process (on Unix, its whole process group) is killed and output is collected for at most one more second. Reports contain no executable paths or raw errors. It does not verify logins, permissions, Agent sessions or mailboxes.
 - `tools/commentcheck`: requires Chinese comments on packages, types and named functions, including tests and methods.
 - `tools/covercheck`: enforces at least 80% statement coverage over all handwritten Go code, with no exclusions.
-- `Makefile` targets `build`, `fmt`, `fmt-check`, `vet`, `comments`, `test`, `lint`, `check`, `security`, `secrets`, `workflows` and `tools`. Quality tools are pinned (staticcheck v0.8.1, govulncheck v1.8.0, gitleaks v8.30.1, actionlint v1.7.12) and installed into `.local/bin/`.
+- `Makefile` targets `build`, `fmt`, `fmt-check`, `vet`, `comments`, `test`, `lint`, `check`, `security`, `secrets`, `workflows` and `tools`. Quality tools are pinned (staticcheck v0.8.2, govulncheck v1.8.0, gitleaks v8.30.1, actionlint v1.7.12) and installed into `.local/bin/`.
 - `staticcheck.conf` enabling ST1020, ST1021 and ST1022, so comments on exported identifiers start with the identifier name.
 - `scripts/scan-secrets.sh`: gitleaks scan of the full Git history, the staged changes and a snapshot of tracked and untracked, non-ignored files. It refuses to run when `.gitleaks.toml` or `.gitleaksignore` exists at the repository root.
 - GitHub Actions workflows, pinned to full commit SHAs with `contents: read` permissions:

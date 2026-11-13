@@ -106,7 +106,7 @@ make build
 | `make modverify` | `go mod verify`：模块内容须与 `go.sum` 记录的校验和一致。 |
 | `make comments` | `tools/commentcheck`：检查包、类型和具名函数的中文注释。 |
 | `make test` | `go test -race` 并写入 `coverage.out`；`tools/covercheck` 统计全部手写 Go 代码，语句覆盖率低于 80% 即失败，无排除。 |
-| `make lint` | staticcheck v0.8.1，`staticcheck.conf` 额外启用 ST1020–ST1022；再以 `-tags live` 检查 `tests/live`。 |
+| `make lint` | staticcheck v0.8.2，`staticcheck.conf` 额外启用 ST1020–ST1022；再以 `-tags live` 检查 `tests/live`。 |
 | `make check` | 包含 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint`。 |
 | `make security` | govulncheck v1.8.0 和 `secrets`。 |
 | `make secrets` | gitleaks v8.30.1 扫描全部 Git 历史、暂存区，以及受跟踪和未忽略文件的快照。仓库根目录存在 `.gitleaks.toml` 或 `.gitleaksignore` 时拒绝扫描。 |

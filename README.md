@@ -106,7 +106,7 @@ Contributors should read [CONTRIBUTING.md](CONTRIBUTING.md) and the [development
 | `make modverify` | `go mod verify`: module checksums must match `go.sum`. |
 | `make comments` | `tools/commentcheck`: Chinese doc comments on packages, types and named functions. |
 | `make test` | `go test -race` writing `coverage.out`; `tools/covercheck` fails below 80% statement coverage of all hand-written Go code, with no exclusions. |
-| `make lint` | staticcheck v0.8.1, with ST1020–ST1022 enabled in `staticcheck.conf`, then the same with `-tags live` over `tests/live`. |
+| `make lint` | staticcheck v0.8.2, with ST1020–ST1022 enabled in `staticcheck.conf`, then the same with `-tags live` over `tests/live`. |
 | `make check` | `fmt-check`, `vet`, `modverify`, `comments`, `test` and `lint`. |
 | `make security` | govulncheck v1.8.0 and `secrets`. |
 | `make secrets` | gitleaks v8.30.1 over all Git history, the staged changes and a snapshot of tracked and non-ignored files. Refuses to run if `.gitleaks.toml` or `.gitleaksignore` exists at the repository root. |

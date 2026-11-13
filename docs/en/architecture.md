@@ -216,7 +216,7 @@ Dependency rules:
 - `gofmt` must report no changes under `cmd`, `internal`, `tests` and `tools`, and `go vet ./...` must pass. `vet` and `lint` each run a second time with `-tags live` over `tests/live`, so the probe code is compiled and checked even though it is never run.
 - `go mod verify` checks that the downloaded modules still match the hashes recorded in `go.sum`, so a tampered dependency cannot enter the build.
 - `commentcheck` requires a Chinese doc comment on every hand-written package, on every type (including types declared inside functions) and on every named function or method, test code included. Generated files are exempt.
-- `staticcheck` v0.8.1 runs its default checks plus ST1020, ST1021 and ST1022, which require exported identifiers' doc comments to start with the identifier name.
+- `staticcheck` v0.8.2 runs its default checks plus ST1020, ST1021 and ST1022, which require exported identifiers' doc comments to start with the identifier name.
 - `go test -race` runs with atomic coverage across every package in the module. `covercheck` then requires at least 80% statement-weighted coverage of all hand-written Go code built for the current platform, with no exclusions.
 
 `make security` runs `govulncheck` v1.8.0 and the secret scan. The scan uses gitleaks v8.30.1 to check all Git history, the staging area and a snapshot of the working tree without ignored files. It refuses to run if `.gitleaks.toml` or `.gitleaksignore` exists at the repository root. `make workflows` runs actionlint v1.7.12.

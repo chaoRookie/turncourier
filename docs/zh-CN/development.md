@@ -95,7 +95,7 @@ git check-ignore .local/toolchains/go/bin/go
 | `make modverify` | `go mod verify`，校验依赖与 `go.sum` 记录的哈希一致 | 首次下载模块依赖时 |
 | `make comments` | `go run ./tools/commentcheck .`，检查中文注释 | 否 |
 | `make test` | `go test -race -covermode=atomic -coverprofile=coverage.out ./...`，再用 `tools/covercheck` 要求覆盖率不低于 80% | 首次下载模块依赖时 |
-| `make lint` | staticcheck v0.8.1 检查 `./...`，再加 `staticcheck -tags live ./tests/live/` | 首次安装或首次下载模块依赖时 |
+| `make lint` | staticcheck v0.8.2 检查 `./...`，再加 `staticcheck -tags live ./tests/live/` | 首次安装或首次下载模块依赖时 |
 | `make check` | 依次运行 `fmt-check`、`vet`、`modverify`、`comments`、`test`、`lint` | 首次下载模块依赖或安装 staticcheck 时 |
 | `make secrets` | 用 gitleaks v8.30.1 执行 `scripts/scan-secrets.sh` | 首次安装时 |
 | `make security` | 先执行 `make secrets`，再用 govulncheck v1.8.0 检查 `./...` | 是：govulncheck 每次运行都要查询 Go 漏洞数据库 |
